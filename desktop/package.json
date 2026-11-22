@@ -1,0 +1,24 @@
+{
+  "name": "ai-canvas-studio",
+  "version": "1.4.0",
+  "private": true,
+  "description": "AI Canvas Studio — 即梦风格 AI 无限画布桌面创作工作台",
+  "main": "dist/main.js",
+  "scripts": {
+    "postinstall": "node -e \"const fs=require('fs'),cp=require('child_process');if(!fs.existsSync('node_modules/electron/path.txt'))cp.execFileSync(process.execPath,['node_modules/electron/install.js'],{stdio:'inherit'})\"",
+    "build": "tsc -p tsconfig.json",
+    "start": "npm run build && electron .",
+    "dev": "npm run build && electron . --dev",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test tests/e2e-electron.test.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "electron": "^45.4.1",
+    "typescript": "^5.6.2"
+  }
+}

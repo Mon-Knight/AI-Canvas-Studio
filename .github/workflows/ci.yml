@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend-desktop:
+    name: Frontend & Desktop Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install & verify frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npx tsc -p . --noEmit
+          npx vite build
+          node --test tests/jimeng-canvas.test.mjs tests/flow-video.test.mjs
+
+      - name: Install & verify desktop TypeScript
+        working-directory: desktop
+        run: |
+          npm ci
+          npm run typecheck
+          npm run build
+
+  backend:
+    name: Backend Agent Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install backend dependencies
+        run: pip install -e "agent[dev]"
+
+      - name: Run core backend pytest suite
+        run: |
+          pytest \
+            agent/tests/test_flow_sdk.py \
+            agent/tests/test_prompt_synth.py \
+            agent/tests/test_flow_accounts.py \
+            agent/tests/test_current_flow_video.py \
+            agent/tests/test_system_shutdown.py \
+            agent/tests/test_llm_routes.py \
+            -q

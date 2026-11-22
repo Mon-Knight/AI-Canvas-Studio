@@ -1,0 +1,131 @@
+.jm-context-anchor {
+  position: absolute;
+  display: flex;
+  z-index: 24;
+}
+
+.jm-context-generator {
+  width: 100%;
+  min-height: 0;
+  overflow: auto;
+  scrollbar-width: thin;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--surface-glass-heavy);
+  backdrop-filter: var(--blur-glass);
+  box-shadow: var(--shadow-island);
+  color: var(--text-primary);
+  font: 13px/1.5 var(--font-sans);
+}
+
+.jm-context-generator > * { flex-shrink: 0; }
+.jm-context-generator .gen-dialog__field { gap: 5px; }
+.jm-context-generator .gen-dialog__label { color: var(--text-secondary); font-size: 12px; }
+.jm-context-generator .source-image-row { padding: 4px 0; border: 0; background: transparent; }
+.jm-context-generator .source-image-row__thumb { width: 36px; height: 36px; }
+.jm-context-generator .source-image-row--empty { display: none; }
+.jm-context-generator .source-image-row--empty + .gen-dialog__hint { display: none; }
+.jm-context-generator .ref-source-row { align-items: flex-start; }
+.jm-context-generator .ref-source-chip__picker { position: static; margin-top: 4px; width: max-content; }
+.jm-context-generator .gen-dialog__textarea {
+  min-height: 104px;
+  max-height: 240px;
+  border: 1px solid var(--border-subtle);
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(9, 9, 11, 0.55);
+  color: var(--text-primary);
+  font-size: 13.5px;
+  line-height: 1.6;
+  resize: vertical;
+}
+.jm-context-generator .gen-dialog__textarea:focus {
+  border-color: rgba(56, 189, 248, 0.48);
+  box-shadow: none;
+}
+.jm-context-generator__hint { margin: 0; color: var(--text-secondary); font-size: 12px; }
+.jm-context-generator__tools {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+}
+.jm-context-generator__tools select {
+  min-width: 0;
+  max-width: 170px;
+  height: 29px;
+  padding: 0 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  background: var(--surface-3);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.jm-context-generator__tools select:focus-visible,
+.jm-context-generator button:focus-visible { outline: 2px solid var(--brand-cyan); outline-offset: 2px; }
+.jm-context-generator__submit {
+  min-width: 34px;
+  height: 34px;
+  padding: 0 9px;
+  margin-left: auto;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--cta-primary-bg);
+  color: var(--text-inverse);
+  font: 600 14px var(--font-sans);
+  cursor: pointer;
+}
+.jm-context-generator__submit:hover:not(:disabled) { background: var(--cta-primary-hover); }
+.jm-context-generator__submit:disabled { background: var(--surface-3); color: var(--text-secondary); cursor: not-allowed; }
+
+.jm-flow-context { display: grid; gap: 4px; padding: 7px 10px; border-radius: 9px; background: var(--surface-2); }
+.jm-flow-context__row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; font-size: 12px; }
+.jm-flow-context__row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); }
+.jm-flow-context__row > span { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.jm-flow-context__row button { margin-left: auto; }
+.jm-flow-context__status { color: var(--text-secondary); font-size: 12px; }
+
+.jm-credits-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: var(--radius-pill);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: #141417;
+  color: #e4e4e7;
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+.jm-credits-pill:hover {
+  background: #27272c;
+  border-color: rgba(56, 189, 248, 0.36);
+  color: #f4f4f6;
+}
+
+.jm-context-generator__submit--confirm {
+  padding: 0 13px;
+  background: #38bdf8;
+  color: #09090b;
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.jm-context-generator__submit--confirm:hover:not(:disabled) {
+  background: #7dd3fc;
+}

@@ -1,0 +1,163 @@
+.jm-left-dock--interactive {
+  --jm-dock-hit-width: 36px;
+  --jm-dock-label-opacity: 0;
+  --jm-dock-label-shift: -4px;
+  --jm-dock-chip-state: hidden;
+}
+
+.jm-left-dock--interactive:has(:focus-visible) {
+  --jm-dock-hit-width: 132px;
+  --jm-dock-label-opacity: 1;
+  --jm-dock-label-shift: 0px;
+  --jm-dock-chip-state: visible;
+}
+
+@media (any-hover: hover) {
+  .jm-left-dock--interactive:hover {
+    --jm-dock-hit-width: 132px;
+    --jm-dock-label-opacity: 1;
+    --jm-dock-label-shift: 0px;
+    --jm-dock-chip-state: visible;
+  }
+}
+
+@media (hover: none) {
+  .jm-left-dock--interactive:focus-within {
+    --jm-dock-hit-width: 132px;
+    --jm-dock-label-opacity: 1;
+    --jm-dock-label-shift: 0px;
+    --jm-dock-chip-state: visible;
+  }
+}
+
+.jm-left-dock--interactive::before {
+  opacity: var(--jm-dock-label-opacity);
+}
+
+/* Icon, intervening space, and label are a single native hit target. Only
+   the label's paint animates; pointer geometry is available immediately. */
+.jm-dock-action {
+  position: absolute;
+  inset: 0 auto 0 0;
+  display: flex;
+  align-items: center;
+  width: var(--jm-dock-hit-width);
+  border-radius: 10px;
+  padding: 0;
+  color: var(--text-secondary);
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.jm-dock-action__icon {
+  position: relative;
+  flex: 0 0 36px;
+  display: grid;
+  place-items: center;
+  height: 36px;
+  border-radius: 10px;
+  transition: background-color 100ms ease, color 100ms ease;
+}
+
+.jm-dock-action__label {
+  margin-inline-start: 14px;
+  opacity: var(--jm-dock-label-opacity);
+  transform: translateX(var(--jm-dock-label-shift));
+  font-size: 13px;
+  font-weight: 500;
+  pointer-events: none;
+  transition: opacity 110ms ease, transform 110ms var(--ease-out-quart);
+}
+
+.jm-dock-action:not(:disabled):is(:hover, :focus-visible, [aria-pressed="true"], [aria-busy="true"]) {
+  color: var(--text-primary);
+}
+
+.jm-dock-action:not(:disabled):is(:hover, :focus-visible, [aria-pressed="true"], [aria-busy="true"]) .jm-dock-action__icon,
+.jm-left-dock__row:has(.jm-dock-action__secondary:is(:hover, :focus-visible)) .jm-dock-action__icon {
+  background-color: var(--surface-active);
+  color: var(--text-primary);
+}
+
+.jm-left-dock__row:has(.jm-dock-action__secondary) .jm-dock-action {
+  width: min(88px, var(--jm-dock-hit-width));
+}
+
+.jm-left-dock--interactive .jm-dock-action__secondary {
+  position: absolute;
+  left: 92px;
+  min-height: 24px;
+  padding: 2px 9px;
+  font-size: 12px;
+  white-space: nowrap;
+  visibility: var(--jm-dock-chip-state);
+  opacity: var(--jm-dock-label-opacity);
+  transition: opacity 110ms ease, background-color 100ms ease, color 100ms ease;
+  cursor: pointer;
+}
+
+.jm-left-dock__beta {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  padding: 0 3px;
+  border-radius: 4px;
+  background: var(--surface-3);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 8px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: 0.01em;
+  pointer-events: none;
+}
+
+@media (max-height: 620px) {
+  .jm-left-dock__rail {
+    padding: 4px;
+    gap: 2px;
+  }
+  .jm-left-dock__group {
+    gap: 2px;
+  }
+  .jm-left-dock__row,
+  .jm-dock-action__icon {
+    height: 30px;
+  }
+  .jm-left-dock__divider {
+    margin: 4px auto;
+  }
+}
+
+@media (max-height: 500px) {
+  .jm-left-dock__rail {
+    max-height: calc(100dvh - 108px);
+    overflow-y: auto;
+    scrollbar-width: none;
+  }
+  .jm-left-dock__rail::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+.jm-dock-action:focus-visible,
+.jm-dock-action__secondary:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+.jm-dock-action:disabled,
+.jm-dock-action[aria-busy="true"],
+.jm-dock-action__secondary[aria-busy="true"] {
+  cursor: wait;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jm-left-dock--interactive::before,
+  .jm-dock-action__icon,
+  .jm-dock-action__label,
+  .jm-dock-action__secondary {
+    transition: none;
+  }
+}

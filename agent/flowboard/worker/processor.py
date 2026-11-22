@@ -1,0 +1,1492 @@
+"""In-process worker that drains queued generation requests.
+
+Scope for Run 3 (Phase 2 bridge): a single handler type `"proxy"` that
+forwards `params = {url, method?, headers?, body?}` through the extension
+via ``flow_client.api_request``. Further types (gen_image, gen_video,
+upload_image, etc.) land in later runs once the full Flow protocol + captcha
+round-trip is ported.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from datetime import datetime, timezone
+from typing import Any, Awaitable, Callable, Optional
+
+from flowboard.db import get_session
+from flowboard.db.models import Request
+from flowboard.node_mirror import stage_node_patch
+from flowboard.request_types import MEDIA_PRODUCING_TYPES
+from flowboard import config
+from flowboard.services import flow_accounts, media as media_service, video_routing
+from flowboard.services.flow_client import flow_client
+from flowboard.services.flow_sdk import get_flow_sdk, resolve_paygate_tier
+
+logger = logging.getLogger(__name__)
+
+
+# type → coroutine(params) → (result_dict, error_or_None)
+Handler = Callable[[dict], Awaitable[tuple[dict, Optional[str]]]]
+
+
+def _media_provider_of(params: dict) -> str:
+    """Which backend renders this dispatch: "flow" or "muse".
+
+    Per-request `media_provider` (stamped by the GenerationDialog) wins;
+    otherwise the `FLOWBOARD_MEDIA_PROVIDER` default. Unknown values fail
+    closed to "flow", preserving the existing behaviour.
+    """
+    raw = params.get("media_provider")
+    if isinstance(raw, str):
+        lowered = raw.strip().lower()
+        if lowered in ("flow", "muse"):
+            return lowered
+    return "muse" if config.MEDIA_PROVIDER_DEFAULT == "muse" else "flow"
+
+
+def _orientation_from_aspect(aspect: object) -> Optional[str]:
+    """Map Flow aspect enums to the provider-job orientation vocabulary."""
+    if not isinstance(aspect, str):
+        return None
+    upper = aspect.upper()
+    if "PORTRAIT" in upper:
+        return "VERTICAL"
+    if "LANDSCAPE" in upper:
+        return "HORIZONTAL"
+    return None
+
+
+# The `proxy` request type is a manual escape hatch, not part of any
+# generation path. Its host is the PRE-MIGRATION one: aisandbox-pa needed the
+# `Bearer ya29.…` that flow.google.com no longer mints, so a proxy call now
+# comes back `NO_FLOW_KEY` from the extension. Kept because it is a documented
+# request type with its own tests, and because it is the one place an operator
+# can still poke the old host by hand if Google ever turns it back on.
+# Everything that generates goes through flow_client.batch_rpc instead.
+_ALLOWED_URL_PREFIXES: tuple[str, ...] = (
+    "https://aisandbox-pa.googleapis.com/",
+)
+
+
+async def _handle_proxy(params: dict) -> tuple[dict, Optional[str]]:
+    url = params.get("url")
+    method = params.get("method", "POST")
+    if not isinstance(url, str) or not url:
+        return {}, "missing_url"
+    # Defense-in-depth: refuse to proxy URLs outside the expected allowlist
+    # even if the extension's own check was somehow bypassed.
+    if not any(url.startswith(p) for p in _ALLOWED_URL_PREFIXES):
+        return {}, "url_not_allowed"
+    resp = await flow_client.api_request(
+        url=url,
+        method=method,
+        headers=params.get("headers") or {},
+        body=params.get("body"),
+    )
+    if not isinstance(resp, dict):
+        return {"value": resp}, None
+    if resp.get("error"):
+        return resp, str(resp["error"])[:200]
+    status = resp.get("status")
+    if isinstance(status, int) and status >= 400:
+        return resp, f"API_{status}"
+    return resp, None
+
+
+async def _handle_create_project(params: dict) -> tuple[dict, Optional[str]]:
+    name = params.get("name") or params.get("title") or "Untitled"
+    if not isinstance(name, str) or not name.strip():
+        return {}, "missing_name"
+    tool = params.get("tool", "PINHOLE")
+    resp = await get_flow_sdk().create_project(name.strip(), tool)
+    if resp.get("error"):
+        return resp, str(resp["error"])[:200]
+    return resp, None
+
+
+def _resolve_effective_image_model(params: dict) -> Optional[str]:
+    image_model = params.get("image_model")
+    if not isinstance(image_model, str) or not image_model.strip():
+        return None
+    model = image_model.strip()
+    thinking = params.get("thinking_level")
+    if model == "NANO_BANANA_2_1" and isinstance(thinking, str):
+        lvl = thinking.strip().lower()
+        if lvl in ("low", "med", "high"):
+            return f"NANO_BANANA_2_1_{lvl.upper()}"
+    return model
+
+
+def _sniff_image_mime(data: bytes) -> str:
+    if len(data) >= 8 and data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if len(data) >= 6 and data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    return "image/jpeg"
+
+
+async def _maybe_upscale_image_resp(
+    resp: dict,
+    project_id: str,
+    target_resolution: object,
+) -> None:
+    """Best-effort 2K/4K SPrCad upscale on generated/edited image variants."""
+    res = str(target_resolution or "1K").strip().upper()
+    if res not in ("2K", "4K"):
+        resp["resolution"] = "1K"
+        return
+
+    media_ids = list(resp.get("media_ids") or [])
+    if not media_ids:
+        resp["resolution"] = "1K"
+        return
+
+    import base64 as _b64
+
+    sdk = get_flow_sdk()
+    upscaled_any = False
+    warnings: list[str] = []
+    entries = list(resp.get("media_entries") or [])
+
+    for idx, mid in enumerate(media_ids):
+        if not isinstance(mid, str) or not mid:
+            continue
+        up = await sdk.upscale_image(mid, project_id, res)
+        if up.get("error"):
+            warnings.append(str(up["error"])[:120])
+            continue
+        encoded = up.get("encoded_image")
+        new_mid = up.get("media_id") if isinstance(up.get("media_id"), str) and up.get("media_id") else mid
+        new_url = up.get("url") if isinstance(up.get("url"), str) and up.get("url") else None
+        if isinstance(encoded, str) and encoded:
+            try:
+                raw_bytes = _b64.b64decode(encoded, validate=False)
+                media_service.ingest_inline_bytes(
+                    new_mid, raw_bytes, kind="image", mime=_sniff_image_mime(raw_bytes)
+                )
+                media_ids[idx] = new_mid
+                upscaled_any = True
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(str(exc)[:120])
+        elif new_url:
+            media_service.ingest_urls([{"media_id": new_mid, "url": new_url, "mediaType": "image"}])
+            media_ids[idx] = new_mid
+            for ent in entries:
+                if isinstance(ent, dict) and ent.get("media_id") == mid:
+                    ent["media_id"] = new_mid
+                    ent["url"] = new_url
+            upscaled_any = True
+
+    resp["media_ids"] = media_ids
+    resp["media_entries"] = entries
+    resp["resolution"] = res if upscaled_any and not warnings else ("1K" if not upscaled_any else res)
+    if warnings:
+        resp["upscale_warning"] = "; ".join(warnings)[:200]
+
+
+async def _maybe_upscale_video_slots(
+    sdk,
+    *,
+    positional_ids: list[Optional[str]],
+    succeeded_entries: list[dict],
+    project_id: str,
+    aspect_ratio: str,
+    requested_resolution: str,
+    base_resolution: str = "720p",
+    rid: Optional[int] = None,
+) -> tuple[list[Optional[str]], list[dict], str, Optional[str]]:
+    """Best-effort 1080p/4K UPSAMPLE_VIDEO pass after base 720p clips settle."""
+    norm = str(requested_resolution or "720p").strip().lower()
+    if norm not in ("1080p", "4k"):
+        actual_base = "360p" if str(base_resolution).strip().lower() == "360p" else "720p"
+        return positional_ids, succeeded_entries, actual_base, None
+
+    target_label = "4K" if norm == "4k" else "1080p"
+    slot_to_op: dict[int, str] = {}
+    submit_errors: list[str] = []
+
+    for idx, mid in enumerate(positional_ids):
+        if not isinstance(mid, str) or not mid:
+            continue
+        up = await sdk.upscale_video(
+            mid, project_id, aspect_ratio=aspect_ratio, resolution=target_label
+        )
+        ops = up.get("operation_names") or []
+        if up.get("error") or not ops:
+            submit_errors.append(str(up.get("error") or "upscale_submit_failed")[:120])
+            continue
+        slot_to_op[idx] = ops[0]
+
+    if not slot_to_op:
+        return positional_ids, succeeded_entries, "720p", "; ".join(submit_errors)[:200] or None
+
+    op_names = list(slot_to_op.values())
+    done_by_op: dict[str, bool] = {op: False for op in op_names}
+    entry_by_op: dict[str, dict] = {}
+    attempts = 0
+    while attempts < VIDEO_POLL_MAX_CYCLES and not all(done_by_op.values()):
+        await asyncio.sleep(VIDEO_POLL_INTERVAL_S)
+        attempts += 1
+        if _is_request_canceled(rid):
+            break
+        poll = await sdk.check_async(op_names)
+        if poll.get("error"):
+            continue
+        for op in poll.get("operations") or []:
+            if not isinstance(op, dict):
+                continue
+            name = op.get("name")
+            if not isinstance(name, str) or done_by_op.get(name, False):
+                continue
+            if op.get("error"):
+                done_by_op[name] = True
+                submit_errors.append(str(op["error"])[:120])
+                continue
+            if op.get("done"):
+                done_by_op[name] = True
+                for ent in op.get("media_entries") or []:
+                    if isinstance(ent, dict) and ent.get("media_id"):
+                        entry_by_op[name] = ent
+                        break
+
+    new_entries_map = {e.get("media_id"): e for e in succeeded_entries if isinstance(e, dict)}
+    upscaled_any = False
+    for idx, op_name in slot_to_op.items():
+        ent = entry_by_op.get(op_name)
+        if not isinstance(ent, dict) or not isinstance(ent.get("media_id"), str):
+            continue
+        old_mid = positional_ids[idx]
+        new_mid = ent["media_id"]
+        if ent.get("url"):
+            try:
+                media_service.ingest_urls([ent])
+            except Exception:  # noqa: BLE001
+                logger.exception("upscaled video url ingest failed")
+        if isinstance(ent.get("encoded_video"), str):
+            try:
+                import base64 as _b64
+                media_service.ingest_inline_bytes(
+                    new_mid,
+                    _b64.b64decode(ent["encoded_video"], validate=False),
+                    kind="video",
+                    mime="video/mp4",
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("upscaled video inline ingest failed")
+        if old_mid and old_mid in new_entries_map:
+            del new_entries_map[old_mid]
+        new_entries_map[new_mid] = ent
+        positional_ids[idx] = new_mid
+        upscaled_any = True
+
+    actual_res = target_label if upscaled_any else "720p"
+    warning = "; ".join(submit_errors)[:200] if submit_errors else None
+    return positional_ids, list(new_entries_map.values()), actual_res, warning
+
+
+async def _handle_gen_image(params: dict) -> tuple[dict, Optional[str]]:
+    from flowboard.services.flow_sdk import is_valid_project_id
+
+    prompt = params.get("prompt")
+    project_id = params.get("project_id")
+    if not isinstance(prompt, str) or not prompt.strip():
+        return {}, "missing_prompt"
+    if _media_provider_of(params) == "muse":
+        # Muse path needs no Flow project, tier, or model key — the Pax
+        # worker renders from prompt + refs alone.
+        from flowboard.services.muse_media import run_muse_media
+
+        raw_ref_ids = params.get("ref_media_ids")
+        if not isinstance(raw_ref_ids, list):
+            raw_ref_ids = params.get("character_media_ids")
+        ref_media_ids = None
+        if isinstance(raw_ref_ids, list):
+            cleaned = [m for m in raw_ref_ids if isinstance(m, str) and m]
+            ref_media_ids = cleaned or None
+        raw_count = params.get("variant_count")
+        variant_count = raw_count if isinstance(raw_count, int) and raw_count > 0 else 1
+        raw_prompts = params.get("prompts")
+        per_variant_prompts = None
+        if isinstance(raw_prompts, list):
+            cleaned = [p for p in raw_prompts if isinstance(p, str) and p.strip()]
+            per_variant_prompts = cleaned or None
+        return await run_muse_media(
+            kind="image",
+            prompt=prompt.strip(),
+            orientation=_orientation_from_aspect(params.get("aspect_ratio")),
+            reference_media_ids=ref_media_ids,
+            extra={
+                "variant_count": variant_count,
+                "prompts": per_variant_prompts,
+            },
+        )
+    if not isinstance(project_id, str) or not project_id.strip():
+        return {}, "missing_project_id"
+    project_id = project_id.strip()
+    if not is_valid_project_id(project_id):
+        return {}, "invalid_project_id"
+    aspect = params.get("aspect_ratio") or "IMAGE_ASPECT_RATIO_LANDSCAPE"
+    # Tier resolution: caller-stamped value first (set at dispatch time),
+    # then whatever `flow_client` managed to resolve, then the configured
+    # default. That last link is new, and it is not a silent default — it is
+    # the only remaining source. The live value came from /v1/credits, fetched
+    # with the Bearer token the extension sniffed, and flow.google.com mints no
+    # Bearer, so `flow_client.paygate_tier` is now permanently None. Keeping
+    # the old "fail loud when absent" rule would have meant failing every
+    # single dispatch.
+    #
+    # The concern behind that rule still stands: the tier picks the video
+    # checkpoint, and the pre-v1.1.5 hardcoded `PAYGATE_TIER_ONE` silently
+    # downgraded Ultra users to Pro and stamped the wrong tier into
+    # request.params, which fed back through
+    # `_last_observed_paygate_tier_from_db()` and corrupted /api/auth/me for
+    # the rest of the session. So the plan is declared once in config
+    # (FLOWBOARD_PAYGATE_TIER) and an unrecognised value still fails loud —
+    # see flow_sdk.resolve_paygate_tier.
+    try:
+        tier = resolve_paygate_tier(
+            params.get("paygate_tier") or flow_client.paygate_tier
+        )
+    except ValueError as exc:
+        return {}, str(exc)[:200]
+    # `ref_media_ids` is the broader name (any upstream image / character /
+    # visual_asset feeds in as IMAGE_INPUT_TYPE_REFERENCE). Older callers used
+    # `character_media_ids` — accept both.
+    raw_ref_ids = params.get("ref_media_ids")
+    if not isinstance(raw_ref_ids, list):
+        raw_ref_ids = params.get("character_media_ids")
+    ref_media_ids: Optional[list[str]] = None
+    if isinstance(raw_ref_ids, list):
+        cleaned = [m for m in raw_ref_ids if isinstance(m, str) and m]
+        ref_media_ids = cleaned or None
+    raw_count = params.get("variant_count")
+    variant_count = 1
+    if isinstance(raw_count, int) and raw_count > 0:
+        variant_count = raw_count
+    # Per-variant prompts (optional). When provided, each variant gets its
+    # own text — used by auto-prompt batch mode so variants don't collapse
+    # to the same stance.
+    raw_prompts = params.get("prompts")
+    per_variant_prompts: Optional[list[str]] = None
+    if isinstance(raw_prompts, list):
+        cleaned = [p for p in raw_prompts if isinstance(p, str) and p.strip()]
+        per_variant_prompts = cleaned or None
+    image_model = _resolve_effective_image_model(params)
+    raw_seed = params.get("seed")
+    seed = raw_seed if isinstance(raw_seed, int) and not isinstance(raw_seed, bool) and raw_seed >= 0 else None
+    resp = await get_flow_sdk().gen_image(
+        prompt=prompt.strip(),
+        project_id=project_id,
+        aspect_ratio=aspect,
+        paygate_tier=tier,
+        ref_media_ids=ref_media_ids,
+        variant_count=variant_count,
+        prompts=per_variant_prompts,
+        image_model=image_model,
+        seed=seed,
+    )
+    if resp.get("error"):
+        return resp, str(resp["error"])[:200]
+    # Flow returns signed fifeUrls directly in the response — persist them
+    # immediately so `/media/:id` can serve bytes without any extra round-trip.
+    entries_with_urls = [
+        e for e in (resp.get("media_entries") or []) if isinstance(e, dict) and e.get("url")
+    ]
+    if entries_with_urls:
+        try:
+            media_service.ingest_urls(entries_with_urls)
+        except Exception:  # noqa: BLE001
+            logger.exception("auto-ingest from gen_image response failed")
+    await _maybe_upscale_image_resp(resp, project_id, params.get("image_resolution"))
+    return resp, None
+
+
+# Video polling knobs — overridable in tests. 5-minute hard deadline
+# (30 cycles × 10s). When the budget runs out without all ops finishing
+# the handler returns the ``timeout_waiting_video`` sentinel and the
+# worker stamps the row as ``status='timeout'`` (distinct from
+# ``failed``) so the UI can render it as a soft auto-cancel rather than
+# a generation error.
+VIDEO_POLL_INTERVAL_S = 10.0
+VIDEO_POLL_MAX_CYCLES = 30
+
+
+def _is_request_canceled(rid: Optional[int]) -> bool:
+    """Return True iff the cancel endpoint flipped this row to canceled.
+
+    Long-running handlers call this between polls so a user-initiated
+    cancel takes effect mid-flight (we can't abort the Flow HTTP calls
+    themselves, but we can stop polling and let _process_one keep the
+    canceled status intact).
+    """
+    if not isinstance(rid, int):
+        return False
+    with get_session() as s:
+        req = s.get(Request, rid)
+        if req is None:
+            return True
+        return req.status == "canceled"
+
+
+async def _handle_gen_video(params: dict) -> tuple[dict, Optional[str]]:
+    from flowboard.services.flow_sdk import is_valid_project_id
+
+    prompt = params.get("prompt")
+    project_id = params.get("project_id")
+    start_media_id = params.get("start_media_id") or params.get("startMediaId")
+    raw_starts = params.get("start_media_ids")
+    start_media_ids: Optional[list[str]] = None
+    if isinstance(raw_starts, list):
+        cleaned = [m for m in raw_starts if isinstance(m, str) and m.strip()]
+        start_media_ids = [m.strip() for m in cleaned] or None
+
+    if not isinstance(prompt, str) or not prompt.strip():
+        return {}, "missing_prompt"
+    if params.get("media_provider", "flow") != "flow":
+        return {}, video_routing.WRONG_ENGINE
+    if not isinstance(project_id, str) or not project_id.strip():
+        return {}, "missing_project_id"
+    project_id = project_id.strip()
+    if not is_valid_project_id(project_id):
+        return {}, "invalid_project_id"
+    # Either a single start_media_id OR a non-empty start_media_ids list.
+    if start_media_ids is None and (
+        not isinstance(start_media_id, str) or not start_media_id.strip()
+    ):
+        return {}, "missing_start_media_id"
+    aspect = params.get("aspect_ratio") or "VIDEO_ASPECT_RATIO_LANDSCAPE"
+    # Tier resolution — see the matching block in _handle_gen_image. This is
+    # the handler the tier actually still matters for: it reaches
+    # `resolve_video_model`, which is what separates an Ultra checkpoint from
+    # a lite one.
+    try:
+        tier = resolve_paygate_tier(
+            params.get("paygate_tier") or flow_client.paygate_tier
+        )
+    except ValueError as exc:
+        return {}, str(exc)[:200]
+    video_quality = params.get("video_quality")
+    if not isinstance(video_quality, str) or not video_quality.strip():
+        video_quality = None
+    raw_count = params.get("variant_count")
+    variant_count = raw_count if isinstance(raw_count, int) and not isinstance(raw_count, bool) and raw_count > 0 else 1
+    requested_res = str(params.get("resolution") or "720p").strip()
+    # Veo 3.1 only generates natively at 720p (1080p/4K via post-upscale).
+    native_res = "720p"
+
+    sdk = get_flow_sdk()
+    dispatch = await sdk.gen_video(
+        prompt=prompt.strip(),
+        project_id=project_id,
+        start_media_id=start_media_id.strip()
+        if isinstance(start_media_id, str) and start_media_id.strip()
+        else None,
+        start_media_ids=start_media_ids,
+        aspect_ratio=aspect,
+        paygate_tier=tier,
+        video_quality=video_quality,
+        variant_count=variant_count,
+        resolution=native_res,
+    )
+    if dispatch.get("error"):
+        return dispatch, str(dispatch["error"])[:200]
+
+    op_names = dispatch.get("operation_names") or []
+    if not op_names:
+        return dispatch, "no_operations_returned"
+    # NEW low-priority models return workflows (`{name, primary_media_id}`)
+    # instead of operations; the SDK surfaces them on `dispatch["workflows"]`
+    # so we can route the poll to /v1/media/<id> instead of batchCheckAsync.
+    workflows = dispatch.get("workflows") or None
+
+    poll_attempts = 0
+    last_poll: dict = {}
+    done_by_name: dict[str, bool] = {name: False for name in op_names}
+    entry_by_name: dict[str, dict] = {}
+    op_errors: dict[str, str] = {}
+    rid = params.get("__request_id")
+
+    # Per-op resolution: each operation in the batch resolves
+    # independently (success, content-filter rejection, or timeout). We
+    # used to break the whole loop on the first per-op error, which
+    # collapsed a 4-variant gen into a hard failure even when 3/4 clips
+    # had already rendered. Now we let every op terminate on its own
+    # and aggregate the outcome at the end so partial batches still
+    # surface the variants that did succeed.
+    while (
+        poll_attempts < VIDEO_POLL_MAX_CYCLES
+        and not all(done_by_name.values())
+    ):
+        await asyncio.sleep(VIDEO_POLL_INTERVAL_S)
+        poll_attempts += 1
+        if _is_request_canceled(rid):
+            # User canceled mid-poll. Bail with the special error code
+            # so _process_one knows to leave the row's canceled status
+            # intact (the cancel endpoint already stamped finished_at +
+            # error='canceled'). Any partial state we collected is
+            # preserved on `result` for the detail viewer.
+            return (
+                {
+                    "raw_dispatch": dispatch,
+                    "last_poll": last_poll,
+                    "operation_names": op_names,
+                    "done": done_by_name,
+                    "canceled": True,
+                },
+                "canceled",
+            )
+        last_poll = await sdk.check_async(op_names, workflows=workflows)
+        if last_poll.get("error"):
+            continue
+        for op in last_poll.get("operations") or []:
+            if not isinstance(op, dict):
+                continue
+            name = op.get("name")
+            if not isinstance(name, str) or done_by_name.get(name, False):
+                continue
+            # Per-op terminal failure (e.g. content filter
+            # PUBLIC_ERROR_UNSAFE_GENERATION / PUBLIC_ERROR_AUDIO_FILTERED).
+            # Mark this op resolved-with-error and keep polling the rest.
+            err = op.get("error")
+            if isinstance(err, str) and err:
+                done_by_name[name] = True
+                op_errors[name] = err
+                continue
+            if op.get("done"):
+                done_by_name[name] = True
+                # Each op is expected to yield exactly one media entry
+                # on success; capture the first valid one.
+                for e in op.get("media_entries") or []:
+                    if isinstance(e, dict) and e.get("media_id"):
+                        entry_by_name[name] = e
+                        break
+
+    # Slots still unresolved after the max cycles — record as timeout
+    # so the partial summary names them alongside any filter failures.
+    for name in op_names:
+        if not done_by_name.get(name) and name not in op_errors:
+            op_errors[name] = "timeout_waiting_video"
+
+    # Build positional outcome aligned to dispatch order. Slot i in
+    # `media_ids` corresponds to slot i in the original
+    # `start_media_ids` array, so the frontend can keep upstream-image
+    # variant ↔ video-variant alignment even when middle slots fail.
+    # `slot_errors` mirrors the same indexing — `None` for succeeded
+    # slots, error code for blocked ones — so the detail viewer can
+    # render the exact filter reason on the blocked tile without
+    # having to know the internal Flow op-name keys.
+    positional_ids: list[Optional[str]] = []
+    slot_errors: list[Optional[str]] = []
+    succeeded_entries: list[dict] = []
+    for name in op_names:
+        e = entry_by_name.get(name)
+        if isinstance(e, dict) and isinstance(e.get("media_id"), str):
+            positional_ids.append(e["media_id"])
+            succeeded_entries.append(e)
+            slot_errors.append(None)
+        else:
+            positional_ids.append(None)
+            slot_errors.append(op_errors.get(name))
+
+    success_count = sum(1 for x in positional_ids if x)
+    total = len(op_names)
+
+    if success_count == 0:
+        # No op produced a clip — surface the first error verbatim.
+        # When all errors are "timeout_waiting_video" this matches the
+        # legacy single-op timeout contract; tests rely on it.
+        first_err = next(iter(op_errors.values()), "timeout_waiting_video")
+        return (
+            {
+                "raw_dispatch": dispatch,
+                "last_poll": last_poll,
+                "operation_names": op_names,
+                "done": done_by_name,
+                "op_errors": op_errors,
+            },
+            first_err,
+        )
+
+    # ≥1 op succeeded — ingest only the bytes we actually have.
+    entries_with_urls = [
+        e for e in succeeded_entries if isinstance(e, dict) and e.get("url")
+    ]
+    if entries_with_urls:
+        try:
+            media_service.ingest_urls(entries_with_urls)
+        except Exception:  # noqa: BLE001
+            logger.exception("auto-ingest from gen_video response failed")
+    # Workflow-mode (Low Priority) deliveries arrive inline as base64 MP4
+    # bytes on the `/v1/media/<id>` poll — there is no GCS URL to chase.
+    # Plant the bytes in the local cache directly so the `/media/<id>` route
+    # serves them like any URL-backed asset.
+    for entry in succeeded_entries:
+        if not isinstance(entry, dict):
+            continue
+        encoded = entry.get("encoded_video")
+        mid = entry.get("media_id")
+        if not isinstance(encoded, str) or not isinstance(mid, str):
+            continue
+        try:
+            import base64 as _b64
+            media_service.ingest_inline_bytes(
+                mid, _b64.b64decode(encoded, validate=False),
+                kind="video", mime="video/mp4",
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("inline ingest from workflow-mode poll failed for %s", mid)
+
+    partial_error: Optional[str] = None
+    if op_errors:
+        # De-dup distinct error codes for a compact one-line summary
+        # (e.g. "1/4 variants blocked: PUBLIC_ERROR_UNSAFE_GENERATION").
+        unique_errs = sorted({err for err in op_errors.values()})
+        partial_error = (
+            f"{len(op_errors)}/{total} variants blocked: {', '.join(unique_errs)}"
+        )
+
+    positional_ids, succeeded_entries, actual_res, upscale_warning = await _maybe_upscale_video_slots(
+        sdk,
+        positional_ids=positional_ids,
+        succeeded_entries=succeeded_entries,
+        project_id=project_id,
+        aspect_ratio=aspect,
+        requested_resolution=requested_res,
+        base_resolution=str(dispatch.get("resolution") or "720p"),
+        rid=rid,
+    )
+
+    out_result: dict[str, Any] = {
+        "raw_dispatch": dispatch,
+        "last_poll": last_poll,
+        "operation_names": op_names,
+        "media_ids": positional_ids,
+        "media_entries": succeeded_entries,
+        "op_errors": op_errors,
+        "slot_errors": slot_errors,
+        "partial_error": partial_error,
+        "resolution": actual_res,
+    }
+    if upscale_warning:
+        out_result["upscale_warning"] = upscale_warning
+    return out_result, None
+
+
+async def _handle_edit_image(params: dict) -> tuple[dict, Optional[str]]:
+    from flowboard.services.flow_sdk import is_valid_project_id
+
+    prompt = params.get("prompt")
+    project_id = params.get("project_id")
+    source_media_id = params.get("source_media_id") or params.get("sourceMediaId")
+    if not isinstance(prompt, str) or not prompt.strip():
+        return {}, "missing_prompt"
+    if _media_provider_of(params) == "muse":
+        # No Flow project/tier needed — worker edits the source image
+        # directly.
+        from flowboard.services.muse_media import run_muse_media
+
+        if not isinstance(source_media_id, str) or not source_media_id.strip():
+            return {}, "missing_source_media_id"
+        raw_refs = params.get("ref_media_ids")
+        ref_media_ids = None
+        if isinstance(raw_refs, list):
+            cleaned = [m for m in raw_refs if isinstance(m, str) and m]
+            ref_media_ids = cleaned or None
+        return await run_muse_media(
+            kind="edit_image",
+            prompt=prompt.strip(),
+            orientation=_orientation_from_aspect(params.get("aspect_ratio")),
+            source_media_ids=[source_media_id.strip()],
+            reference_media_ids=ref_media_ids,
+        )
+    if not isinstance(project_id, str) or not project_id.strip():
+        return {}, "missing_project_id"
+    project_id = project_id.strip()
+    if not is_valid_project_id(project_id):
+        return {}, "invalid_project_id"
+    if not isinstance(source_media_id, str) or not source_media_id.strip():
+        return {}, "missing_source_media_id"
+    aspect = params.get("aspect_ratio") or "IMAGE_ASPECT_RATIO_LANDSCAPE"
+    # Tier resolution — see _handle_gen_image for rationale. Fail loud,
+    # no silent fallback to Pro.
+    try:
+        tier = resolve_paygate_tier(
+            params.get("paygate_tier") or flow_client.paygate_tier
+        )
+    except ValueError as exc:
+        return {}, str(exc)[:200]
+    raw_refs = params.get("ref_media_ids")
+    ref_ids: Optional[list[str]] = None
+    if isinstance(raw_refs, list):
+        cleaned = [m for m in raw_refs if isinstance(m, str) and m]
+        ref_ids = cleaned or None
+    image_model = _resolve_effective_image_model(params)
+    raw_seed = params.get("seed")
+    seed = raw_seed if isinstance(raw_seed, int) and not isinstance(raw_seed, bool) and raw_seed >= 0 else None
+
+    resp = await get_flow_sdk().edit_image(
+        prompt=prompt.strip(),
+        project_id=project_id,
+        source_media_id=source_media_id.strip(),
+        ref_media_ids=ref_ids,
+        aspect_ratio=aspect,
+        paygate_tier=tier,
+        image_model=image_model,
+        seed=seed,
+    )
+    if resp.get("error"):
+        return resp, str(resp["error"])[:200]
+    entries_with_urls = [
+        e for e in (resp.get("media_entries") or []) if isinstance(e, dict) and e.get("url")
+    ]
+    if entries_with_urls:
+        try:
+            media_service.ingest_urls(entries_with_urls)
+        except Exception:  # noqa: BLE001
+            logger.exception("auto-ingest from edit_image response failed")
+    await _maybe_upscale_image_resp(resp, project_id, params.get("image_resolution"))
+    return resp, None
+
+
+
+# ── Omni Flash r2v ────────────────────────────────────────────────────────
+# Variable-duration video model with a distinct endpoint + body shape from
+# Veo i2v. See agent/flowboard/services/flow_sdk.py::gen_video_omni for the
+# request assembly. Single operation per request (no multi-source batching
+# like Veo's start_media_ids), so the polling logic collapses to a single
+# op + first-error-wins, simpler than _handle_gen_video.
+
+async def _handle_gen_video_omni(params: dict) -> tuple[dict, Optional[str]]:
+    from flowboard.services.flow_sdk import is_valid_project_id
+    from flowboard.services.media_project_sync import (
+        MediaSyncError,
+        ensure_media_ids_in_project,
+    )
+
+    prompt = params.get("prompt")
+    project_id = params.get("project_id")
+    raw_refs = params.get("ref_media_ids")
+    if not isinstance(raw_refs, list):
+        # Also accept the legacy single-source field for symmetry with
+        # Veo's start_media_id, so the same upstream-walk on the frontend
+        # works without a special-case.
+        raw_refs = (
+            [params.get("start_media_id")]
+            if isinstance(params.get("start_media_id"), str)
+            else []
+        )
+    ref_media_ids = [m for m in raw_refs if isinstance(m, str) and m.strip()]
+    duration_s = params.get("duration_s")
+    omni_version = "1.2" if str(params.get("omni_version") or "1.1").strip() == "1.2" else "1.1"
+    raw_count = params.get("variant_count")
+    variant_count = raw_count if isinstance(raw_count, int) and not isinstance(raw_count, bool) and raw_count > 0 else 1
+    requested_res = str(params.get("resolution") or "720p").strip()
+    native_res = "360p" if requested_res.lower() == "360p" else "720p"
+
+    if not isinstance(prompt, str) or not prompt.strip():
+        return {}, "missing_prompt"
+    if params.get("media_provider", "flow") != "flow":
+        return {}, video_routing.WRONG_ENGINE
+    if not isinstance(project_id, str) or not project_id.strip():
+        return {}, "missing_project_id"
+    project_id = project_id.strip()
+    if not is_valid_project_id(project_id):
+        return {}, "invalid_project_id"
+    if not ref_media_ids:
+        return {}, "missing_ref_media_ids"
+    valid_durs = range(3, 16) if omni_version == "1.2" else (4, 6, 8, 10)
+    if not isinstance(duration_s, int) or isinstance(duration_s, bool) or duration_s not in valid_durs:
+        return {}, "invalid_duration_s"
+    aspect = params.get("aspect_ratio") or "VIDEO_ASPECT_RATIO_PORTRAIT"
+    try:
+        tier = resolve_paygate_tier(
+            params.get("paygate_tier") or flow_client.paygate_tier
+        )
+    except ValueError as exc:
+        return {}, str(exc)[:200]
+
+    # ── Cross-project ref sync ────────────────────────────────────────
+    # Flow scopes mediaIds to the project they were uploaded in. When
+    # the user references media generated under another board's project
+    # (the cross-board Reference library case), Flow returns 404 because
+    # the asset is unknown in this project. Re-upload bytes from the
+    # local cache and substitute the project-local id before dispatch.
+    # First sync hits the Flow upload endpoint per ref; subsequent
+    # syncs use the MediaProjectMapping cache and are free.
+    try:
+        synced_refs, sync_failures = await ensure_media_ids_in_project(
+            ref_media_ids, project_id
+        )
+    except MediaSyncError as exc:
+        return {}, f"sync_failed: {exc}"[:200]
+    if not synced_refs:
+        # Every ref failed to sync — surface the first reason.
+        first = sync_failures[0][1] if sync_failures else "no_refs_synced"
+        return (
+            {"sync_failures": sync_failures},
+            f"sync_failed: {first}"[:200],
+        )
+    if sync_failures:
+        # Partial sync — log; proceed with the refs that worked.
+        logger.warning(
+            "gen_video_omni: %d ref(s) failed to sync, proceeding with %d",
+            len(sync_failures), len(synced_refs),
+        )
+
+    sdk = get_flow_sdk()
+    dispatch = await sdk.gen_video_omni(
+        prompt=prompt.strip(),
+        project_id=project_id,
+        ref_media_ids=synced_refs,
+        duration_s=duration_s,
+        aspect_ratio=aspect,
+        paygate_tier=tier,
+        resolution=native_res,
+        omni_version=omni_version,
+        variant_count=variant_count,
+    )
+    if dispatch.get("error"):
+        return dispatch, str(dispatch["error"])[:200]
+
+    op_names = dispatch.get("operation_names") or []
+    if not op_names:
+        return dispatch, "no_operations_returned"
+    workflows = dispatch.get("workflows") or None
+
+    poll_attempts = 0
+    last_poll: dict = {}
+    done_by_name: dict[str, bool] = {name: False for name in op_names}
+    entry_by_name: dict[str, dict] = {}
+    op_errors: dict[str, str] = {}
+    rid = params.get("__request_id")
+
+    while (
+        poll_attempts < VIDEO_POLL_MAX_CYCLES
+        and not all(done_by_name.values())
+    ):
+        await asyncio.sleep(VIDEO_POLL_INTERVAL_S)
+        poll_attempts += 1
+        if _is_request_canceled(rid):
+            return (
+                {
+                    "raw_dispatch": dispatch,
+                    "last_poll": last_poll,
+                    "operation_names": op_names,
+                    "done": done_by_name,
+                    "canceled": True,
+                },
+                "canceled",
+            )
+        last_poll = await sdk.check_async(op_names, workflows=workflows)
+        if last_poll.get("error"):
+            continue
+        for op in last_poll.get("operations") or []:
+            if not isinstance(op, dict):
+                continue
+            name = op.get("name")
+            if not isinstance(name, str) or done_by_name.get(name, False):
+                continue
+            err = op.get("error")
+            if isinstance(err, str) and err:
+                done_by_name[name] = True
+                op_errors[name] = err
+                continue
+            if op.get("done"):
+                done_by_name[name] = True
+                for e in op.get("media_entries") or []:
+                    if isinstance(e, dict) and e.get("media_id"):
+                        entry_by_name[name] = e
+                        break
+
+    for name in op_names:
+        if not done_by_name.get(name) and name not in op_errors:
+            op_errors[name] = "timeout_waiting_video"
+
+    positional_ids: list[Optional[str]] = []
+    slot_errors: list[Optional[str]] = []
+    succeeded_entries: list[dict] = []
+    for name in op_names:
+        e = entry_by_name.get(name)
+        if isinstance(e, dict) and isinstance(e.get("media_id"), str):
+            positional_ids.append(e["media_id"])
+            succeeded_entries.append(e)
+            slot_errors.append(None)
+        else:
+            positional_ids.append(None)
+            slot_errors.append(op_errors.get(name))
+
+    if not any(positional_ids):
+        first_err = next(iter(op_errors.values()), "timeout_waiting_video")
+        return (
+            {
+                "raw_dispatch": dispatch,
+                "last_poll": last_poll,
+                "operation_names": op_names,
+                "done": done_by_name,
+                "op_errors": op_errors,
+            },
+            first_err,
+        )
+
+    entries_with_urls = [
+        e for e in succeeded_entries if isinstance(e, dict) and e.get("url")
+    ]
+    if entries_with_urls:
+        try:
+            media_service.ingest_urls(entries_with_urls)
+        except Exception:  # noqa: BLE001
+            logger.exception("auto-ingest from gen_video_omni response failed")
+    # Omni Flash uses workflow-mode polling: Flow delivers the rendered MP4
+    # inline as base64 on `/v1/media/<id>` with no signed GCS URL. Plant the
+    # bytes in the local cache so `/media/<id>` can serve them.
+    for entry in succeeded_entries:
+        if not isinstance(entry, dict):
+            continue
+        encoded = entry.get("encoded_video")
+        mid = entry.get("media_id")
+        if not isinstance(encoded, str) or not isinstance(mid, str):
+            continue
+        try:
+            import base64 as _b64
+            media_service.ingest_inline_bytes(
+                mid, _b64.b64decode(encoded, validate=False),
+                kind="video", mime="video/mp4",
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("inline ingest from omni workflow poll failed for %s", mid)
+
+    positional_ids, succeeded_entries, actual_res, upscale_warning = await _maybe_upscale_video_slots(
+        sdk,
+        positional_ids=positional_ids,
+        succeeded_entries=succeeded_entries,
+        project_id=project_id,
+        aspect_ratio=aspect,
+        requested_resolution=requested_res,
+        base_resolution=str(dispatch.get("resolution") or native_res),
+        rid=rid,
+    )
+
+    out_result: dict[str, Any] = {
+        "raw_dispatch": dispatch,
+        "last_poll": last_poll,
+        "operation_names": op_names,
+        "media_ids": positional_ids,
+        "media_entries": succeeded_entries,
+        "op_errors": op_errors,
+        "slot_errors": slot_errors,
+        "duration_s": duration_s,
+        "resolution": actual_res,
+        "omni_version": omni_version,
+    }
+    if upscale_warning:
+        out_result["upscale_warning"] = upscale_warning
+    return out_result, None
+
+
+_DEFAULT_HANDLERS: dict[str, Handler] = {
+    "proxy": _handle_proxy,
+    "create_project": _handle_create_project,
+    "gen_image": _handle_gen_image,
+    "gen_video": _handle_gen_video,
+    "gen_video_omni": _handle_gen_video_omni,
+    "edit_image": _handle_edit_image,
+}
+
+
+# ── Node mirroring ────────────────────────────────────────────────────────
+# Until this landed, the browser was the ONLY place a generation's live
+# state lived. `Request.status` moved queued→running→done in the DB, but
+# `Node.status` was never written — the frontend poll loop held "running"
+# in zustand and PATCHed the finished media onto the node itself. Both
+# halves died with the tab: hit F5 mid-generation and the board reloaded
+# from a DB that still said the node was idle, and when the request landed
+# a few seconds later there was no poll left to write the media anywhere.
+# The generation was paid for and rendered, and the result was dropped.
+#
+# The worker is the one observer that survives a reload, so it now writes
+# both: `Node.status` on every transition and the completion payload into
+# `Node.data`. The frontend still PATCHes the same values when the tab is
+# alive (see frontend/src/store/generation.ts) — that write is now a
+# redundant mirror of this one rather than the system of record.
+#
+# Everything here is best-effort. `_process_one`'s Request stamp is what
+# stops a request being stranded in `running` forever, so a Node write must
+# never raise past this boundary: a stale node card is a cosmetic problem,
+# an unsettled request is a dead generation.
+
+
+def _iso_utc_now() -> str:
+    """`renderedAt` in the same shape the frontend writes it.
+
+    The frontend stamps `new Date().toISOString()` (always `…Z`), and
+    ResultViewer parses it straight back through `new Date()`. Emitting the
+    `+00:00` spelling would parse too, but keeping one format on the column
+    means nothing downstream has to know which writer produced the value.
+    """
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+# The shared type set is why the zero-media check lives on `req.type` and
+# not on the result: `_handle_gen_image` returns `(resp, None)` for any
+# envelope without a top-level `"error"`, and `_extract_media_ids` yields
+# `[]` when nothing actually rendered. Judging by the result alone, that
+# pair reads as a clean success, `_node_completion_patch` returns `{}` (it
+# has no media to write), and the node flips to `done` still wearing the
+# PREVIOUS run's `mediaIds` / `renderedAt`. The UI shows nothing until F5,
+# then shows the old images as if they were the new ones.
+def _expects_media(request_type: str) -> bool:
+    """True when a clean result from this type MUST carry rendered media."""
+    return request_type in MEDIA_PRODUCING_TYPES
+
+
+def _has_media(result: dict) -> bool:
+    """True when `result` carries at least one real (non-placeholder) id.
+
+    `media_ids` uses positional `None`s for variants that were blocked or
+    timed out, so a list of nothing but placeholders is still "nothing
+    rendered".
+    """
+    media_ids = result.get("media_ids")
+    if not isinstance(media_ids, list):
+        return False
+    return any(isinstance(m, str) and m for m in media_ids)
+
+
+def _node_completion_patch(req: Request, result: dict) -> dict:
+    """Build the `Node.data` delta for a successfully completed request.
+
+    Deliberately mirrors the payload `generation.ts` PATCHes on `done` so
+    nothing downstream has to learn a second shape. Two rules keep it safe:
+
+      * Only keys we can actually derive are present. A key we know nothing
+        about is absent from the patch and survives the merge untouched.
+      * `None` is the "delete this key" sentinel, matching what the
+        PATCH /api/nodes/{id} merge documents. Used to clear keys that
+        belong to the *previous* run and would otherwise be read as
+        describing this one (`error`, `aiBrief`).
+    """
+    params = req.params or {}
+    media_ids = result.get("media_ids")
+    if not isinstance(media_ids, list) or not media_ids:
+        # Nothing media-shaped came back. `proxy` / `create_project` rows
+        # look like this, and so would any future handler with a bare
+        # envelope. Writing the media keys anyway would blank whatever the
+        # node is currently showing, so write nothing at all.
+        return {}
+
+    patch: dict = {
+        "mediaIds": media_ids,
+        "renderedAt": _iso_utc_now(),
+        # A stale "✨ …" brief from a previous run would otherwise render
+        # underneath a fresh image as if it described it. The frontend
+        # clears it with the same `null` sentinel on every completion.
+        "aiBrief": None,
+    }
+    # `media_ids` carries positional `null` placeholders for variants that
+    # were blocked or timed out; the first real id is the node's primary.
+    media_id = next((m for m in media_ids if isinstance(m, str) and m), None)
+    if media_id:
+        patch["mediaId"] = media_id
+    # `variantCount` drives how many tiles NodeCard lays out, and it wins
+    # over `mediaIds.length` when both are present — so leaving a previous
+    # run's value in place is not neutral. A 1-variant run after a
+    # 4-variant one reloads as four tiles with three broken; the other way
+    # round it HIDES three generated images. The dispatched
+    # `variant_count` is the authority where there is one (only `gen_image`
+    # sets it); every other type falls through to `len(media_ids)`, which
+    # is the right answer there because that list keeps its positional
+    # `null`s and so still describes the full slot layout.
+    raw_count = params.get("variant_count")
+    patch["variantCount"] = (
+        raw_count if isinstance(raw_count, int) and raw_count > 0 else len(media_ids)
+    )
+    slot_errors = result.get("slot_errors")
+    if isinstance(slot_errors, list):
+        patch["slotErrors"] = slot_errors
+    # A partial batch stays `done` — some variants rendered — but carries a
+    # one-line summary of what got blocked. `None` clears the key when this
+    # run was clean.
+    partial_error = result.get("partial_error")
+    patch["error"] = partial_error if isinstance(partial_error, str) and partial_error else None
+
+    prompt = params.get("prompt")
+    if isinstance(prompt, str) and prompt:
+        patch["prompt"] = prompt
+    aspect = params.get("aspect_ratio")
+    if isinstance(aspect, str) and aspect:
+        patch["aspectRatio"] = aspect
+
+    # Model stamp — which checkpoint actually rendered this, so the detail
+    # panel can say "Banana Pro" / "Quality" instead of guessing from the
+    # user's *current* settings. Read from the dispatched params, which are
+    # what the request was submitted with.
+    if req.type in ("gen_video", "gen_video_omni"):
+        patch["mediaProvider"] = params.get("media_provider") or "flow"
+        patch["durationSeconds"] = result.get("duration_s") or params.get("duration_s")
+    res_label = result.get("resolution") or params.get("resolution") or params.get("image_resolution")
+    if isinstance(res_label, str) and res_label:
+        patch["resolution"] = res_label
+    if req.type in ("gen_image", "edit_image"):
+        image_model = params.get("image_model")
+        if isinstance(image_model, str) and image_model:
+            patch["imageModel"] = image_model
+    elif req.type == "gen_video":
+        # For Veo the dispatched quality IS the model selector.
+        video_quality = params.get("video_quality")
+        if isinstance(video_quality, str) and video_quality:
+            patch["videoQuality"] = video_quality
+    elif req.type == "gen_video_omni":
+        # Omni Flash is duration-scoped: preserve v1.1 wire label or v1.2 suffix.
+        duration_s = params.get("duration_s")
+        omni_ver = str(result.get("omni_version") or params.get("omni_version") or "1.1")
+        patch["omniVersion"] = omni_ver
+        if isinstance(duration_s, int) and duration_s in range(3, 16):
+            patch["videoQuality"] = (
+                f"omni_1.2_{duration_s}s" if omni_ver == "1.2" else f"abra_r2v_{duration_s}s"
+            )
+    return patch
+
+
+def _commit_settlement(
+    session,
+    *,
+    rid: int,
+    stamp: dict,
+    node_id: Optional[int],
+    node_status: Optional[str] = None,
+    node_data_patch: Optional[dict] = None,
+) -> None:
+    """Write a request's terminal outcome, mirroring onto its node if it can.
+
+    ``stamp`` is the set of ``Request`` columns the outcome consists of
+    (``status`` / ``error`` / ``result`` / ``finished_at``). It is passed
+    as data rather than applied by the caller because it may have to be
+    replayed into a second session.
+
+    The happy path is one commit: Request and Node land together or
+    neither does. When that commit fails — ``StaleDataError`` because the
+    Node was deleted between the lookup and the flush, ``OperationalError:
+    database is locked``, anything else — the Request stamp is **not**
+    negotiable. It is the only thing standing between the user and a
+    request stranded in ``running`` forever, and when the outcome is
+    ``done`` it carries ``result`` with the media ids of a generation that
+    has already been paid for. So we roll back, drop the node half
+    entirely, and re-apply the same stamp to the Request alone in a fresh
+    session. The node mirror is strictly best-effort; the Request stamp is
+    the system of record.
+
+    Two properties of that recovery are load-bearing, and both are easy to
+    undo by accident:
+
+      * It replays the **actual** outcome. The exception must not escape to
+        ``_process_one``'s outer handler, which hardcodes ``failed`` — that
+        would flatten ``timeout`` into a generic error and bin the
+        ``result`` of a generation that succeeded. Everything the outcome
+        consists of travels in ``stamp`` for exactly this reason.
+      * It writes **no node**. Whatever broke the first commit may still be
+        broken (a sustained ``database is locked`` is the obvious case), and
+        a second node write would raise again, get swallowed, and strand the
+        request in ``running`` — the original bug, one level down.
+
+    ``test_a_failing_node_write_preserves_the_requests_real_outcome`` and
+    the listener it runs under pin both.
+
+    Once the Request is safe, the node gets one more attempt in a third
+    session — see the comment at that point for why nothing else would
+    ever reconcile it.
+    """
+    req = session.get(Request, rid)
+    if req is None:
+        return
+    for key, value in stamp.items():
+        setattr(req, key, value)
+    session.add(req)
+    stage_node_patch(session, node_id, status=node_status, data_patch=node_data_patch)
+    try:
+        session.commit()
+        return
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "worker: settlement commit failed for rid=%s (node_id=%s); "
+            "retrying the request stamp without the node mirror",
+            rid, node_id,
+        )
+        # Guarded, because `rollback()` itself can raise on an invalidated
+        # connection — and an exception escaping here would reach
+        # `_process_one`'s outer handler, which hardcodes `failed`. That is
+        # the one outcome this whole function exists to prevent, so it does
+        # not get to happen through a bare two-line gap. A Session we
+        # couldn't roll back is one we simply stop using; the retry below
+        # opens its own.
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "worker: rollback after a failed settlement commit also "
+                "failed for rid=%s; abandoning this session", rid,
+            )
+
+    try:
+        with get_session() as retry:
+            req = retry.get(Request, rid)
+            if req is None:
+                return
+            for key, value in stamp.items():
+                setattr(req, key, value)
+            retry.add(req)
+            retry.commit()
+    except Exception:  # noqa: BLE001
+        # Nothing left to try. The startup sweep in main.py will pick the
+        # row up as an orphan on the next boot.
+        logger.exception("worker: request stamp retry failed for rid=%s", rid)
+        return
+
+    # The Request is safe. Now go back for the node, in a third session of
+    # its own.
+    #
+    # Dropping the node half is what saves the result, but nothing else
+    # ever reconciles it: `/requests?active=true` won't return this row
+    # (it is terminal now) and the startup sweep only looks at in-flight
+    # requests, so a node left stamped `running` stays that way. A live tab
+    # papers over it — its poll PATCHes the same values — but a reloaded or
+    # closed tab is exactly the case this mirror exists for, and it would
+    # come back to a card spinning on a generation that finished.
+    #
+    # One more attempt, fully guarded, clears the common transient cause (a
+    # brief `database is locked` on the node UPDATE).
+    if node_id is None:
+        return
+    try:
+        with get_session() as reconcile:
+            stage_node_patch(
+                reconcile, node_id, status=node_status, data_patch=node_data_patch
+            )
+            reconcile.commit()
+    except Exception:  # noqa: BLE001
+        # The floor: Request correct, node stale. Logged loudly because
+        # from the outside it looks like a hung generation — the card sits
+        # on its old state while the request says done — and this line is
+        # the only thing that says otherwise.
+        logger.exception(
+            "worker: node %s could not be reconciled after rid=%s settled "
+            "as %s; the card will keep rendering its previous state until "
+            "something writes to it again",
+            node_id, rid, stamp.get("status"),
+        )
+
+
+class WorkerController:
+    """Single-consumer async queue worker."""
+
+    def __init__(self, handlers: Optional[dict[str, Handler]] = None) -> None:
+        self._queue: asyncio.Queue[int] = asyncio.Queue()
+        self._handlers = dict(handlers or _DEFAULT_HANDLERS)
+        self._shutdown = asyncio.Event()
+        self._active = 0
+        self._started_at: Optional[float] = None
+
+    # ── enqueue ────────────────────────────────────────────────────────────
+    def enqueue(self, request_id: int) -> None:
+        self._queue.put_nowait(request_id)
+
+    # ── lifecycle ──────────────────────────────────────────────────────────
+    async def start(self) -> None:
+        self._started_at = time.time()
+        logger.info("worker started")
+        while not self._shutdown.is_set():
+            try:
+                rid = await asyncio.wait_for(self._queue.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                continue
+            await self._process_one(rid)
+
+    def request_shutdown(self) -> None:
+        self._shutdown.set()
+
+    async def drain(self) -> None:
+        # Wait for any in-flight task to finish.
+        while self._active > 0:
+            await asyncio.sleep(0.05)
+
+    @property
+    def active_count(self) -> int:
+        return self._active
+
+    @property
+    def uptime_s(self) -> Optional[float]:
+        if self._started_at is None:
+            return None
+        return time.time() - self._started_at
+
+    # ── execution ──────────────────────────────────────────────────────────
+    async def _process_one(self, rid: int) -> None:
+        self._active += 1
+        try:
+            with get_session() as s:
+                req = s.get(Request, rid)
+                if req is None:
+                    logger.warning("worker: request %s not found", rid)
+                    return
+                # Drift guard — the row might have been canceled (or
+                # otherwise transitioned out of queued) between enqueue
+                # and pop. The cancel endpoint mutates the DB row only;
+                # it can't yank the rid back off the in-memory queue, so
+                # we re-check here and bail without flipping status.
+                if req.status != "queued":
+                    logger.info(
+                        "worker: skipping rid=%s (status=%s)", rid, req.status
+                    )
+                    return
+                handler = self._handlers.get(req.type)
+                if handler is None:
+                    _commit_settlement(
+                        s,
+                        rid=rid,
+                        stamp={
+                            "status": "failed",
+                            "error": f"unknown_request_type:{req.type}",
+                            "finished_at": datetime.now(timezone.utc),
+                        },
+                        node_id=req.node_id,
+                        node_status="error",
+                    )
+                    return
+
+                req.status = "running"
+                s.add(req)
+                # Persist the processing state so a reloaded board renders
+                # the node as busy without needing the browser to remember.
+                stage_node_patch(s, req.node_id, status="running")
+                # Plain commit, not `_commit_settlement`: this is not a
+                # terminal stamp and there is no result to protect yet.
+                # If it fails, letting the exception reach the handler
+                # below — which marks the row failed — is the right
+                # outcome, because nothing has been dispatched.
+                s.commit()
+                video = req.type in video_routing.TYPES
+                params = dict(req.params or {})
+                # Enrich with the request's node_id so handlers that need
+                # to look up Node.data don't depend on the caller copying
+                # it into params explicitly. Underscore prefix avoids
+                # colliding with handler-defined fields.
+                if req.node_id is not None and "__node_id" not in params:
+                    params["__node_id"] = req.node_id
+                # Long-running handlers re-check this rid between polls
+                # to honor user-initiated cancels.
+                params["__request_id"] = rid
+
+            # Release the session during the possibly-long RPC.
+            route_error = None
+            if video:
+                try:
+                    params = video_routing.confirmed_params(params, params.get("flow_account_id"))
+                except ValueError as exc:
+                    route_error = str(exc)
+            result, err = ({}, route_error) if route_error else await handler(params)
+
+            with get_session() as s:
+                req = s.get(Request, rid)
+                if req is None:
+                    return
+                # Don't overwrite a canceled row with a late-arriving
+                # done/failed stamp. The cancel endpoint already set
+                # status='canceled' and finished_at; we only persist the
+                # partial result for debugging visibility.
+                if req.status == "canceled":
+                    if isinstance(result, dict):
+                        req.result = result
+                        s.add(req)
+                        s.commit()
+                    return
+                result_dict = result if isinstance(result, dict) else {"value": result}
+                # A media-producing type that came back clean but rendered
+                # nothing is a failure, not a success. Deciding that here —
+                # on `req.type`, not on "was there media in the envelope" —
+                # is what keeps `proxy` / `create_project` (legitimately
+                # media-free) out of it. See _expects_media.
+                if not err and _expects_media(req.type) and not _has_media(result_dict):
+                    err = "no_media_returned"
+                stamp: dict = {
+                    "result": result_dict,
+                    "finished_at": datetime.now(timezone.utc),
+                }
+                if err:
+                    # Video-poll exhaustion gets its own status so the UI
+                    # can render "TIMEOUT" instead of a generic failure.
+                    stamp["status"] = (
+                        "timeout" if err == "timeout_waiting_video" else "failed"
+                    )
+                    stamp["error"] = err
+                else:
+                    stamp["status"] = "done"
+                    stamp["error"] = None
+                # Building the patch is guarded separately from applying it
+                # so neither half can throw past the Request stamp.
+                node_patch: Optional[dict] = None
+                if not err:
+                    try:
+                        node_patch = _node_completion_patch(req, result_dict)
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "worker: node completion patch failed for rid=%s", rid
+                        )
+                # Mirror onto the node in the same commit. Node.status uses
+                # the vocabulary the cards render (idle|queued|running|
+                # done|error), so both terminal failure modes collapse to
+                # `error` — the distinction between failed and timeout
+                # lives on the request row the activity feed reads.
+                _commit_settlement(
+                    s,
+                    rid=rid,
+                    stamp=stamp,
+                    node_id=req.node_id,
+                    node_status="error" if err else "done",
+                    node_data_patch=node_patch,
+                )
+                if (
+                    not err
+                    and req.type in ("gen_image", "edit_image", "gen_video", "gen_video_omni")
+                    and flow_client.connected
+                ):
+                    asyncio.create_task(flow_accounts.sync_active_credits(force=True))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("worker exception on rid=%s", rid)
+            try:
+                with get_session() as s:
+                    req = s.get(Request, rid)
+                    if req is not None and req.status != "canceled":
+                        # Same guarded shape as the happy path: if this
+                        # commit is the thing that's broken (a locked DB,
+                        # say) the failure stamp still has to land, or the
+                        # row is stranded in `running` for good. Without
+                        # the node half the card keeps the `running` stamp
+                        # from dispatch and a reloaded board spins forever
+                        # on a request that already gave up.
+                        _commit_settlement(
+                            s,
+                            rid=rid,
+                            stamp={
+                                "status": "failed",
+                                "error": str(exc)[:500],
+                                "finished_at": datetime.now(timezone.utc),
+                            },
+                            node_id=req.node_id,
+                            node_status="error",
+                        )
+            except Exception:  # noqa: BLE001
+                logger.exception("worker: failed to record failure for rid=%s", rid)
+        finally:
+            self._active -= 1
+
+
+_worker: Optional[WorkerController] = None
+
+
+def get_worker() -> WorkerController:
+    global _worker
+    if _worker is None:
+        _worker = WorkerController()
+    return _worker

@@ -1,0 +1,123 @@
+/* Account menu is anchored to the existing canvas capsule, not a modal. */
+.jm-account-wrap { position: relative; }
+.jm-account-wrap > .jm-capsule--account {
+  min-height: 36px;
+  gap: 8px;
+  border-radius: 11px;
+  padding-inline: 9px 5px;
+}
+.jm-account-popover {
+  position: absolute;
+  inset: calc(100% + 9px) 0 auto auto;
+  width: min(360px, calc(100vw - 28px));
+  box-sizing: border-box;
+  max-height: calc(100dvh - 68px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-hover) transparent;
+  padding: 7px;
+  border-radius: 17px;
+  border: 1px solid var(--border-default);
+  background: var(--surface-menu, #16161b);
+  box-shadow: var(--shadow-modal);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  z-index: 120;
+}
+.jm-account-popover__profile {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 14px 12px 15px;
+}
+.jm-account-popover__profile > .jm-account-avatar {
+  flex: 0 0 42px;
+  height: 42px;
+  margin: 0;
+  font-size: 17px;
+}
+.jm-account-popover__identity { min-width: 0; }
+.jm-account-popover__identity h2 {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 16px;
+  font-weight: 650;
+}
+.jm-account-popover__identity p {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 4px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.jm-account-popover__row {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  min-height: 44px;
+  box-sizing: border-box;
+  padding: 9px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+.jm-account-popover__row:hover,
+.jm-account-popover__row[aria-expanded="true"] { background: var(--surface-hover); }
+.jm-account-popover__row:focus-visible,
+.jm-account-wrap > .jm-capsule--account:focus-visible { outline: 2px solid var(--border-focus); outline-offset: -2px; }
+.jm-account-popover__row > svg { flex: none; }
+.jm-account-popover__chevron { margin-left: auto; color: var(--text-secondary); }
+.jm-account-popover__row[aria-expanded="true"] .jm-account-popover__chevron { transform: rotate(90deg); }
+.jm-account-popover__details { padding: 9px 5px 12px; }
+.jm-account-popover[hidden],
+.jm-account-popover__details[hidden] { display: none; }
+.jm-account-popover__details .flow-accounts__form { grid-template-columns: minmax(0, 1fr); }
+.jm-account-popover__details .flow-accounts__head { flex-wrap: wrap; }
+.jm-account-popover__details .flow-accounts__card { min-width: 0; }
+.jm-account-popover__details .flow-accounts__balance { flex: none; }
+.jm-account-popover__details .flow-accounts__code { flex-wrap: wrap; }
+.jm-account-popover__details .flow-accounts__guide-card {
+  padding: 10px;
+  background: var(--surface-1);
+}
+.jm-account-popover__details .flow-accounts__setup-card {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 2px;
+  font-size: 12px;
+}
+.jm-account-popover__details .flow-accounts__button,
+.jm-account-popover__details .settings-panel__project-btn { min-height: 36px; }
+.jm-account-popover__details .flow-accounts { padding: 0; border: 0; }
+.jm-account-popover__details .settings-panel__label { margin: 0; font-size: 13px; color: var(--text-primary); }
+.jm-account-popover__details .settings-panel__hint { font-size: 12px; color: var(--text-secondary); }
+.jm-account-popover__details .settings-panel__project-input {
+  min-height: 36px;
+  box-sizing: border-box;
+  background: var(--surface-1);
+  border-color: var(--border-default);
+  border-radius: 8px;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+}
+.jm-account-popover__details .settings-panel__project-input:focus { border-color: var(--border-focus); }
+.jm-account-popover__details .settings-panel__project-btn {
+  border-radius: var(--radius-pill);
+  background: var(--cta-primary-bg);
+  color: var(--text-inverse);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 650;
+}
