@@ -1,14 +1,19 @@
 .jm-context-anchor {
   position: absolute;
   display: flex;
+  flex-direction: column;
   z-index: 24;
+  min-height: 0;
 }
 
 .jm-context-generator {
   width: 100%;
+  max-height: 100%;
   min-height: 0;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
   overscroll-behavior: contain;
   display: flex;
   flex-direction: column;
@@ -21,6 +26,23 @@
   box-shadow: var(--shadow-island);
   color: var(--text-primary);
   font: 13px/1.5 var(--font-sans);
+}
+
+.jm-context-generator::-webkit-scrollbar {
+  width: 6px;
+}
+
+.jm-context-generator::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.jm-context-generator::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+}
+
+.jm-context-generator::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.32);
 }
 
 .jm-context-generator > * { flex-shrink: 0; }
@@ -50,12 +72,18 @@
 }
 .jm-context-generator__hint { margin: 0; color: var(--text-secondary); font-size: 12px; }
 .jm-context-generator__tools {
+  position: sticky;
+  bottom: -12px;
+  z-index: 3;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
-  padding-top: 8px;
+  margin: 0 -12px -12px;
+  padding: 8px 12px 12px;
   border-top: 1px solid var(--border-subtle);
+  background: rgba(18, 18, 22, 0.96);
+  backdrop-filter: blur(12px);
 }
 .jm-context-generator__tools select {
   min-width: 0;

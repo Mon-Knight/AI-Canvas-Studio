@@ -78,177 +78,9 @@ function pickSingleImage(
 }
 
 function CharacterBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }) {
-  const mediaId = data.mediaId;
-  const isProcessing = data.status === "queued" || data.status === "running";
-  const [uploading, setUploading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [dragOver, setDragOver] = useState(false);
-
-  function persistMedia(newMediaId: string, aspectRatio?: string) {
-    useBoardStore.getState().updateNodeData(rfId, {
-      mediaId: newMediaId,
-      status: "done",
-      aiBrief: undefined,
-      aspectRatio,
-    });
-    const dbId = parseInt(rfId, 10);
-    if (!isNaN(dbId)) {
-      // Backend merges `data`, so we only need to send the deltas.
-      // `null` is the explicit "clear this key" sentinel — undefined
-      // gets dropped by JSON.stringify and would leave the stale brief
-      // in place after the merge.
-      patchNode(dbId, {
-        status: "done",
-        data: {
-          mediaId: newMediaId,
-          aiBrief: null,
-          aspectRatio,
-          renderedAt: new Date().toISOString(),
-        },
-      }).catch(() => {});
-    }
-    // Background vision call — fire-and-forget. Sets aiBrief on the node
-    // when it returns; failure is silent.
-    requestAutoBrief(rfId, newMediaId);
-  }
-
-  async function uploadOwn(file: File) {
-    setError(null);
-    setUploading(true);
-    try {
-      const binding = await useGenerationStore.getState().ensureProjectBinding();
-      if (!binding) {
-        setError("尚未绑定 Flow 项目，请先在右上角绑定项目");
-        return;
-      }
-      const dbId = parseInt(rfId, 10);
-      const resp = await uploadImage(file, binding.flow_project_id, isNaN(dbId) ? undefined : dbId, binding.flow_account_id);
-      persistMedia(resp.media_id, resp.aspect_ratio);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "图片上传失败");
-    } finally {
-      setUploading(false);
-    }
-  }
-
-  function onPick(e?: React.MouseEvent | React.KeyboardEvent) {
-    e?.stopPropagation();
-    if (uploading) return;
-    pickSingleImage("上传角色参考图", uploadOwn, setError);
-  }
-
-  function onDrop(e: React.DragEvent) {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragOver(false);
-    const f = e.dataTransfer.files?.[0];
-    if (f) uploadOwn(f);
-  }
-
-  function onDragOver(e: React.DragEvent) {
-    e.preventDefault();
-    e.stopPropagation();
-    if (!dragOver) setDragOver(true);
-  }
-
-  function onDragLeave(e: React.DragEvent) {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragOver(false);
-  }
-
-  function openGenerate() {
-    selectForContextualGeneration(rfId);
-  }
-
-  // Filled state — show the avatar circle. Drag-drop on the avatar replaces it.
-  if (mediaId) {
-    return (
-      <div
-        className="node-body node-body--character"
-        onDrop={onDrop}
-        onDragOver={onDragOver}
-        onDragLeave={onDragLeave}
-      >
-        <div
-          className={`character-avatar nodrag${dragOver ? " character-avatar--over" : ""}${uploading ? " character-avatar--uploading" : ""}`}
-          onClick={onPick}
-          role="button"
-          aria-label="替换角色图片"
-          onKeyDown={(e) => {
-            if (e.key !== "Enter" && e.key !== " ") return;
-            e.preventDefault();
-            onPick(e);
-          }}
-          tabIndex={0}
-        >
-          <img
-            className="character-avatar__img"
-            src={mediaUrl(mediaId)}
-            alt={data.title}
-          />
-          {uploading && <span className="character-drop__overlay">…</span>}
-        </div>
-        <BriefHint data={data} />
-        <button
-          type="button"
-          className="visual-asset__action nodrag"
-          onClick={(e) => {
-            e.stopPropagation();
-            saveTileToLibrary({
-              mediaId,
-              nodeType: data.type,
-              data,
-            });
-          }}
-          title="收藏该角色主体至资产库"
-          aria-label="收藏至资产库"
-        >
-          ★ 收藏
-        </button>
-        {error && <p className="character-drop__error" role="alert">{error}</p>}
-      </div>
-    );
-  }
-
-  // Empty state — compact action row (no oversized placeholder), but the
-  // whole body still accepts drag-drop.
   return (
-    <div
-      className="node-body node-body--character"
-      onDrop={onDrop}
-      onDragOver={onDragOver}
-      onDragLeave={onDragLeave}
-    >
-      <div
-        className={`character-empty${dragOver ? " character-empty--over" : ""}${isProcessing ? " character-empty--processing" : ""}`}
-      >
-        {isProcessing ? (
-          <span className="visual-asset__hint">生成中…</span>
-        ) : dragOver ? (
-          <span className="visual-asset__hint">松开上传图片</span>
-        ) : (
-          <>
-            <button
-              type="button"
-              className="visual-asset__action nodrag"
-              onClick={onPick}
-              disabled={uploading}
-            >
-              {uploading ? "上传中…" : "上传"}
-            </button>
-            <button
-              type="button"
-              className="visual-asset__action nodrag"
-              onClick={openGenerate}
-              disabled={uploading}
-            >
-              生成
-            </button>
-          </>
-        )}
-      </div>
-      {error && <p className="character-drop__error" role="alert">{error}</p>}
+    <div className="node-body--subject-wrap">
+      <ImageBody rfId={rfId} data={data} />
     </div>
   );
 }
@@ -763,6 +595,19 @@ function ImageBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }) {
         />
       )}
       <BriefHint data={data} />
+      {data.type === "character" && hasMedia && !isProcessing && (
+        <div className="jm-subject-card-bar nodrag">
+          <button
+            type="button"
+            className="visual-asset__action"
+            onClick={onPick}
+            disabled={uploading}
+            title="上传本地动漫/人物/道具设定图替换当前主体"
+          >
+            {uploading ? "上传中…" : "替换主体图"}
+          </button>
+        </div>
+      )}
       {error && <p className="character-drop__error" role="alert">{error}</p>}
     </div>
   );

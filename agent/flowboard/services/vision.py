@@ -36,13 +36,17 @@ logger = logging.getLogger(__name__)
 # is enough for "white cotton crewneck t-shirt with small heart logo" or
 # "young Korean woman, neutral expression, dark hair tied back, dark top".
 _VISION_SYSTEM = (
-    "You are a visual asset annotator for a fashion / e-commerce media "
-    "pipeline. Output one short factual sentence (max 120 Chinese characters) "
-    "that describes the image. Focus on attributes useful for image generation: "
-    "for a product → colour, material, design, fit, style; for a person → "
-    "gender, apparent ethnicity, age range, expression, hair, outfit. No "
-    "marketing language, no opinions, no preamble — just the description. "
-    "Output the description strictly in concise Simplified Chinese (简体中文)."
+    "You are a visual asset annotator for a creative film, animation, and "
+    "e-commerce media pipeline. Output one short factual sentence (max 140 "
+    "Chinese characters) that describes the image. Always identify the visual "
+    "medium/art style first when non-photoreal (e.g. 日系二次元赛璐璐动漫 / "
+    "3D国漫CG渲染 / Q版潮玩手办 / 奇幻厚涂原画 / 水彩插画; or 写实摄影 for real photos). "
+    "Focus on attributes useful for downstream generation consistency: for an "
+    "anime, 3D, or human character → art style, hair/eye colour, headwear/glasses/"
+    "accessories, outfit details, and expression; for a creature or product → "
+    "species/item, colour, material, design, and silhouette. No marketing "
+    "language, no opinions, no preamble — just the description. Output the "
+    "description strictly in concise Simplified Chinese (简体中文)."
 )
 
 _VISION_USER_PROMPT = "请用简体中文客观简练地描述这张图片的视觉特征。"

@@ -5,7 +5,9 @@
 .chat-model-link { margin-left: auto; max-width: 42%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .chat-model-link + .chat-dock__collapse-btn { margin-left: 2px; }
 .chat-action-link { padding: 4px 0; margin-top: 4px; font-size: 12px; color: var(--brand-cyan); }
-.chat-data-hint, .chat-video-draft small { color: var(--text-secondary); font-size: 12px; line-height: 1.6; }
+.chat-action-link:hover { text-decoration: underline; }
+.chat-bubble__actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin-top: 4px; }
+.chat-data-hint, .chat-video-draft small { color: var(--text-secondary); font-size: 12px; line-height: 1.55; }
 .chat-data-hint { margin: 0 0 6px; }
 .chat-video-draft { display: grid; gap: 6px; padding: 12px 14px; border-top: 1px solid var(--border-subtle); background: var(--surface-2); font-size: 13px; }
 .chat-video-draft select, .chat-video-draft textarea { width: 100%; min-width: 0; box-sizing: border-box; background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--border-default); border-radius: 8px; padding: 6px; font: inherit; }
@@ -16,4 +18,348 @@
 @media (max-height: 570px) {
   .jm-chat-drawer:has(.chat-video-draft) { overflow-y: auto; }
   .jm-chat-drawer:has(.chat-video-draft) > * { flex-shrink: 0; }
+}
+
+.jm-chat-drawer .chat-dock__messages {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+}
+
+.jm-chat-drawer .chat-dock__messages::-webkit-scrollbar {
+  width: 6px;
+}
+
+.jm-chat-drawer .chat-dock__messages::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+}
+
+/* ── 右下角收起胶囊选中节点提示徽标 ──────────────────────────────────────── */
+
+.jm-ai-pill__ref-badge {
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  background: rgba(56, 189, 248, 0.18);
+  border: 1px solid rgba(56, 189, 248, 0.38);
+  color: #7dd3fc;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── 画布选中节点实时引用栏 ──────────────────────────────────────────────── */
+
+.chat-canvas-refs {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border-radius: 11px;
+  border: 1px solid var(--border-subtle);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.chat-canvas-refs__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.chat-canvas-refs__title {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.chat-canvas-refs__bar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chat-canvas-refs__restore {
+  padding: 2px 7px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  color: var(--text-muted);
+  background: transparent;
+  transition: color 120ms ease, background-color 120ms ease;
+}
+
+.chat-canvas-refs__restore:hover {
+  color: var(--text-primary);
+  background: var(--surface-hover);
+}
+
+.chat-canvas-refs__pick-btn {
+  padding: 3px 9px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-default);
+  background: var(--surface-2);
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 500;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.chat-canvas-refs__pick-btn:hover:not(:disabled),
+.chat-canvas-refs__pick-btn--open {
+  border-color: rgba(56, 189, 248, 0.48);
+  background: rgba(56, 189, 248, 0.12);
+  color: #7dd3fc;
+}
+
+.chat-canvas-refs__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 92px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.chat-node-ref {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  border-radius: 8px;
+  border: 1px solid var(--border-default);
+  background: var(--surface-2);
+  overflow: hidden;
+  transition: border-color 120ms ease;
+}
+
+.chat-node-ref--selected {
+  border-color: rgba(56, 189, 248, 0.42);
+  background: rgba(56, 189, 248, 0.08);
+}
+
+.chat-node-ref__main {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 3px 6px 3px 4px;
+  color: var(--text-primary);
+  font-size: 11.5px;
+}
+
+.chat-node-ref__main:hover {
+  color: #ffffff;
+}
+
+.chat-node-ref__thumb {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border-radius: 5px;
+  object-fit: cover;
+  background: #09090b;
+  display: block;
+}
+
+.chat-node-ref__glyph {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border-radius: 5px;
+  background: var(--surface-3);
+  color: #7dd3fc;
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chat-node-ref__name {
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-node-ref__id {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-family: ui-monospace, monospace;
+  font-size: 10.5px;
+}
+
+.chat-node-ref__remove {
+  width: 20px;
+  height: 24px;
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-left: 1px solid var(--border-subtle);
+  transition: color 120ms ease, background-color 120ms ease;
+}
+
+.chat-node-ref__remove:hover {
+  color: var(--status-error);
+  background: rgba(248, 113, 113, 0.14);
+}
+
+/* 快捷提问胶囊 */
+.chat-canvas-refs__starters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding-top: 2px;
+}
+
+.chat-starter-chip {
+  padding: 3px 8px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  font-size: 11px;
+  transition: border-color 120ms ease, color 120ms ease, background-color 120ms ease;
+}
+
+.chat-starter-chip:hover:not(:disabled) {
+  border-color: rgba(56, 189, 248, 0.4);
+  background: var(--surface-2);
+  color: var(--text-primary);
+}
+
+/* 浮动节点选择菜单 */
+.chat-node-picker {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 30;
+  padding: 8px;
+  border-radius: 12px;
+  border: 1px solid var(--border-default);
+  background: var(--surface-menu, #16161b);
+  box-shadow: var(--shadow-modal);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chat-node-picker__search {
+  width: 100%;
+  padding: 6px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-1);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+.chat-node-picker__search:focus {
+  border-color: rgba(56, 189, 248, 0.5);
+}
+
+.chat-node-picker__list {
+  max-height: 184px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chat-node-picker__empty {
+  padding: 12px 8px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.chat-node-picker__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 7px;
+  border-radius: 8px;
+  text-align: left;
+  color: var(--text-secondary);
+  font-size: 12px;
+  transition: background-color 100ms ease, color 100ms ease;
+}
+
+.chat-node-picker__item:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.chat-node-picker__item--checked {
+  background: rgba(56, 189, 248, 0.1);
+  color: var(--text-primary);
+}
+
+.chat-node-picker__item-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-node-picker__item-id {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+}
+
+.chat-node-picker__item-check {
+  width: 14px;
+  flex-shrink: 0;
+  text-align: center;
+  color: var(--brand-cyan);
+  font-weight: 700;
+}
+
+/* 消息气泡内引用的节点胶囊 & 回填成功提示 */
+.chat-msg-mentions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 6px;
+}
+
+.chat-msg-mention-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px 2px 4px;
+  border-radius: 7px;
+  border: 1px solid rgba(56, 189, 248, 0.34);
+  background: rgba(56, 189, 248, 0.1);
+  color: #bae6fd;
+  font-size: 11px;
+}
+
+.chat-msg-mention-pill:hover:not(:disabled) {
+  background: rgba(56, 189, 248, 0.2);
+}
+
+.chat-msg-mention-pill .chat-node-ref__thumb,
+.chat-msg-mention-pill .chat-node-ref__glyph {
+  width: 18px;
+  height: 18px;
+}
+
+.chat-applied-toast {
+  margin: 4px 14px 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(52, 211, 153, 0.34);
+  background: rgba(52, 211, 153, 0.12);
+  color: #6ee7b7;
+  font-size: 12px;
 }

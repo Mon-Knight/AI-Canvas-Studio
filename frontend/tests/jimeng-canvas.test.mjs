@@ -516,3 +516,115 @@ test("estimateImageCreditCost & estimateVideoCreditCost compute model/resolution
     await server.close();
   }
 });
+
+test("subject templates support anime/3D/realistic/prop official templates and custom template CRUD", async () => {
+  const server = await createServer({ server: { middlewareMode: true, hmr: false, ws: false }, logLevel: "error" });
+  try {
+    const {
+      OFFICIAL_SUBJECT_TEMPLATES,
+      applySubjectTemplateText,
+      useSubjectTemplatesStore,
+    } = await server.ssrLoadModule("/src/constants/character.ts");
+
+    assert.ok(OFFICIAL_SUBJECT_TEMPLATES.some((t) => t.id === "anime-extract" && t.category === "anime"));
+    assert.ok(OFFICIAL_SUBJECT_TEMPLATES.some((t) => t.id === "anime-stand" && t.category === "anime"));
+    assert.ok(OFFICIAL_SUBJECT_TEMPLATES.some((t) => t.id === "anime-turnaround" && t.category === "anime"));
+    assert.ok(OFFICIAL_SUBJECT_TEMPLATES.some((t) => t.category === "3d_game"));
+    assert.ok(OFFICIAL_SUBJECT_TEMPLATES.some((t) => t.category === "creature_prop"));
+
+    const animeTpl = OFFICIAL_SUBJECT_TEMPLATES.find((t) => t.id === "anime-stand");
+    const turnaroundTpl = OFFICIAL_SUBJECT_TEMPLATES.find((t) => t.id === "anime-turnaround");
+    // Switching from one unmodified template directly to another replaces cleanly without stacking
+    const firstApplied = applySubjectTemplateText("", animeTpl.prompt, null);
+    assert.equal(firstApplied, animeTpl.prompt);
+    const switched = applySubjectTemplateText(firstApplied, turnaroundTpl.prompt, animeTpl.prompt);
+    assert.equal(switched, turnaroundTpl.prompt);
+
+    // When user already typed custom anime traits, template merges without losing user text
+    const merged = applySubjectTemplateText("银发红瞳小魔女，头戴黑色尖顶帽", animeTpl.prompt, null);
+    assert.ok(merged.includes(animeTpl.prompt));
+    assert.ok(merged.includes("银发红瞳小魔女，头戴黑色尖顶帽"));
+
+    useSubjectTemplatesStore.setState({ customTemplates: [] });
+    const created = useSubjectTemplatesStore.getState().addCustomTemplate(
+      "赛博二次元女主",
+      "日系赛博朋克二次元少女立绘，荧光蓝双马尾配机能风外套，纯黑干净背景",
+    );
+    assert.ok(created && created.id.startsWith("tpl_"));
+    assert.equal(useSubjectTemplatesStore.getState().customTemplates.length, 1);
+
+    const updated = useSubjectTemplatesStore.getState().updateCustomTemplate(
+      created.id,
+      "赛博二次元女主V2",
+      "日系赛博朋克二次元少女三视图，荧光蓝双马尾，带战术护目镜",
+    );
+    assert.equal(updated, true);
+    assert.equal(useSubjectTemplatesStore.getState().customTemplates[0].title, "赛博二次元女主V2");
+
+    useSubjectTemplatesStore.getState().removeCustomTemplate(created.id);
+    assert.equal(useSubjectTemplatesStore.getState().customTemplates.length, 0);
+  } finally {
+    await server.close();
+  }
+});
+
+test("chatReferences syncs selected canvas nodes automatically, respects mute/pin, and merges #mentions", async () => {
+  const server = await createServer({ server: { middlewareMode: true, hmr: false, ws: false }, logLevel: "error" });
+  try {
+    const {
+      resolveActiveCanvasReferences,
+      mergeChatMentions,
+      buildDefaultNodeChatMessage,
+      resolveNodePrimaryMedia,
+    } = await server.ssrLoadModule("/src/lib/chatReferences.ts");
+
+    const nodes = [
+      {
+        id: "1",
+        type: "character",
+        selected: true,
+        position: { x: 0, y: 0 },
+        data: { type: "character", shortId: "wuop", title: "动漫角色", mediaId: "m-anime-1" },
+      },
+      {
+        id: "2",
+        type: "prompt",
+        selected: false,
+        position: { x: 260, y: 0 },
+        data: { type: "prompt", shortId: "s28m", title: "文本", prompt: "去掉文字" },
+      },
+      {
+        id: "3",
+        type: "video",
+        selected: false,
+        position: { x: 520, y: 0 },
+        data: { type: "video", shortId: "vd09", title: "视频", mediaIds: ["v-clip-1"] },
+      },
+    ];
+
+    // Auto-includes selected node #wuop
+    const autoRefs = resolveActiveCanvasReferences(nodes, new Set(), []);
+    assert.equal(autoRefs.length, 1);
+    assert.equal(autoRefs[0].node.data.shortId, "wuop");
+    assert.equal(autoRefs[0].source, "selected");
+
+    // Muting #wuop hides it, while pinning #vd09 includes #vd09
+    const mutedAndPinned = resolveActiveCanvasReferences(nodes, new Set(["1"]), ["3"]);
+    assert.equal(mutedAndPinned.length, 1);
+    assert.equal(mutedAndPinned[0].node.data.shortId, "vd09");
+    assert.equal(mutedAndPinned[0].source, "pinned");
+
+    // Merging chip refs + inline #mentions deduplicates and drops unknown shortIds
+    const mentions = mergeChatMentions("结合 #s28m 和 #wuop 以及不存在的 #zzzz 分析", autoRefs, nodes);
+    assert.deepEqual(mentions, ["wuop", "s28m"]);
+
+    const defaultMsg = buildDefaultNodeChatMessage("analyze", ["wuop"]);
+    assert.ok(defaultMsg.includes("#wuop"));
+
+    assert.deepEqual(resolveNodePrimaryMedia(nodes[0]), { mediaId: "m-anime-1", isVideo: false });
+    assert.deepEqual(resolveNodePrimaryMedia(nodes[2]), { mediaId: "v-clip-1", isVideo: true });
+    assert.equal(resolveNodePrimaryMedia(nodes[1]), null);
+  } finally {
+    await server.close();
+  }
+});

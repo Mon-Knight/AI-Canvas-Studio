@@ -52,12 +52,12 @@ import {
   patchNode,
 } from "../api/client";
 import {
-  CHARACTER_GENDERS,
-  CHARACTER_COUNTRIES,
-  CHARACTER_VIBES,
-  type GenderKey,
-  type CountryKey,
-  type VibeKey,
+  OFFICIAL_SUBJECT_TEMPLATES,
+  SUBJECT_TEMPLATE_CATEGORIES,
+  applySubjectTemplateText,
+  useSubjectTemplatesStore,
+  type CustomSubjectTemplate,
+  type SubjectTemplateCategory,
 } from "../constants/character";
 
 const REF_SOURCE_TYPES = new Set([
@@ -72,33 +72,6 @@ const REF_SOURCE_TYPES = new Set([
 ]);
 
 const PROMPT_MAX_LENGTH = 2000;
-
-function buildCharacterPrompt(
-  gender: GenderKey | null,
-  country: CountryKey | null,
-  vibe: VibeKey,
-  extras: string,
-): string {
-  const g = CHARACTER_GENDERS.find((x) => x.key === gender)?.zhTag;
-  const c = CHARACTER_COUNTRIES.find((x) => x.key === country)?.zhTag;
-  const subject = [c, g].filter(Boolean).join("") || "人物";
-  const vibeTokens = CHARACTER_VIBES.find((v) => v.key === vibe)?.zhTokens ?? [];
-  const tail = extras.trim();
-  // 前置人物正脸与轴对称锁定，确保生成角色参考图在下游场景中保持稳定一致
-  return [
-    `专业影棚正面标准肖像写真，主体为一位${subject}角色`,
-    "人物正对镜头直视前方，头部端正保持水平、零歪斜与零偏转",
-    "双肩端平正对相机，轴对称正面姿态，鼻梁居中，双眼水平高度对称清晰",
-    ...vibeTokens,
-    tail || null,
-    "半身头肩标准构图，画面居中对焦清晰锐利",
-    "严格正视机位，严禁低头仰头、严禁侧脸或四分之三半侧面及回眸姿态",
-    "面部无遮挡，严禁佩戴眼镜、帽子、口罩或发丝遮挡五官",
-    "照片级写实摄影质感，超高清肌肤毛孔与发丝细节，适合长期锁脸复用的标准角色参考图",
-  ]
-    .filter(Boolean)
-    .join("，");
-}
 
 const IMAGE_ASPECT_RATIOS = IMAGE_ASPECT_OPTIONS.map((a) => ({
   key: a.value,
@@ -235,7 +208,6 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
 }) {
   const closeGenerationDialog = () => onClose?.();
   const promptId = useId();
-  const extrasId = useId();
   const titleId = useId();
   const dispatchGeneration = useGenerationStore((s) => s.dispatchGeneration);
   const nodes = useBoardStore((s) => s.nodes);
@@ -249,11 +221,18 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
   // into a single composite NxN grid. See lib/storyboardPrompt.ts.
   const [storyboardGrid, setStoryboardGrid] = useState<StoryboardGrid>("2x2");
 
-  // Character builder state — only used when targetType === "character".
-  const [charGender, setCharGender] = useState<GenderKey | null>(null);
-  const [charCountry, setCharCountry] = useState<CountryKey | null>(null);
-  const [charVibe, setCharVibe] = useState<VibeKey>("clean");
-  const [charExtras, setCharExtras] = useState("");
+  // 主体（character）官方推荐模板 & 自定义模板选择器状态
+  const customSubjectTemplates = useSubjectTemplatesStore((s) => s.customTemplates);
+  const addCustomTemplate = useSubjectTemplatesStore((s) => s.addCustomTemplate);
+  const updateCustomTemplate = useSubjectTemplatesStore((s) => s.updateCustomTemplate);
+  const removeCustomTemplate = useSubjectTemplatesStore((s) => s.removeCustomTemplate);
+  const [subjectTab, setSubjectTab] = useState<"official" | "custom">("official");
+  const [subjectCategory, setSubjectCategory] = useState<SubjectTemplateCategory>("all");
+  const [templateFormOpen, setTemplateFormOpen] = useState(false);
+  const [editingTemplateId, setEditingTemplateId] = useState<string | null>(null);
+  const [tplTitleDraft, setTplTitleDraft] = useState("");
+  const [tplPromptDraft, setTplPromptDraft] = useState("");
+  const lastAppliedTemplateRef = useRef<string | null>(null);
 
   // Auto-prompt state — set when AI polish or auto-synth produces text.
   // Always requires manual human confirmation (`pendingAiConfirm`) before dispatch.
@@ -401,7 +380,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
   // Both image targets AND Omni-video targets use the ingredient chip
   // list (multi-ref upstream → one chip per edge). Veo i2v video has
   // its own single-source-with-variant-batch picker below.
-  const promptSourceNodes = !isCharacter && !isPrompt && rfId
+  const promptSourceNodes = !isPrompt && rfId
     ? edges
         .filter((e) => e.target === rfId)
         .map((e) => {
@@ -414,7 +393,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     : [];
 
   const upstreamPromptText =
-    !isCharacter && !isPrompt && !isStoryboard && rfId
+    !isPrompt && !isStoryboard && rfId
       ? collectUpstreamPromptText(rfId, nodes, edges)
       : "";
 
@@ -451,7 +430,6 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
       }
       if (
         !nextPrompt.trim() &&
-        openNodeType !== "character" &&
         openNodeType !== "prompt" &&
         openNodeType !== "Storyboard" &&
         !isStoryboardAuto
@@ -467,7 +445,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
       setPreAiPrompt(null);
       setPendingBatchPrompts(undefined);
       setVideoRefFrame("last");
-      // Character → always 1:1 portrait headshot unless explicitly saved.
+      // Character → preserve saved aspect, else match upstream ref aspect when linked, else 1:1.
       // Image / video → preserve node's saved aspectRatio first, else match
       // upstream aspect when available, else default landscape.
       const validAspects = openNodeType === "video" ? VIDEO_ASPECT_RATIOS : IMAGE_ASPECT_RATIOS;
@@ -475,8 +453,6 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
       let nextAspect: AspectKey;
       if (typeof savedAspect === "string" && validAspects.some((a) => a.key === savedAspect)) {
         nextAspect = savedAspect as AspectKey;
-      } else if (openNodeType === "character") {
-        nextAspect = "IMAGE_ASPECT_RATIO_SQUARE";
       } else {
         const inherited = pickDefaultAspect(
           rfId,
@@ -486,6 +462,8 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
         );
         if (inherited !== null) {
           nextAspect = inherited;
+        } else if (openNodeType === "character") {
+          nextAspect = "IMAGE_ASPECT_RATIO_SQUARE";
         } else if (openNodeType === "video") {
           nextAspect = (defaultVideoAspect || "VIDEO_ASPECT_RATIO_LANDSCAPE") as AspectKey;
         } else {
@@ -509,10 +487,11 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
         .nodes.find((n) => n.id === rfId)?.data;
       setStoryboardGrid(normaliseStoryboardGrid(openNodeData?.storyboardGrid));
       setSeedInput(openNodeData?.seed != null ? String(openNodeData.seed) : "");
-      setCharGender(null);
-      setCharCountry(null);
-      setCharVibe("clean");
-      setCharExtras("");
+      setTemplateFormOpen(false);
+      setEditingTemplateId(null);
+      setTplTitleDraft("");
+      setTplPromptDraft("");
+      lastAppliedTemplateRef.current = null;
       setAutoBuilding(false);
       setAutoPromptUsed(false);
       // Default-select every upstream source variant for video targets so
@@ -541,10 +520,9 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     }
   }, [isVideo, inline, videoDraft]);
 
-  // 文本 -> 图片 / 视频：在用户未手动编辑且未点 AI 润色前，上游文本连线或编辑时自动同步继承。
+  // 文本 -> 图片 / 主体 / 视频：在用户未手动编辑且未点 AI 润色前，上游文本连线或编辑时自动同步继承。
   useEffect(() => {
     if (
-      !isCharacter &&
       !isPrompt &&
       !isStoryboard &&
       !hasStoryboardUpstream &&
@@ -556,7 +534,6 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     }
   }, [
     upstreamPromptText,
-    isCharacter,
     isPrompt,
     isStoryboard,
     hasStoryboardUpstream,
@@ -776,8 +753,68 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     window.requestAnimationFrame(() => firstFocusRef.current?.focus());
   }
 
+  function handleApplySubjectTemplate(tpl: {
+    prompt: string;
+    recommendedAspect?: AspectKey;
+  }) {
+    if (isWorking || queued) return;
+    if (prompt.trim() && prompt.trim() !== tpl.prompt.trim()) {
+      setPreAiPrompt(prompt);
+    }
+    const nextPrompt = applySubjectTemplateText(
+      prompt,
+      tpl.prompt,
+      lastAppliedTemplateRef.current,
+      PROMPT_MAX_LENGTH,
+    );
+    lastAppliedTemplateRef.current = tpl.prompt;
+    promptManuallyEditedRef.current = true;
+    setPendingBatchPrompts(undefined);
+    setAutoPromptUsed(false);
+    setPrompt(nextPrompt);
+    if (tpl.recommendedAspect && refSourceNodes.length === 0) {
+      updateAspectRatio(tpl.recommendedAspect);
+    }
+    if (inline) persistNodeDraftPatch({ prompt: nextPrompt });
+    window.requestAnimationFrame(() => firstFocusRef.current?.focus());
+  }
+
+  function handleOpenCreateTemplate() {
+    setEditingTemplateId(null);
+    setTplTitleDraft("");
+    setTplPromptDraft(prompt.trim());
+    setTemplateFormOpen(true);
+  }
+
+  function handleOpenEditTemplate(tpl: CustomSubjectTemplate) {
+    setEditingTemplateId(tpl.id);
+    setTplTitleDraft(tpl.title);
+    setTplPromptDraft(tpl.prompt);
+    setTemplateFormOpen(true);
+  }
+
+  function handleSaveTemplateDraft() {
+    const cleanTitle = tplTitleDraft.trim();
+    const cleanPrompt = tplPromptDraft.trim();
+    if (!cleanTitle || !cleanPrompt) return;
+    if (editingTemplateId) {
+      updateCustomTemplate(editingTemplateId, cleanTitle, cleanPrompt);
+    } else {
+      const created = addCustomTemplate(cleanTitle, cleanPrompt);
+      if (created && !prompt.trim()) {
+        lastAppliedTemplateRef.current = created.prompt;
+        promptManuallyEditedRef.current = true;
+        setPrompt(created.prompt);
+        if (inline) persistNodeDraftPatch({ prompt: created.prompt });
+      }
+    }
+    setSubjectTab("custom");
+    setTemplateFormOpen(false);
+    setEditingTemplateId(null);
+  }
+
   async function handleAiPolish() {
-    if (isWorking || queued || isCharacter || hasStoryboardUpstream) return;
+    if (isWorking || queued || hasStoryboardUpstream) return;
     const dbId = parseInt(rfId, 10);
     const seedText = prompt.trim();
     setPreAiPrompt(prompt);
@@ -900,34 +937,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
       }
       return;
     }
-    if (isCharacter) {
-      const built = buildCharacterPrompt(charGender, charCountry, charVibe, charExtras);
-      // Stamp the picker selections directly onto the node so the detail
-      // panel can show metadata later.
-      const charStamp: Record<string, unknown> = {};
-      if (charCountry) charStamp.charCountry = charCountry;
-      if (charVibe) charStamp.charVibe = charVibe;
-      if (charGender) charStamp.charGender = charGender;
-      if (Object.keys(charStamp).length > 0) {
-        useBoardStore.getState().updateNodeData(rfId, charStamp);
-        const dbId = parseInt(rfId, 10);
-        if (!isNaN(dbId)) {
-          patchNode(dbId, { data: charStamp }).catch(() => {});
-        }
-      }
-      const dispatch = dispatchGeneration(rfId, {
-        prompt: built,
-        aspectRatio,
-        variantCount: variants,
-        imageModel,
-        imageResolution,
-        thinkingLevel: imageThinkingLevel,
-        seed: parsedSeed,
-      });
-      closeGenerationDialog();
-      return dispatch;
-    }
-    // Image / video branch:
+    // Image / Subject (character) / Video branch:
     // 1. If user typed/edited a prompt (or already confirmed AI output), dispatch directly.
     // 2. If empty and linked to upstream 文本 node(s), inherit upstream text verbatim (NO AI polish!).
     // 3. Otherwise ask AI to compose a draft prompt, populate textarea, and STOP for manual confirmation.
@@ -1034,208 +1044,311 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
   const isWorking = autoBuilding || nodeLLMBusy;
 
   // Both image and video allow empty prompt — we'll auto-synth on submit.
+  // Subject (character) allows generating from any prompt/template OR from upstream ref(s).
   // Veo i2v needs at least one selected source variant; Omni Flash
   // needs at least one ingredient (any upstream image-bearing node).
-  // Other targets just need the LLM not be busy.
   const queued = node.data.status === "queued" || node.data.status === "running";
   const canGenerate = !queued && !isWorking && (!isVideo || !accountIssue) && (isCharacter
-    ? charGender !== null || charCountry !== null || charExtras.trim().length > 0
+    ? prompt.trim().length > 0 || refSourceNodes.length > 0 || Boolean(upstreamPromptText)
     : isOmniVideo
     ? refSourceNodes.length > 0 && !isWorking
     : isVideo
     ? sourceMediaIds.some((_, idx) => selectedSourceIdx.has(idx))
     : true);
 
-  const promptField = (<>
-        {!isCharacter && (
-          <div className="gen-dialog__field">
-            <div className="gen-dialog__label-row">
-              <label className="gen-dialog__label" htmlFor={promptId}>
-                {isVideo ? "动作与运镜提示词" : isStoryboard ? "故事主题与分镜描述" : "画面提示词"}
-                {autoPromptUsed && (
-                  <span className="gen-dialog__auto-badge" title="已根据上游参考节点自动合成中文提示词">
-                    ✨ 中文智绘
-                  </span>
-                )}
-              </label>
-              <div className="gen-dialog__label-actions">
-                {!hasStoryboardUpstream && preAiPrompt !== null && (
-                  <button
-                    type="button"
-                    className="gen-dialog__revert-btn"
-                    onClick={handleRevertPreAiPrompt}
-                    disabled={isWorking || queued}
-                    title="撤销 AI 润色，恢复润色前的原提示词"
-                  >
-                    ↩ 还原原词
-                  </button>
-                )}
-                {!hasStoryboardUpstream && (
-                  <button
-                    type="button"
-                    className="gen-dialog__zh-btn"
-                    onClick={() => void handleAiPolish()}
-                    disabled={isWorking || queued}
-                    title="结合上游素材与当前关键词进行 AI 润色，润色后需人工确认再生成"
-                  >
-                    ✨ AI 润色
-                  </button>
-                )}
-                <span className="gen-dialog__char-count">
-                  {prompt.length}/{PROMPT_MAX_LENGTH}
-                </span>
-              </div>
-            </div>
-            {pendingAiConfirm && !isWorking && !hasStoryboardUpstream && (
-              <div className="gen-dialog__confirm-banner" role="status">
-                <span>✨ AI 已润色/生成提示词，请检查或微调后点击「确认生成」</span>
-              </div>
-            )}
-            <textarea
-              id={promptId}
-              ref={firstFocusRef}
-              className="gen-dialog__textarea"
-              rows={inline ? 4 : 6}
-              maxLength={PROMPT_MAX_LENGTH}
-              value={prompt}
-              onChange={(e) => {
-                promptManuallyEditedRef.current = true;
-                setPrompt(e.target.value);
-                if (pendingBatchPrompts) setPendingBatchPrompts(undefined);
-                if (autoPromptUsed) setAutoPromptUsed(false);
+  const visibleOfficialTemplates =
+    subjectCategory === "all"
+      ? OFFICIAL_SUBJECT_TEMPLATES
+      : OFFICIAL_SUBJECT_TEMPLATES.filter((t) => t.category === subjectCategory);
+
+  const subjectTemplatesSection = isCharacter ? (
+    <div className="gen-dialog__field jm-subject-tpl">
+      <div className="jm-subject-tpl__header">
+        <div className="jm-subject-tpl__tabs" role="tablist" aria-label="主体模板来源">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={subjectTab === "official"}
+            className={`jm-subject-tpl__tab${subjectTab === "official" ? " jm-subject-tpl__tab--active" : ""}`}
+            onClick={() => setSubjectTab("official")}
+          >
+            官方推荐模板
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={subjectTab === "custom"}
+            className={`jm-subject-tpl__tab${subjectTab === "custom" ? " jm-subject-tpl__tab--active" : ""}`}
+            onClick={() => setSubjectTab("custom")}
+          >
+            自定义模板 ({customSubjectTemplates.length})
+          </button>
+        </div>
+        <button
+          type="button"
+          className="jm-subject-tpl__add-btn"
+          onClick={handleOpenCreateTemplate}
+          disabled={isWorking || queued}
+          title="将当前提示词保存为自定义主体模板，或新建专属设定模板"
+        >
+          + {prompt.trim() ? "存为模板" : "新建模板"}
+        </button>
+      </div>
+
+      {templateFormOpen && (
+        <div className="jm-subject-tpl__editor" role="region" aria-label="编辑自定义主体模板">
+          <input
+            type="text"
+            className="jm-subject-tpl__input"
+            maxLength={40}
+            value={tplTitleDraft}
+            onChange={(e) => setTplTitleDraft(e.target.value)}
+            placeholder="模板名称（如：赛博二次元女主立绘 / 品牌吉祥物设定）"
+            aria-label="自定义模板名称"
+          />
+          <textarea
+            className="jm-subject-tpl__textarea"
+            rows={2}
+            maxLength={PROMPT_MAX_LENGTH}
+            value={tplPromptDraft}
+            onChange={(e) => setTplPromptDraft(e.target.value)}
+            placeholder="输入可复用的主体设定提示词（支持二次元、3D、写实、萌宠、道具等任意风格）…"
+            aria-label="自定义模板提示词"
+          />
+          <div className="jm-subject-tpl__editor-actions">
+            <button
+              type="button"
+              className="gen-dialog__revert-btn"
+              onClick={() => {
+                setTemplateFormOpen(false);
+                setEditingTemplateId(null);
               }}
-              onBlur={() => {
-                if (inline && !hasStoryboardUpstream && prompt !== (node?.data.prompt ?? "")) {
-                  persistNodeDraftPatch({ prompt });
-                }
-              }}
-              placeholder={
-                upstreamPromptText
-                  ? "已默认继承上游文本节点提示词，可直接生成，或点击「✨ AI 润色」"
-                  : isVideo
-                  ? "输入中文运镜与动作描述，或留空生成 AI 润色草稿供确认 ✨"
-                  : isPrompt
-                  ? "输入中文灵感描述，连线后自动继承给下游生图/生视频节点…"
-                  : isStoryboard
-                  ? "输入中文剧情脚本（如：清晨拆箱 → 试穿展示 → 街头漫步）…"
-                  : "输入中文关键词，或留空先由 AI 润色草稿并经你确认后再生成 ✨"
-              }
-              disabled={isWorking}
-              readOnly={hasStoryboardUpstream}
-              title={
-                hasStoryboardUpstream
-                  ? "已锁定：故事板连线视频将自动按分镜顺序逐格演绎动画"
-                  : undefined
-              }
-            />
-            {!hasStoryboardUpstream && (
-              <div className="gen-dialog__preset-row" aria-label="中文快捷提示词补充">
-                {CHINESE_PROMPT_PRESETS.map((preset) => (
-                  <button
-                    key={preset.label}
-                    type="button"
-                    className="gen-dialog__preset-chip"
-                    onClick={() => handleAppendChinesePreset(preset.snippet)}
-                    disabled={isWorking || queued}
-                    title={preset.snippet}
-                  >
-                    + {preset.label}
-                  </button>
-                ))}
-              </div>
-            )}
-            {hasStoryboardUpstream && (
-              <p className="gen-dialog__hint gen-dialog__hint--locked">
-                🎬 <strong>故事板动态演绎模板已启用</strong> —— 检测到上游连接了故事板节点，将按顺序串联演绎全部{" "}
-                {totalPanels(storyboardUpstreamGrid)} 个分镜画面，其他角色与参考素材仍正常生效。
-              </p>
-            )}
-            {isWorking && (
-              <p className="gen-dialog__hint">
-                {node?.data.aiBriefStatus === "pending"
-                  ? "✨ 正在解析上游参考图像…"
-                  : "✨ 正在结合上游上下文构思提示词…"}
-              </p>
-            )}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              className="jm-subject-tpl__save-btn"
+              disabled={!tplTitleDraft.trim() || !tplPromptDraft.trim()}
+              onClick={handleSaveTemplateDraft}
+            >
+              {editingTemplateId ? "保存修改" : "保存模板"}
+            </button>
           </div>
-        )}
+        </div>
+      )}
 
-  </>);
-
-  const characterFields = (<>
-        {isCharacter && (
-          <>
-            <div className="gen-dialog__field">
-              <span className="gen-dialog__label">性别</span>
-              <div className="aspect-chip-row">
-                {CHARACTER_GENDERS.map((g) => (
+      {subjectTab === "official" ? (
+        <>
+          <div className="jm-subject-tpl__cats" aria-label="官方模板分类">
+            {SUBJECT_TEMPLATE_CATEGORIES.map((cat) => (
+              <button
+                key={cat.key}
+                type="button"
+                className={`jm-subject-tpl__cat${subjectCategory === cat.key ? " jm-subject-tpl__cat--active" : ""}`}
+                onClick={() => setSubjectCategory(cat.key)}
+              >
+                {cat.label}
+              </button>
+            ))}
+          </div>
+          <div className={`jm-subject-tpl__grid${inline ? " jm-subject-tpl__grid--inline" : ""}`}>
+            {visibleOfficialTemplates.map((tpl) => {
+              const isApplied = prompt.trim() === tpl.prompt.trim() || prompt.startsWith(tpl.prompt);
+              return (
+                <button
+                  key={tpl.id}
+                  type="button"
+                  className={`jm-subject-tpl__card${isApplied ? " jm-subject-tpl__card--active" : ""}`}
+                  onClick={() => handleApplySubjectTemplate(tpl)}
+                  disabled={isWorking || queued}
+                  title={`${tpl.summary}\n\n点击插入模板提示词，插入后可自由增删角色细节`}
+                >
+                  <div className="jm-subject-tpl__card-top">
+                    <span className="jm-subject-tpl__card-title">{tpl.title}</span>
+                    <span className="jm-subject-tpl__badge">{tpl.badge}</span>
+                  </div>
+                  {!inline && <p className="jm-subject-tpl__card-desc">{tpl.summary}</p>}
+                </button>
+              );
+            })}
+          </div>
+        </>
+      ) : customSubjectTemplates.length === 0 ? (
+        <div className="jm-subject-tpl__empty">
+          暂无自定义模板。可在下方输入常用动漫/角色/IP设定词后点击右上角「+ 存为模板」，方便随时一键复用。
+        </div>
+      ) : (
+        <div className={`jm-subject-tpl__grid${inline ? " jm-subject-tpl__grid--inline" : ""}`}>
+          {customSubjectTemplates.map((tpl) => {
+            const isApplied = prompt.trim() === tpl.prompt.trim() || prompt.startsWith(tpl.prompt);
+            return (
+              <div
+                key={tpl.id}
+                className={`jm-subject-tpl__card jm-subject-tpl__card--custom${isApplied ? " jm-subject-tpl__card--active" : ""}`}
+              >
+                <button
+                  type="button"
+                  className="jm-subject-tpl__custom-pick"
+                  onClick={() => handleApplySubjectTemplate(tpl)}
+                  disabled={isWorking || queued}
+                  title={tpl.prompt}
+                >
+                  <span className="jm-subject-tpl__card-title">{tpl.title}</span>
+                  {!inline && (
+                    <span className="jm-subject-tpl__card-desc">
+                      {tpl.prompt.length > 54 ? `${tpl.prompt.slice(0, 54)}…` : tpl.prompt}
+                    </span>
+                  )}
+                </button>
+                <div className="jm-subject-tpl__custom-actions">
                   <button
-                    key={g.key}
                     type="button"
-                    className={`aspect-chip${charGender === g.key ? " aspect-chip--active" : ""}`}
-                    onClick={() => setCharGender(charGender === g.key ? null : g.key)}
+                    className="jm-subject-tpl__icon-btn"
+                    onClick={() => handleOpenEditTemplate(tpl)}
+                    title="编辑此自定义模板"
+                    aria-label={`编辑模板 ${tpl.title}`}
                   >
-                    {g.label}
+                    ✎
                   </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="gen-dialog__field">
-              <span className="gen-dialog__label">国家 / 地区面孔</span>
-              <div className="aspect-chip-row">
-                {CHARACTER_COUNTRIES.map((c) => (
                   <button
-                    key={c.key}
                     type="button"
-                    className={`aspect-chip${charCountry === c.key ? " aspect-chip--active" : ""}`}
-                    onClick={() => setCharCountry(charCountry === c.key ? null : c.key)}
+                    className="jm-subject-tpl__icon-btn jm-subject-tpl__icon-btn--del"
+                    onClick={() => removeCustomTemplate(tpl.id)}
+                    title="删除此自定义模板"
+                    aria-label={`删除模板 ${tpl.title}`}
                   >
-                    {c.label}
+                    ×
                   </button>
-                ))}
+                </div>
               </div>
-            </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  ) : null;
 
-            <div className="gen-dialog__field">
-              <span className="gen-dialog__label">妆造与气质风格</span>
-              <div className="aspect-chip-row">
-                {CHARACTER_VIBES.map((v) => (
-                  <button
-                    key={v.key}
-                    type="button"
-                    className={`aspect-chip${charVibe === v.key ? " aspect-chip--active" : ""}`}
-                    onClick={() => setCharVibe(v.key)}
-                  >
-                    {v.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="gen-dialog__field">
-              <div className="gen-dialog__label-row">
-                <label className="gen-dialog__label" htmlFor={extrasId}>
-                  补充外貌特征（可选）
-                  <InfoTip tip="系统会自动锚定正脸、平视、无遮挡影棚标准定妆照构图，确保在下游多镜头生图与图生视频中维持高度一致的人脸身份。" />
-                </label>
-                <span className="gen-dialog__char-count">{charExtras.length}/200</span>
-              </div>
-              <textarea
-                id={extrasId}
-                ref={firstFocusRef}
-                className="gen-dialog__textarea"
-                rows={inline ? 2 : 3}
-                maxLength={200}
-                value={charExtras}
-                onChange={(e) => setCharExtras(e.target.value)}
-                placeholder="例如：年龄段、发型发色、服装细节、神态特征…"
-              />
-            </div>
-          </>
-        )}
-
-  </>);
+  const promptField = (
+    <div className="gen-dialog__field">
+      <div className="gen-dialog__label-row">
+        <label className="gen-dialog__label" htmlFor={promptId}>
+          {isVideo
+            ? "动作与运镜提示词"
+            : isStoryboard
+            ? "故事主题与分镜描述"
+            : isCharacter
+            ? "主体设定提示词（支持动漫 / 3D / 真人 / 萌宠 / 道具）"
+            : "画面提示词"}
+          {autoPromptUsed && (
+            <span className="gen-dialog__auto-badge" title="已根据上游参考节点自动合成中文提示词">
+              ✨ 中文智绘
+            </span>
+          )}
+        </label>
+        <div className="gen-dialog__label-actions">
+          {!hasStoryboardUpstream && preAiPrompt !== null && (
+            <button
+              type="button"
+              className="gen-dialog__revert-btn"
+              onClick={handleRevertPreAiPrompt}
+              disabled={isWorking || queued}
+              title="撤销上次润色或模板套用，恢复原提示词"
+            >
+              ↩ 还原原词
+            </button>
+          )}
+          {!hasStoryboardUpstream && (
+            <button
+              type="button"
+              className="gen-dialog__zh-btn"
+              onClick={() => void handleAiPolish()}
+              disabled={isWorking || queued}
+              title="结合上游素材与当前关键词进行 AI 润色，润色后需人工确认再生成"
+            >
+              ✨ AI 润色
+            </button>
+          )}
+          <span className="gen-dialog__char-count">
+            {prompt.length}/{PROMPT_MAX_LENGTH}
+          </span>
+        </div>
+      </div>
+      {pendingAiConfirm && !isWorking && !hasStoryboardUpstream && (
+        <div className="gen-dialog__confirm-banner" role="status">
+          <span>✨ AI 已润色/生成提示词，请检查或微调后点击「确认生成」</span>
+        </div>
+      )}
+      <textarea
+        id={promptId}
+        ref={firstFocusRef}
+        className="gen-dialog__textarea"
+        rows={inline ? 4 : 5}
+        maxLength={PROMPT_MAX_LENGTH}
+        value={prompt}
+        onChange={(e) => {
+          promptManuallyEditedRef.current = true;
+          setPrompt(e.target.value);
+          if (pendingBatchPrompts) setPendingBatchPrompts(undefined);
+          if (autoPromptUsed) setAutoPromptUsed(false);
+        }}
+        onBlur={() => {
+          if (inline && !hasStoryboardUpstream && prompt !== (node?.data.prompt ?? "")) {
+            persistNodeDraftPatch({ prompt });
+          }
+        }}
+        placeholder={
+          upstreamPromptText
+            ? "已默认继承上游文本节点提示词，可直接生成，或点击「✨ AI 润色」"
+            : isCharacter
+            ? "点击上方官方/自定义模板一键插入，或自由描述动漫角色、3D/游戏人物、真人定妆、萌宠与核心道具特征（也可连线参考图提纯主体）…"
+            : isVideo
+            ? "输入中文运镜与动作描述，或留空生成 AI 润色草稿供确认 ✨"
+            : isPrompt
+            ? "输入中文灵感描述，连线后自动继承给下游生图/生视频节点…"
+            : isStoryboard
+            ? "输入中文剧情脚本（如：清晨拆箱 → 试穿展示 → 街头漫步）…"
+            : "输入中文关键词，或留空先由 AI 润色草稿并经你确认后再生成 ✨"
+        }
+        disabled={isWorking}
+        readOnly={hasStoryboardUpstream}
+        title={
+          hasStoryboardUpstream
+            ? "已锁定：故事板连线视频将自动按分镜顺序逐格演绎动画"
+            : undefined
+        }
+      />
+      {!hasStoryboardUpstream && (
+        <div className="gen-dialog__preset-row" aria-label="中文快捷提示词补充">
+          {CHINESE_PROMPT_PRESETS.map((preset) => (
+            <button
+              key={preset.label}
+              type="button"
+              className="gen-dialog__preset-chip"
+              onClick={() => handleAppendChinesePreset(preset.snippet)}
+              disabled={isWorking || queued}
+              title={preset.snippet}
+            >
+              + {preset.label}
+            </button>
+          ))}
+        </div>
+      )}
+      {hasStoryboardUpstream && (
+        <p className="gen-dialog__hint gen-dialog__hint--locked">
+          🎬 <strong>故事板动态演绎模板已启用</strong> —— 检测到上游连接了故事板节点，将按顺序串联演绎全部{" "}
+          {totalPanels(storyboardUpstreamGrid)} 个分镜画面，其他角色与参考素材仍正常生效。
+        </p>
+      )}
+      {isWorking && (
+        <p className="gen-dialog__hint">
+          {node?.data.aiBriefStatus === "pending"
+            ? "✨ 正在解析上游参考图像…"
+            : "✨ 正在结合上游上下文构思提示词…"}
+        </p>
+      )}
+    </div>
+  );
 
   const references = (<>
         {isVideo && !isOmniVideo && (
@@ -1541,7 +1654,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
 
   if (inline) {
     const unavailable = isCharacter
-      ? "请填写主体特征，或选择主体设定。"
+      ? "请选择推荐/自定义模板、填写主体特征描述，或连线参考图。"
       : isOmniVideo
         ? "请连线至少一张参考图或视频。"
         : isVideo
@@ -1574,7 +1687,8 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
         }}
       >
         {references}
-        {isCharacter ? characterFields : promptField}
+        {subjectTemplatesSection}
+        {promptField}
         {inlineHint && (
           <p className="jm-context-generator__hint">{inlineHint}</p>
         )}
@@ -1795,7 +1909,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
               {isVideo
                 ? "生成视频"
                 : isCharacter
-                ? "生成角色主体"
+                ? "生成主体设定"
                 : isStoryboard
                 ? "生成分镜故事板"
                 : isPrompt
@@ -1815,8 +1929,9 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
           </button>
         </div>
 
+        <div className="gen-dialog__body">
+        {subjectTemplatesSection}
         {promptField}
-        {characterFields}
         {references}
 
         {isVideo && accountIssue && (
@@ -2156,6 +2271,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
             </div>
           </div>
         )}
+        </div>
 
         {/* Footer */}
         <div className="gen-dialog__footer">

@@ -303,3 +303,48 @@ def test_build_board_context_includes_history_and_nodes():
     assert "first" in ctx
     assert "previous reply" in ctx
     assert "#ab12" in ctx and "media=2" in ctx
+
+
+def test_gen_image_tool_supports_reference_node_short_ids():
+    board_id, run_id = _mk_run(message="基于 #wuop 生成新场景")
+    with get_session() as s:
+        s.add(
+            Node(
+                board_id=board_id,
+                short_id="wuop",
+                type="character",
+                data={"mediaId": "anime-ref-mid-01"},
+                status="done",
+            )
+        )
+        s.commit()
+
+    script = [
+        json.dumps(
+            {
+                "tool": "gen_image",
+                "args": {
+                    "prompt": "日系二次元少女在樱花街道漫步",
+                    "reference_node_short_ids": ["wuop"],
+                },
+            }
+        ),
+        json.dumps({"done": True, "reply": "已基于选中角色生成新分镜"}),
+    ]
+    captured_refs = []
+
+    async def fake_llm(*args, **kwargs):
+        return script.pop(0)
+
+    async def fake_media(**kwargs):
+        captured_refs.append(kwargs.get("reference_media_ids"))
+        return {"media_ids": ["new-scene-mid"], "media_entries": []}, None
+
+    with (
+        patch.object(chat_agent, "run_llm", fake_llm),
+        patch.object(chat_agent, "run_muse_media", fake_media),
+    ):
+        asyncio.run(chat_agent.run_chat_agent(board_id, run_id, "基于 #wuop 生成新场景", [], ["wuop"]))
+
+    assert captured_refs == [["anime-ref-mid-01"]]
+    assert _run_row(run_id).status == "done"

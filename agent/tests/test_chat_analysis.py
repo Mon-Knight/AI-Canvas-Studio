@@ -113,3 +113,49 @@ def test_nonlocal_origin_and_host_rejected_before_paid_calls_or_key_changes(clie
         assert client.post(path, headers=bad, json={}).status_code == 403
     assert client.get("/api/llm/config", headers={"Host": "example.invalid"}).status_code == 403
     assert client.get("/api/llm/config", headers={"Origin": "http://localhost:5173"}).status_code == 200
+
+
+def test_analyze_attaches_cached_canvas_node_image_from_mentions(client, tmp_path, monkeypatch):
+    """Selecting/referencing a canvas node (#wuop) with cached media sends its image to vision analysis."""
+    monkeypatch.setenv("FLOWBOARD_SECRETS_PATH", str(tmp_path / "secrets.json"))
+    assert client.put("/api/llm/providers/openai_api", json={"apiKey": "test-key"}).is_success
+    assert client.put("/api/llm/config", json={"chat_agent": {"provider": "openai_api", "model": "vision-m"}}).is_success
+    board_id = client.post("/api/boards", json={"name": "动漫角色画布"}).json()["id"]
+
+    media_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    fake_png = tmp_path / f"{media_id}.png"
+    fake_png.write_bytes(b"\x89PNG\r\n\x1a\n" + bytes(32))
+    monkeypatch.setattr("flowboard.services.media.cached_path", lambda mid: fake_png if mid == media_id else None)
+
+    with get_session() as s:
+        s.add(Node(
+            board_id=board_id,
+            short_id="wuop",
+            type="character",
+            data={"title": "二次元角色", "mediaId": media_id, "aiBrief": "日系二次元少女戴巫师帽"},
+            status="done",
+        ))
+        s.commit()
+
+    calls = []
+    real_client = httpx.AsyncClient
+
+    def stub(**kw):
+        return real_client(
+            transport=httpx.MockTransport(
+                lambda req: (calls.append(req), httpx.Response(200, json={"choices": [{"message": {"content": "已识别动漫巫师少女"}}]}))[1]
+            ),
+            **kw,
+        )
+
+    with patch.object(httpx, "AsyncClient", side_effect=stub):
+        res = client.post(
+            "/api/chat",
+            json={"board_id": board_id, "mode": "analyze", "message": "分析所选主体画风", "mentions": ["wuop"]},
+        )
+    assert res.is_success
+    assert len(calls) == 1
+    body = json.loads(calls[0].content)
+    content = body["messages"][-1]["content"]
+    assert "#wuop" in content[0]["text"]
+    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")

@@ -77,7 +77,7 @@ const PANE_CREATE_ITEMS: Array<{
   { type: "prompt", label: "文本", desc: "编写脚本与提示词", renderIcon: () => <IconText size={15} /> },
   { type: "image", label: "图片", desc: "文生图 / 多参考合成", renderIcon: () => <IconImage size={15} /> },
   { type: "video", label: "视频", desc: "图生视频 / 多镜头动态", renderIcon: () => <IconVideo size={15} /> },
-  { type: "character", label: "角色主体", desc: "固定人像外貌锚点", renderIcon: () => <IconSubject size={15} /> },
+  { type: "character", label: "主体", desc: "动漫 / 真人 / 3D / 萌宠设定", renderIcon: () => <IconSubject size={15} /> },
   { type: "visual_asset", label: "物品素材", desc: "商品/道具参考与精修", renderIcon: () => <IconVisualAsset size={15} /> },
   { type: "Storyboard", label: "故事板", desc: "连续分镜宫格生成", renderIcon: () => <IconStoryboard size={15} /> },
   { type: "note", label: "便签", desc: "画布自由批注", renderIcon: () => <IconNote size={15} /> },
@@ -90,6 +90,7 @@ const EDGE_DROP_ITEMS: Array<{
 }> = [
   { type: "image", label: "生成图片", renderIcon: () => <IconImage size={15} /> },
   { type: "video", label: "生成视频", renderIcon: () => <IconVideo size={15} /> },
+  { type: "character", label: "生成主体", renderIcon: () => <IconSubject size={15} /> },
   { type: "Storyboard", label: "生成故事板", renderIcon: () => <IconStoryboard size={15} /> },
 ];
 
@@ -253,9 +254,9 @@ function ContextualPromptBar({ node }: { node: FlowNode }) {
   const panelLeft = Math.max(gutter, Math.min(center - panelWidth / 2, width - gutter - panelWidth));
   const below = height - bottom - 24;
   const above = top - 70;
-  const preferAbove = below < 240 && above > below;
+  const preferAbove = below < 260 && above > below;
   const fit = preferAbove ? above : below;
-  const fallback = fit < 140;
+  const fallback = fit < 220;
 
   return (
     <div
@@ -266,7 +267,7 @@ function ContextualPromptBar({ node }: { node: FlowNode }) {
         top: fallback ? undefined : preferAbove ? top - 34 : bottom + 12,
         bottom: fallback ? 56 : undefined,
         transform: !fallback && preferAbove ? "translateY(-100%)" : undefined,
-        maxHeight: fallback ? Math.max(80, height - 114) : fit,
+        maxHeight: fallback ? Math.min(480, Math.max(200, height - 114)) : fit,
       }}
     >
       <GenerationComposer rfId={node.id} initialPrompt={(node.data.type === "Storyboard" ? node.data.aiBrief : node.data.prompt) ?? ""} inline />
