@@ -9,11 +9,13 @@ import {
   cleanChromeUserAgent,
   E2E_CONTROL_PORT,
   ELECTRON_USER_DATA,
+  getAgentHttpPort,
+  getAgentWsPort,
+  getUiUrl,
   PACKAGED_AGENT_EXE,
   PYTHON_EXE,
   REPO_ROOT,
   RESOURCES_ROOT,
-  UI_URL,
 } from "./config";
 import { FlowEngineManager } from "./flow-engine";
 import {
@@ -287,6 +289,8 @@ async function startE2eControlServer(port: number): Promise<void> {
           canvasUrl: mainWindow?.webContents.getURL() ?? "",
           agentPid: agentRunner.pid,
           agentOwned: agentRunner.isOwnedProcess,
+          agentHttpPort: getAgentHttpPort(),
+          agentWsPort: getAgentWsPort(),
           inner: flowEngine?.getInnerViewDebugInfo() ?? null,
         });
         return;
@@ -414,7 +418,7 @@ async function boot(): Promise<void> {
   });
   flowEngine.start();
 
-  await mainWindow.loadURL(UI_URL);
+  await mainWindow.loadURL(getUiUrl());
 
   if (E2E_CONTROL_PORT) {
     await startE2eControlServer(E2E_CONTROL_PORT);

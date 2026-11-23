@@ -16,6 +16,8 @@ def allowed_ui_origins() -> set[str]:
     ports = {5173, 8434}
     if (_extra_port := os.getenv("FLOWBOARD_HTTP_PORT", "").strip()).isdigit():
         ports.add(int(_extra_port))
+    if (_fe_port := os.getenv("FLOWBOARD_FRONTEND_PORT", "").strip()).isdigit():
+        ports.add(int(_fe_port))
     if ui_url := os.getenv("FLOWBOARD_UI_URL", "").strip():
         parsed = urlparse(ui_url)
         if parsed.hostname in _LOCAL_HOSTS and parsed.port:
@@ -47,7 +49,8 @@ def local_origin(request: Request) -> None:
     if request.url.hostname not in _LOCAL_HOSTS:
         raise HTTPException(403, "此功能仅供本地画布使用。")
     origin = request.headers.get("origin")
-    if origin is not None and origin not in allowed_ui_origins():
+    same_loopback_origin = f"{request.url.scheme}://{request.url.netloc}"
+    if origin is not None and origin not in allowed_ui_origins() and origin != same_loopback_origin:
         raise HTTPException(403, "此功能仅供本地画布使用。")
     # Block cross-site browser requests without a trusted local Origin
     # (e.g. no-cors fetches, form posts, or cross-site subresource probes),

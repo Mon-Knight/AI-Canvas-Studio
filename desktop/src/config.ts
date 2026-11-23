@@ -36,6 +36,7 @@ function resolveStorageDir(): string {
 }
 
 export const STORAGE_DIR = resolveStorageDir();
+export const ACTIVE_PORTS_FILE = path.join(STORAGE_DIR, "active-ports.json");
 
 export const ELECTRON_USER_DATA = path.join(STORAGE_DIR, "electron-user-data");
 export const TOKENS_FILE = path.join(ELECTRON_USER_DATA, "flow-bridge-tokens.json");
@@ -44,12 +45,36 @@ export const PYTHON_EXE =
   process.env.FLOWBOARD_PYTHON_EXE ||
   path.join(REPO_ROOT, "agent", ".venv", "Scripts", "python.exe");
 
-export const AGENT_HTTP_PORT = Number(process.env.FLOWBOARD_HTTP_PORT || "8434");
-export const AGENT_WS_PORT = Number(process.env.FLOWBOARD_EXT_WS_PORT || "8355");
+export const DEFAULT_HTTP_PORT = 8434;
+export const DEFAULT_WS_PORT = 8355;
+export const HTTP_PORT_CANDIDATES = [8434, 18434, 18435, 18436, 28434, 28435, 38434] as const;
+export const WS_PORT_CANDIDATES = [8355, 18355, 28355, 38355] as const;
 
-export const AGENT_BASE_URL = `http://127.0.0.1:${AGENT_HTTP_PORT}`;
-export const AGENT_WS_URL = `ws://127.0.0.1:${AGENT_WS_PORT}`;
-export const CALLBACK_URL = `${AGENT_BASE_URL}/api/ext/callback`;
+export const HAS_EXPLICIT_HTTP_PORT = Boolean(process.env.FLOWBOARD_HTTP_PORT?.trim());
+export const HAS_EXPLICIT_WS_PORT = Boolean(process.env.FLOWBOARD_EXT_WS_PORT?.trim());
+
+let resolvedHttpPort = Number(process.env.FLOWBOARD_HTTP_PORT || String(DEFAULT_HTTP_PORT));
+let resolvedWsPort = Number(process.env.FLOWBOARD_EXT_WS_PORT || String(DEFAULT_WS_PORT));
+
+export function getAgentHttpPort(): number {
+  return resolvedHttpPort;
+}
+
+export function getAgentWsPort(): number {
+  return resolvedWsPort;
+}
+
+export function getAgentBaseUrl(): string {
+  return `http://127.0.0.1:${resolvedHttpPort}`;
+}
+
+export function getAgentWsUrl(): string {
+  return `ws://127.0.0.1:${resolvedWsPort}`;
+}
+
+export function getCallbackUrl(): string {
+  return `http://127.0.0.1:${resolvedHttpPort}/api/ext/callback`;
+}
 
 export const FLOW_BASE_URL = (
   process.env.FLOWBOARD_FLOW_BASE_URL || "https://flow.google.com"
@@ -58,9 +83,17 @@ export const FLOW_BASE_URL = (
 export const IS_DEV_MODE =
   process.argv.includes("--dev") || process.env.FLOWBOARD_DESKTOP_DEV === "1";
 
-export const UI_URL =
-  process.env.FLOWBOARD_UI_URL ||
-  (IS_DEV_MODE ? "http://127.0.0.1:5173" : `${AGENT_BASE_URL}/`);
+export function getUiUrl(): string {
+  return (
+    process.env.FLOWBOARD_UI_URL ||
+    (IS_DEV_MODE ? "http://127.0.0.1:5173" : `${getAgentBaseUrl()}/`)
+  );
+}
+
+export function setResolvedAgentPorts(httpPort: number, wsPort: number): void {
+  resolvedHttpPort = httpPort;
+  resolvedWsPort = wsPort;
+}
 
 export const E2E_CONTROL_PORT = process.env.FLOWBOARD_E2E_PORT
   ? Number(process.env.FLOWBOARD_E2E_PORT)

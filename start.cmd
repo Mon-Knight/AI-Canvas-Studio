@@ -7,7 +7,7 @@ if /i "%~1"=="--web" goto web_mode
 if /i "%~1"=="--agent" goto agent
 if /i "%~1"=="--frontend" goto frontend
 if /i "%~1"=="--check" goto check
-echo Usage: start.cmd [--desktop ^| --web ^| --check]
+echo Usage: start.cmd [--desktop ^| --web ^| --agent ^| --frontend ^| --check]
 exit /b 2
 
 :desktop_mode
@@ -49,18 +49,37 @@ if errorlevel 1 (
 exit /b 0
 
 :agent
-title Flowboard Agent :8434
 pushd "%~dp0agent"
 if errorlevel 1 goto launch_error
-".venv\Scripts\python.exe" -m uvicorn flowboard.main:app --reload --host 127.0.0.1 --port 8434 --timeout-graceful-shutdown 2
+set "FB_HTTP_PORT=8434"
+set "FB_WS_PORT=8355"
+for /f "usebackq tokens=1,2 delims==" %%A in (`".venv\Scripts\python.exe" -m flowboard.port_probe --mode agent`) do (
+    if /i "%%A"=="HTTP_PORT" set "FB_HTTP_PORT=%%B"
+    if /i "%%A"=="WS_PORT" set "FB_WS_PORT=%%B"
+)
+set "FLOWBOARD_HTTP_PORT=%FB_HTTP_PORT%"
+set "FLOWBOARD_EXT_WS_PORT=%FB_WS_PORT%"
+if not "%FB_HTTP_PORT%"=="8434" (
+    echo [INFO] Port 8434 is occupied or reserved by Windows; auto-switched Agent HTTP to 127.0.0.1:%FB_HTTP_PORT% ^(WS :%FB_WS_PORT%^)
+)
+title Flowboard Agent :%FB_HTTP_PORT%
+".venv\Scripts\python.exe" -m uvicorn flowboard.main:app --reload --host 127.0.0.1 --port %FB_HTTP_PORT% --timeout-graceful-shutdown 2
 if errorlevel 1 goto launch_error
 exit /b 0
 
 :frontend
-title Flowboard Frontend :5173
+set "FB_FE_PORT=5173"
+set "FB_HTTP_PORT=8434"
+for /f "usebackq tokens=1,2 delims==" %%A in (`"%~dp0agent\.venv\Scripts\python.exe" -m flowboard.port_probe --mode frontend`) do (
+    if /i "%%A"=="FRONTEND_PORT" set "FB_FE_PORT=%%B"
+    if /i "%%A"=="HTTP_PORT" set "FB_HTTP_PORT=%%B"
+)
+set "FLOWBOARD_HTTP_PORT=%FB_HTTP_PORT%"
+set "FLOWBOARD_FRONTEND_PORT=%FB_FE_PORT%"
+title Flowboard Frontend :%FB_FE_PORT% ^(Proxy -^> :%FB_HTTP_PORT%^)
 pushd "%~dp0frontend"
 if errorlevel 1 goto launch_error
-call npm run dev -- --strictPort
+call npm run dev -- --port %FB_FE_PORT%
 if errorlevel 1 goto launch_error
 exit /b 0
 

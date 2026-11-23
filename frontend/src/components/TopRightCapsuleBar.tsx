@@ -432,8 +432,10 @@ export function TopRightCapsuleBar() {
     : extConnected
       ? "online"
       : "standby";
+  const currentPortLabel =
+    typeof window !== "undefined" && window.location.port ? `:${window.location.port}` : ":8434";
   const connTooltip = !agentOk
-    ? "本地 Agent 未连接 (:8434)"
+    ? `本地 Agent 未连接 (${currentPortLabel})`
     : embeddedMode
       ? extConnected
         ? "内层 Flow 浏览器引擎已静默就绪"

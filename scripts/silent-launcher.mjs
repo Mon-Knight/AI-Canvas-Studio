@@ -1,11 +1,16 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
 const LAUNCHER_LOG_PATH = path.join(REPO_ROOT, "storage", "launcher.log");
+
+const HTTP_PORT_CANDIDATES = [8434, 18434, 18435, 18436, 28434, 28435, 38434];
+const WS_PORT_CANDIDATES = [8355, 18355, 28355, 38355];
+const FRONTEND_PORT_CANDIDATES = [5173, 15173, 25173];
 
 function appendLauncherLog(message) {
   try {
@@ -31,6 +36,54 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function canBindLoopbackPort(port) {
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    return Promise.resolve(false);
+  }
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.once("error", () => resolve(false));
+    srv.listen({ port, host: "127.0.0.1", exclusive: true }, () => {
+      srv.close(() => resolve(true));
+    });
+  });
+}
+
+function allocateEphemeralLoopbackPort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.once("error", reject);
+    srv.listen({ port: 0, host: "127.0.0.1", exclusive: true }, () => {
+      const addr = srv.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      srv.close((err) => (err ? reject(err) : resolve(port)));
+    });
+  });
+}
+
+async function pickBindablePort(preferred, candidates, disallow = new Set()) {
+  const ordered = [];
+  for (const p of [preferred, ...candidates]) {
+    if (Number.isInteger(p) && p > 0 && p <= 65535 && !disallow.has(p) && !ordered.includes(p)) {
+      ordered.push(p);
+    }
+  }
+  for (const candidate of ordered) {
+    if (await canBindLoopbackPort(candidate)) {
+      return candidate;
+    }
+  }
+  for (let i = 0; i < 5; i++) {
+    const ephemeral = await allocateEphemeralLoopbackPort();
+    if (ephemeral > 0 && !disallow.has(ephemeral)) {
+      return ephemeral;
+    }
+  }
+  throw new Error("Unable to allocate a bindable loopback port on 127.0.0.1");
+}
+
 function runHidden(command, commandArgs, { cwd, env = cleanEnv } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, commandArgs, {
@@ -54,6 +107,23 @@ async function isHttpOk(url, headers = {}) {
     const res = await fetch(url, { signal: controller.signal, headers });
     clearTimeout(timer);
     return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function isFlowboardAgentAt(port) {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 1200);
+    const res = await fetch(`http://127.0.0.1:${port}/api/health`, {
+      signal: controller.signal,
+      headers: { Host: `127.0.0.1:${port}` },
+    });
+    clearTimeout(timer);
+    if (!res.ok) return false;
+    const body = await res.json();
+    return body?.ok === true && typeof body?.ws_stats === "object" && body.ws_stats !== null;
   } catch {
     return false;
   }
@@ -167,11 +237,43 @@ async function launchWeb() {
 
   fs.mkdirSync(storageDir, { recursive: true });
   const pidFile = path.join(storageDir, "web-service-pids.json");
+  const activePortsFile = path.join(storageDir, "active-ports.json");
 
   let agentPid = null;
   let frontendPid = null;
 
-  if (!(await isHttpOk("http://127.0.0.1:8434/api/health", { Host: "127.0.0.1:8434" }))) {
+  const prefHttp = Number(cleanEnv.FLOWBOARD_HTTP_PORT || "8434");
+  const prefWs = Number(cleanEnv.FLOWBOARD_EXT_WS_PORT || "8355");
+  const prefFe = Number(cleanEnv.FLOWBOARD_FRONTEND_PORT || "5173");
+
+  let httpPort = null;
+  let wsPort = prefWs;
+  for (const candidate of [prefHttp, ...HTTP_PORT_CANDIDATES]) {
+    if (await isFlowboardAgentAt(candidate)) {
+      httpPort = candidate;
+      break;
+    }
+  }
+
+  let fePort = null;
+  for (const candidate of [prefFe, ...FRONTEND_PORT_CANDIDATES]) {
+    if (await isHttpOk(`http://127.0.0.1:${candidate}/`)) {
+      fePort = candidate;
+      break;
+    }
+  }
+  if (!fePort) {
+    fePort = await pickBindablePort(
+      prefFe,
+      FRONTEND_PORT_CANDIDATES,
+      httpPort ? new Set([httpPort]) : new Set(),
+    );
+  }
+
+  if (!httpPort) {
+    httpPort = await pickBindablePort(prefHttp, HTTP_PORT_CANDIDATES, new Set([fePort]));
+    wsPort = await pickBindablePort(prefWs, WS_PORT_CANDIDATES, new Set([httpPort, fePort]));
+
     const agentProc = spawn(
       pythonExe,
       [
@@ -181,7 +283,7 @@ async function launchWeb() {
         "--host",
         "127.0.0.1",
         "--port",
-        "8434",
+        String(httpPort),
         "--timeout-graceful-shutdown",
         "2",
       ],
@@ -194,28 +296,63 @@ async function launchWeb() {
           ...cleanEnv,
           PYTHONUTF8: "1",
           FLOWBOARD_STORAGE: storageDir,
+          FLOWBOARD_HTTP_PORT: String(httpPort),
+          FLOWBOARD_EXT_WS_PORT: String(wsPort),
+          FLOWBOARD_FRONTEND_PORT: String(fePort),
         },
       },
     );
     agentPid = agentProc.pid ?? null;
     agentProc.unref();
+    appendLauncherLog(`Spawned web Agent pid=${agentPid ?? "unknown"} http=:${httpPort} ws=:${wsPort}`);
   }
 
-  if (!(await isHttpOk("http://127.0.0.1:5173/"))) {
-    const feProc = spawn(process.execPath, [viteJs, "--strictPort"], {
+  fs.writeFileSync(
+    activePortsFile,
+    JSON.stringify(
+      {
+        http_port: httpPort,
+        ws_port: wsPort,
+        frontend_port: fePort,
+        pid: agentPid,
+        updated_at: new Date().toISOString(),
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+
+  if (!(await isHttpOk(`http://127.0.0.1:${fePort}/`))) {
+    const feProc = spawn(process.execPath, [viteJs, "--port", String(fePort), "--strictPort"], {
       cwd: frontendDir,
       detached: true,
       stdio: "ignore",
       windowsHide: true,
-      env: cleanEnv,
+      env: {
+        ...cleanEnv,
+        FLOWBOARD_HTTP_PORT: String(httpPort),
+        FLOWBOARD_FRONTEND_PORT: String(fePort),
+      },
     });
     frontendPid = feProc.pid ?? null;
     feProc.unref();
+    appendLauncherLog(`Spawned web Frontend pid=${frontendPid ?? "unknown"} port=:${fePort}`);
   }
 
   fs.writeFileSync(
     pidFile,
-    JSON.stringify({ agent_pid: agentPid, frontend_pid: frontendPid }, null, 2),
+    JSON.stringify(
+      {
+        agent_pid: agentPid,
+        frontend_pid: frontendPid,
+        http_port: httpPort,
+        ws_port: wsPort,
+        frontend_port: fePort,
+      },
+      null,
+      2,
+    ),
     "utf8",
   );
 
@@ -223,8 +360,8 @@ async function launchWeb() {
   let ready = false;
   while (Date.now() < deadline) {
     const [agentOk, feOk] = await Promise.all([
-      isHttpOk("http://127.0.0.1:8434/api/health", { Host: "127.0.0.1:8434" }),
-      isHttpOk("http://127.0.0.1:5173/"),
+      isFlowboardAgentAt(httpPort),
+      isHttpOk(`http://127.0.0.1:${fePort}/`),
     ]);
     if (agentOk && feOk) {
       ready = true;
@@ -234,11 +371,11 @@ async function launchWeb() {
   }
 
   if (!ready) {
-    throw new Error("Timed out waiting for silent web services (:8434 and :5173)");
+    throw new Error(`Timed out waiting for silent web services (:${httpPort} and :${fePort})`);
   }
 
   if (!noOpen && process.platform === "win32") {
-    const opener = spawn("explorer.exe", ["http://localhost:5173"], {
+    const opener = spawn("explorer.exe", [`http://localhost:${fePort}`], {
       detached: true,
       stdio: "ignore",
       windowsHide: true,

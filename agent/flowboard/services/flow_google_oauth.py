@@ -33,10 +33,17 @@ class Config:
     redirect_uri: str
 
 
+def _default_callback() -> str:
+    port = os.getenv("FLOWBOARD_HTTP_PORT", "").strip()
+    if port.isdigit() and 1 <= int(port) <= 65535:
+        return f"http://127.0.0.1:{port}{CALLBACK_PATH}"
+    return DEFAULT_CALLBACK
+
+
 def config() -> Config | None:
     client_id = os.getenv("FLOWBOARD_GOOGLE_CLIENT_ID", "").strip()
     client_secret = os.getenv("FLOWBOARD_GOOGLE_CLIENT_SECRET", "").strip()
-    redirect_uri = os.getenv("FLOWBOARD_GOOGLE_REDIRECT_URI", DEFAULT_CALLBACK).strip()
+    redirect_uri = os.getenv("FLOWBOARD_GOOGLE_REDIRECT_URI", _default_callback()).strip()
     try:
         uri = urlsplit(redirect_uri)
         valid = (uri.scheme == "http" and uri.hostname in {"localhost", "127.0.0.1", "::1"}

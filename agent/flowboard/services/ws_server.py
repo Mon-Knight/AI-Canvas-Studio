@@ -4,11 +4,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from dataclasses import dataclass
 
 import websockets
 
 from flowboard.config import EXTENSION_WS_PORT, WS_HOST
+from flowboard.port_probe import WS_PORT_CANDIDATES, write_active_ports
 from flowboard.db import get_session
 from flowboard.db.models import FlowAccount
 from flowboard.services import flow_accounts
@@ -67,8 +69,18 @@ async def refresh_route_locked() -> None:
         flow_client.rotate_callback_secret()
     chosen = next((ws for ws, peer in _connections.items() if eligible(peer)), None)
     if chosen is not None:
+        http_port = os.getenv("FLOWBOARD_HTTP_PORT", "8434").strip() or "8434"
+        callback_url = f"http://127.0.0.1:{http_port}/api/ext/callback"
         try:
-            await chosen.send(json.dumps({"type": "callback_secret", "secret": flow_client.callback_secret}))
+            await chosen.send(
+                json.dumps(
+                    {
+                        "type": "callback_secret",
+                        "secret": flow_client.callback_secret,
+                        "callback_url": callback_url,
+                    }
+                )
+            )
         except websockets.ConnectionClosed:
             return
         flow_client.set_extension(chosen)
@@ -167,11 +179,38 @@ async def _handler(websocket) -> None:
 async def run_ws_server() -> None:
     # 32 MiB frame ceiling matches extension/MAX_RPC_TEXT for large project payloads
     # and any WebSocket callback fallback without tripping 1009 Message Too Big.
-    async with websockets.serve(
-        _handler,
-        WS_HOST,
-        EXTENSION_WS_PORT,
-        max_size=32 * 1024 * 1024,
-    ):
-        logger.info("WebSocket server listening on ws://%s:%d", WS_HOST, EXTENSION_WS_PORT)
-        await asyncio.Future()
+    candidates: list[int] = []
+    preferred = int(os.getenv("FLOWBOARD_EXT_WS_PORT", str(EXTENSION_WS_PORT)) or str(EXTENSION_WS_PORT))
+    for p in (preferred, *WS_PORT_CANDIDATES):
+        if p not in candidates:
+            candidates.append(p)
+
+    last_err: OSError | None = None
+    for idx, port in enumerate(candidates):
+        try:
+            async with websockets.serve(
+                _handler,
+                WS_HOST,
+                port,
+                max_size=32 * 1024 * 1024,
+            ):
+                if port != preferred:
+                    os.environ["FLOWBOARD_EXT_WS_PORT"] = str(port)
+                    write_active_ports(ws_port=port)
+                    logger.warning(
+                        "WS port %d unavailable; auto-switched extension bridge to ws://%s:%d",
+                        preferred,
+                        WS_HOST,
+                        port,
+                    )
+                else:
+                    logger.info("WebSocket server listening on ws://%s:%d", WS_HOST, port)
+                await asyncio.Future()
+                return
+        except OSError as exc:
+            last_err = exc
+            if idx + 1 < len(candidates):
+                continue
+            raise
+    if last_err is not None:
+        raise last_err

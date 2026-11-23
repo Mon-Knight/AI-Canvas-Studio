@@ -8,12 +8,12 @@ import {
 } from "electron";
 import WebSocket from "ws";
 import {
-  AGENT_BASE_URL,
-  AGENT_HTTP_PORT,
-  AGENT_WS_URL,
-  CALLBACK_URL,
   EXTENSION_DIR,
   FLOW_BASE_URL,
+  getAgentBaseUrl,
+  getAgentHttpPort,
+  getAgentWsUrl,
+  getCallbackUrl,
   STORAGE_DIR,
   TOKENS_FILE,
 } from "./config";
@@ -461,8 +461,8 @@ export class FlowEngineManager {
   private async doSyncAccountsNow(): Promise<FlowEngineState> {
     if (this.disposed) return this.getState();
     try {
-      const res = await fetch(`${AGENT_BASE_URL}/api/flow-accounts`, {
-        headers: { Host: `127.0.0.1:${AGENT_HTTP_PORT}` },
+      const res = await fetch(`${getAgentBaseUrl()}/api/flow-accounts`, {
+        headers: { Host: `127.0.0.1:${getAgentHttpPort()}` },
       });
       if (!res.ok) return this.getState();
       const snap = (await res.json()) as BackendAccountsSnapshot;
@@ -761,12 +761,12 @@ export class FlowEngineManager {
     this.autoBindingInFlight = true;
     try {
       const res = await fetch(
-        `${AGENT_BASE_URL}/api/flow-accounts/${encodeURIComponent(accountId)}`,
+        `${getAgentBaseUrl()}/api/flow-accounts/${encodeURIComponent(accountId)}`,
         {
           method: "PATCH",
           headers: {
             "Content-Type": "application/json",
-            Host: `127.0.0.1:${AGENT_HTTP_PORT}`,
+            Host: `127.0.0.1:${getAgentHttpPort()}`,
           },
           body: JSON.stringify({ project_id: projectId }),
         },
@@ -800,7 +800,7 @@ export class FlowEngineManager {
     this.closeWebSocket();
     this.wsAccountId = accountId;
 
-    const socket = new WebSocket(AGENT_WS_URL);
+    const socket = new WebSocket(getAgentWsUrl());
     this.ws = socket;
 
     socket.on("open", () => {
@@ -1074,11 +1074,11 @@ export class FlowEngineManager {
   private async sendResponseToAgent(payload: Record<string, unknown>): Promise<void> {
     if (payload.id) {
       try {
-        const res = await fetch(CALLBACK_URL, {
+        const res = await fetch(getCallbackUrl(), {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Host: `127.0.0.1:${AGENT_HTTP_PORT}`,
+            Host: `127.0.0.1:${getAgentHttpPort()}`,
             "X-Callback-Secret": this.callbackSecret || "",
           },
           body: JSON.stringify(payload),

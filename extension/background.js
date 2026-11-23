@@ -5,8 +5,12 @@
  * Captures Bearer token and proxies API calls through the browser context.
  */
 
-const AGENT_WS_URL  = 'ws://127.0.0.1:8355';
-const CALLBACK_URL  = 'http://127.0.0.1:8434/api/ext/callback';
+const AGENT_WS_PORTS = [8355, 18355, 28355, 38355];
+let activeWsPortIdx  = 0;
+let wsProbeFailures  = 0;
+const DEFAULT_CALLBACK_URL = 'http://127.0.0.1:8434/api/ext/callback';
+const VALID_CALLBACK_URL_RE = /^http:\/\/(?:127\.0\.0\.1|localhost):\d{2,5}\/api\/ext\/callback$/;
+let callbackUrl      = DEFAULT_CALLBACK_URL;
 
 let ws               = null;
 let flowKey          = null;
@@ -180,17 +184,23 @@ function connectToAgent() {
   if (ws?.readyState === WebSocket.CONNECTING) return;
   if (ws?.readyState === WebSocket.OPEN) return;
 
+  const targetWsUrl = `ws://127.0.0.1:${AGENT_WS_PORTS[activeWsPortIdx]}`;
+  let openedOnThisAttempt = false;
   try {
-    ws = new WebSocket(AGENT_WS_URL);
+    ws = new WebSocket(targetWsUrl);
   } catch (e) {
     console.error('[Flowboard] WS connect error:', e);
-    scheduleReconnect();
+    activeWsPortIdx = (activeWsPortIdx + 1) % AGENT_WS_PORTS.length;
+    wsProbeFailures++;
+    scheduleReconnect(wsProbeFailures < AGENT_WS_PORTS.length ? 350 : 5000);
     return;
   }
 
   const socket = ws;
   socket.onopen = async () => {
-    console.log('[Flowboard] Connected to agent');
+    openedOnThisAttempt = true;
+    wsProbeFailures = 0;
+    console.log('[Flowboard] Connected to agent at', targetWsUrl);
     clearTimeout(reconnectTimer);
     chrome.alarms.clear('reconnect');
 
@@ -242,6 +252,9 @@ function connectToAgent() {
       } else if (msg.type === 'callback_secret') {
         callbackSocket = socket;
         callbackSecret = msg.secret;
+        if (typeof msg.callback_url === 'string' && VALID_CALLBACK_URL_RE.test(msg.callback_url)) {
+          callbackUrl = msg.callback_url;
+        }
         chrome.storage.local.set({ callbackSecret: msg.secret });
         console.log('[Flowboard] Received callback secret');
         replayLegacyIdentity();
@@ -304,7 +317,15 @@ function connectToAgent() {
     lastProjectId = null;
     finishPair({ error: '扩展与本地服务的连接已断开，请重试。' });
     setState('off');
-    if (!manualDisconnect) scheduleReconnect();
+    if (!manualDisconnect) {
+      if (!openedOnThisAttempt) {
+        activeWsPortIdx = (activeWsPortIdx + 1) % AGENT_WS_PORTS.length;
+        wsProbeFailures++;
+        scheduleReconnect(wsProbeFailures < AGENT_WS_PORTS.length ? 350 : 5000);
+      } else {
+        scheduleReconnect(5000);
+      }
+    }
   };
 
   socket.onerror = (e) => {
@@ -315,9 +336,9 @@ function connectToAgent() {
   };
 }
 
-function scheduleReconnect() {
+function scheduleReconnect(delayMs = 5000) {
   clearTimeout(reconnectTimer);
-  reconnectTimer = setTimeout(connectToAgent, 5000);
+  reconnectTimer = setTimeout(connectToAgent, delayMs);
   chrome.alarms.create('reconnect', { delayInMinutes: 0.5 });
 }
 
@@ -519,7 +540,7 @@ function finishPair(result) {
  */
 function sendToAgent(msg) {
   if (msg.id) {
-    fetch(CALLBACK_URL, {
+    fetch(callbackUrl, {
       method:  'POST',
       headers: {
         'Content-Type':      'application/json',

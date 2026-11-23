@@ -41,8 +41,27 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(description="AI Canvas Studio Local Agent")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8434)
+    parser.add_argument("--port", type=int, default=int(os.getenv("FLOWBOARD_HTTP_PORT", "8434")))
     args = parser.parse_args()
+
+    from flowboard.port_probe import (
+        HTTP_PORT_CANDIDATES,
+        WS_PORT_CANDIDATES,
+        pick_bindable_port,
+        write_active_ports,
+    )
+
+    resolved_http = pick_bindable_port(args.port, HTTP_PORT_CANDIDATES, host=args.host)
+    pref_ws = int(os.getenv("FLOWBOARD_EXT_WS_PORT", "8355") or "8355")
+    resolved_ws = pick_bindable_port(
+        pref_ws,
+        WS_PORT_CANDIDATES,
+        host=args.host,
+        disallow={resolved_http},
+    )
+    os.environ["FLOWBOARD_HTTP_PORT"] = str(resolved_http)
+    os.environ["FLOWBOARD_EXT_WS_PORT"] = str(resolved_ws)
+    write_active_ports(http_port=resolved_http, ws_port=resolved_ws, pid=os.getpid())
 
     import uvicorn
     from flowboard.main import app
@@ -50,7 +69,7 @@ def main() -> int:
     uvicorn.run(
         app,
         host=args.host,
-        port=args.port,
+        port=resolved_http,
         timeout_graceful_shutdown=2,
         log_level="info",
     )
