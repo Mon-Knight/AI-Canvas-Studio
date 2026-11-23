@@ -870,3 +870,51 @@ test("Stage 2: director skills filter & canvas multi-select grouping", async () 
     await server.close();
   }
 });
+
+test("Stage 3A: layerCanvasOps mask bounding-box, inpaint/erase prompts, outpaint layout & collage prompt", async () => {
+  const server = await createServer({ server: { middlewareMode: true, hmr: false, ws: false }, logLevel: "error" });
+  try {
+    const {
+      computeMaskRegionSpec,
+      composeInpaintPrompt,
+      computeOutpaintPadLayout,
+      composeOutpaintPrompt,
+      composeCollageFusionPrompt,
+    } = await server.ssrLoadModule("/src/lib/layerCanvasOps.ts");
+
+    assert.equal(computeMaskRegionSpec([], 1000, 1000), null);
+
+    const region = computeMaskRegionSpec(
+      [[{ x: 150, y: 180, radius: 20 }, { x: 320, y: 310, radius: 20 }]],
+      1000,
+      1000,
+    );
+    assert.ok(region);
+    assert.equal(region.quadrantLabel, "画面左上区域");
+    assert.ok(region.percentDesc.includes("13%–34%"));
+
+    const erasePrompt = composeInpaintPrompt("erase", region, "路人");
+    assert.ok(erasePrompt.includes("ref_image_1") && erasePrompt.includes("消除"));
+
+    const inpaintPrompt = composeInpaintPrompt("inpaint", region, "金色太阳镜");
+    assert.ok(inpaintPrompt.includes("金色太阳镜") && inpaintPrompt.includes("局部重绘"));
+
+    const padWide = computeOutpaintPadLayout(720, 1280, "16:9");
+    assert.equal(padWide.canvasWidth, 1280);
+    assert.equal(padWide.canvasHeight, 720);
+    assert.equal(padWide.aspectRatio, "IMAGE_ASPECT_RATIO_LANDSCAPE");
+    assert.ok(padWide.drawX > 0 && padWide.drawWidth < padWide.canvasWidth);
+
+    const padExpand = computeOutpaintPadLayout(1280, 720, "expand_1_4x");
+    assert.equal(padExpand.aspectRatio, "IMAGE_ASPECT_RATIO_LANDSCAPE");
+    assert.ok(padExpand.drawWidth < padExpand.canvasWidth);
+
+    const outPrompt = composeOutpaintPrompt(padWide, "延长室内木桌");
+    assert.ok(outPrompt.includes("16:9") && outPrompt.includes("延长室内木桌"));
+
+    const colPrompt = composeCollageFusionPrompt("统一暖金色黄昏侧光", ["女主角", "白咖啡杯"]);
+    assert.ok(colPrompt.includes("女主角、白咖啡杯") && colPrompt.includes("黄昏侧光"));
+  } finally {
+    await server.close();
+  }
+});

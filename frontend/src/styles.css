@@ -10192,3 +10192,173 @@ video.source-image-row__thumb {
 .jm-multi-select-bar__btn--cyan:hover {
   background: rgba(56, 189, 248, 0.14);
 }
+
+/* ❖ 图层精修画板（局部重绘 / 消除笔 / 比例扩图 / 多图拼贴融合） */
+.jm-layer-modal {
+  max-width: 980px;
+  width: min(95vw, 980px);
+}
+
+.jm-layer-modal__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 22px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.jm-layer-modal__tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.jm-layer-source-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.jm-layer-source-picker select {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: #141417;
+  color: #f4f4f6;
+  font-size: 12px;
+}
+
+.jm-layer-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(260px, 0.9fr);
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 780px) {
+  .jm-layer-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.jm-layer-stage {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: #09090b;
+}
+
+.jm-layer-canvas {
+  max-width: 100%;
+  max-height: 410px;
+  width: auto;
+  height: auto;
+  border-radius: 8px;
+  display: block;
+  touch-action: none;
+}
+
+.jm-layer-canvas--brush {
+  cursor: crosshair;
+}
+
+.jm-layer-canvas--drag {
+  cursor: grab;
+}
+
+.jm-layer-canvas--drag:active {
+  cursor: grabbing;
+}
+
+.jm-layer-stage__hint {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.jm-layer-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.jm-layer-slider {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.jm-layer-slider input[type="range"] {
+  width: 100%;
+  accent-color: #38bdf8;
+}
+
+.jm-layer-mini-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.jm-layer-asset-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+  max-height: 112px;
+  overflow-y: auto;
+}
+
+.jm-layer-asset-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 4px 4px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #141417;
+  color: #e4e4e7;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.jm-layer-asset-chip:hover {
+  border-color: rgba(56, 189, 248, 0.4);
+  background: #1c1c20;
+}
+
+.jm-layer-asset-chip img {
+  width: 24px;
+  height: 24px;
+  border-radius: 5px;
+  object-fit: cover;
+}
+
+.jm-layer-inspector {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  background: #141417;
+}
+
+.jm-layer-inspector__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: #f4f4f6;
+}
+

@@ -244,16 +244,17 @@ export function LeftFloatingDock() {
 
   function handleLayersAction() {
     const { nodes } = useBoardStore.getState();
-    const selected = nodes.find((n) => n.selected);
-    if (selected?.data.type === "visual_asset" && selected.data.mediaId) {
-      window.dispatchEvent(new CustomEvent("flowboard:open-node-refine", { detail: { rfId: selected.id } }));
-      return;
-    }
-    if (selected && selected.data.mediaId && selected.data.type !== "prompt" && selected.data.type !== "note") {
-      useGenerationStore.getState().openResultViewer(selected.id, 0);
-      return;
-    }
-    void handleSpawn("visual_asset", "物品素材");
+    const selected = nodes.find(
+      (n) =>
+        n.selected &&
+        n.data.mediaId &&
+        n.data.type !== "prompt" &&
+        n.data.type !== "note" &&
+        n.data.type !== "video",
+    );
+    window.dispatchEvent(
+      new CustomEvent("flowboard:open-layer-editor", { detail: { rfId: selected?.id } }),
+    );
   }
 
   function handleToolClick(item: DockToolItem) {

@@ -1421,6 +1421,23 @@ export function NodeCard(props: NodeProps<FlowNode>) {
           </button>
           <button
             type="button"
+            className="jm-quick-derive-btn"
+            disabled={quickBusy !== null}
+            onClick={(e) => {
+              e.stopPropagation();
+              setOpenQuickMenu(null);
+              window.dispatchEvent(
+                new CustomEvent("flowboard:open-layer-editor", {
+                  detail: { rfId: props.id, tab: "inpaint" },
+                }),
+              );
+            }}
+            title="打开图层精修画板（局部涂抹重绘 / 消除笔 / 比例扩图 / 多图拼贴）"
+          >
+            ❖ 局部精修
+          </button>
+          <button
+            type="button"
             className="jm-quick-derive-btn jm-quick-derive-btn--cyan"
             disabled={quickBusy !== null}
             onClick={(e) => {

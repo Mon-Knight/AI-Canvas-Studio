@@ -11,6 +11,7 @@ import { GenerationDialog } from "./components/GenerationDialog";
 import { ResultViewer } from "./components/ResultViewer";
 import { EmbeddedFlowModal } from "./components/EmbeddedFlowModal";
 import { DirectorStageModal } from "./components/DirectorStageModal";
+import { LayerEditorModal } from "./components/LayerEditorModal";
 import { ShutdownOverlay } from "./components/ShutdownOverlay";
 import { useBoardStore } from "./store/board";
 import { useDesktopFlowStore } from "./store/desktopFlow";
@@ -64,6 +65,7 @@ export function App() {
         <ResultViewer />
         <EmbeddedFlowModal />
         <DirectorStageModal />
+        <LayerEditorModal />
         <ShutdownOverlay />
       </div>
     </ReactFlowProvider>
