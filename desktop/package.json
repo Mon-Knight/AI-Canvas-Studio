@@ -1,6 +1,6 @@
 {
   "name": "ai-canvas-studio",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "private": true,
   "description": "AI Canvas Studio — 即梦风格 AI 无限画布桌面创作工作台",
   "main": "dist/main.js",

@@ -148,7 +148,7 @@ async def lifespan(app: FastAPI):
         logger.info("flowboard agent stopped")
 
 
-app = FastAPI(title="AI Canvas Studio Agent", version="1.1.1", lifespan=lifespan)
+app = FastAPI(title="AI Canvas Studio Agent", version="1.1.2", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
