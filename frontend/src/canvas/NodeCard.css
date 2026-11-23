@@ -163,7 +163,7 @@
 .jm-node-card .prompt-text,
 .jm-node-card .note-text { color: var(--text-secondary); font-size: 12px; overflow-wrap: anywhere; }
 
-.jm-node-card .node-handle { z-index: 2; }
+.jm-node-card .node-handle { z-index: 12; }
 .jm-node-card .node-handle::after {
   box-sizing: border-box;
   width: 5px;
@@ -370,4 +370,155 @@
 
 .node-card--grouped .jm-node-surface::after {
   border-color: rgba(56, 189, 248, 0.24);
+}
+
+/* ── 自由拉伸缩放控制柄与弹性全图自适应 (NodeResizer & Full-Image Fit) ── */
+
+.node-card.jm-node-card.node-card--resized {
+  width: 100%;
+  height: 100%;
+  min-width: 180px;
+  min-height: 120px;
+  display: flex;
+  flex-direction: column;
+}
+
+.jm-node-card.node-card--resized .node-header,
+.jm-node-card.node-card--resized .jm-node-group-badge,
+.jm-node-card.node-card--resized .jm-node-history-bar,
+.jm-node-card.node-card--resized .jm-quick-derive-bar,
+.jm-node-card.node-card--resized .jm-subject-card-bar,
+.jm-node-card.node-card--resized .jm-storyboard-split-bar,
+.jm-node-card.node-card--resized .brief-hint {
+  flex: none;
+}
+
+.jm-node-card.node-card--resized .jm-node-surface,
+.jm-node-card.node-card--resized .jm-node-content,
+.jm-node-card.node-card--resized .node-body--subject-wrap,
+.jm-node-card.node-card--resized .storyboard-wrap,
+.jm-node-card.node-card--resized .node-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.jm-node-card.node-card--resized .thumbnail-grid,
+.jm-node-card.node-card--resized .video-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  grid-auto-rows: minmax(0, 1fr);
+}
+
+.jm-node-card.node-card--resized .thumbnail-tile,
+.jm-node-card.node-card--resized .video-tile {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  max-height: none !important;
+  aspect-ratio: auto !important;
+}
+
+.jm-node-card.node-card--resized .thumbnail-tile__img {
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  object-fit: contain;
+  background: #09090b;
+}
+
+.jm-node-card.node-card--resized .visual-asset__media {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  align-items: center;
+  justify-content: center;
+  background: #09090b;
+}
+
+.jm-node-card.node-card--resized .visual-asset__image {
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  object-fit: contain;
+}
+
+.jm-node-card.node-card--resized .character-empty,
+.jm-node-card.node-card--resized .visual-asset__empty {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 72px;
+}
+
+.jm-node-card.node-card--resized .prompt-text,
+.jm-node-card.node-card--resized .note-text {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: block;
+  -webkit-line-clamp: unset;
+  overflow-y: auto;
+}
+
+.jm-node-card.node-card--resized .prompt-editor,
+.jm-node-card.node-card--resized .note-editor {
+  flex: 1 1 auto;
+  height: 100%;
+  min-height: 64px;
+  resize: none;
+}
+
+.jm-node-resizer-line.react-flow__resize-control.line {
+  border-color: transparent !important;
+  border-width: 6px !important;
+  z-index: 6;
+}
+
+.jm-node-resizer-line.react-flow__resize-control.line:hover {
+  border-color: rgba(56, 189, 248, 0.42) !important;
+}
+
+.jm-node-resizer-handle.react-flow__resize-control.handle {
+  width: 9px !important;
+  height: 9px !important;
+  border-radius: 3px !important;
+  background: #f4f4f6 !important;
+  border: 1.5px solid #09090b !important;
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.65);
+  z-index: 8;
+  transition: background-color 120ms ease, transform 120ms ease;
+}
+
+.jm-node-resizer-handle.react-flow__resize-control.handle:hover {
+  background: var(--brand-cyan) !important;
+}
+
+.jm-node-corner-grip.react-flow__resize-control.handle {
+  width: 18px !important;
+  height: 18px !important;
+  right: 4px !important;
+  bottom: 4px !important;
+  transform: none !important;
+  border-radius: 6px !important;
+  border: 1px solid rgba(255, 255, 255, 0.14) !important;
+  background: rgba(20, 20, 23, 0.82) !important;
+  color: #a1a1aa;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  z-index: 8;
+  cursor: nwse-resize;
+  transition: opacity 140ms ease, color 140ms ease, border-color 140ms ease, background-color 140ms ease;
+}
+
+.jm-node-card:hover .jm-node-corner-grip.react-flow__resize-control.handle {
+  opacity: 0.88;
+}
+
+.jm-node-corner-grip.react-flow__resize-control.handle:hover {
+  opacity: 1 !important;
+  color: var(--brand-cyan);
+  border-color: rgba(56, 189, 248, 0.55) !important;
+  background: rgba(24, 24, 27, 0.96) !important;
 }

@@ -980,3 +980,118 @@ test("Stage 3B: timelineAudio directives, shot ordering/exclusion & timelineExpo
     await server.close();
   }
 });
+
+test("useBoardStore supports free node resizing, persistence hydration, and dimension reset", async () => {
+  const server = await createServer({ server: { middlewareMode: true, hmr: false, ws: false }, logLevel: "error" });
+  const savedFetch = globalThis.fetch;
+  try {
+    const { useBoardStore } = await server.ssrLoadModule("/src/store/board.ts");
+
+    const patches = [];
+    let dbNodeData = {
+      title: "角色主体",
+      mediaId: "media-portrait-1",
+      aspectRatio: "IMAGE_ASPECT_RATIO_PORTRAIT",
+    };
+
+    const board = { id: 9, name: "拉伸测试画布", created_at: "2026-11-23T12:00:00Z" };
+    globalThis.fetch = async (url, init) => {
+      if (url === "/api/boards") return Response.json([board]);
+      if (url === "/api/boards/9") {
+        return Response.json({
+          board,
+          nodes: [
+            {
+              id: 501,
+              board_id: 9,
+              short_id: "S1",
+              type: "character",
+              x: 100,
+              y: 120,
+              w: 240,
+              h: 160,
+              status: "done",
+              created_at: "2026-11-23T12:01:00Z",
+              data: { ...dbNodeData },
+            },
+          ],
+          edges: [],
+        });
+      }
+      if (url === "/api/nodes/501" && init?.method === "PATCH") {
+        const body = JSON.parse(init.body);
+        patches.push(body);
+        if (body.data) {
+          for (const [k, v] of Object.entries(body.data)) {
+            if (v === null) delete dbNodeData[k];
+            else dbNodeData[k] = v;
+          }
+        }
+        return Response.json({
+          id: 501,
+          board_id: 9,
+          short_id: "S1",
+          type: "character",
+          x: body.x ?? 100,
+          y: body.y ?? 120,
+          w: body.w ?? 240,
+          h: body.h ?? 160,
+          status: "done",
+          created_at: "2026-11-23T12:01:00Z",
+          data: { ...dbNodeData },
+        });
+      }
+      if (typeof url === "string" && url.includes("/requests")) return Response.json({ items: [] });
+      throw new Error(`Unexpected fetch: ${url}`);
+    };
+
+    await useBoardStore.getState().loadInitialBoard();
+    let n = useBoardStore.getState().nodes[0];
+    // Legacy SQLite default w=240/h=160 without customW/customH must NOT lock node width/height
+    assert.equal(n.width, undefined);
+    assert.equal(n.height, undefined);
+
+    // Resize node freely
+    await useBoardStore.getState().persistNodeDimensions("501", {
+      x: 88.4,
+      y: 95.8,
+      width: 420.2,
+      height: 540.7,
+    });
+    n = useBoardStore.getState().nodes[0];
+    assert.equal(n.width, 420);
+    assert.equal(n.height, 541);
+    assert.deepEqual(n.position, { x: 88, y: 96 });
+    assert.equal(n.data.customW, 420);
+    assert.equal(n.data.customH, 541);
+    assert.equal(patches.length, 1);
+    assert.deepEqual(patches[0], {
+      x: 88,
+      y: 96,
+      w: 420,
+      h: 541,
+      data: { customW: 420, customH: 541 },
+    });
+
+    // Refresh board from backend — custom dimensions must survive reload
+    await useBoardStore.getState().refreshBoardState();
+    n = useBoardStore.getState().nodes[0];
+    assert.equal(n.width, 420);
+    assert.equal(n.height, 541);
+    assert.equal(n.style?.width, 420);
+    assert.equal(n.style?.height, 541);
+
+    // Reset dimensions — returns to natural intrinsic image sizing
+    await useBoardStore.getState().resetNodeDimensions("501");
+    n = useBoardStore.getState().nodes[0];
+    assert.equal(n.width, undefined);
+    assert.equal(n.height, undefined);
+    assert.equal(n.style, undefined);
+    assert.equal(n.data.customW, undefined);
+    assert.equal(n.data.customH, undefined);
+    assert.deepEqual(patches[1].data, { customW: null, customH: null });
+  } finally {
+    globalThis.fetch = savedFetch;
+    await server.close();
+  }
+});

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Handle, Position, type NodeProps } from "@xyflow/react";
+import { Handle, NodeResizeControl, NodeResizer, Position, type NodeProps } from "@xyflow/react";
 import { useBoardStore, type FlowboardNodeData, type FlowNode } from "../store/board";
 import { displayNodeTitle } from "../constants/nodeLabels";
 import { useGenerationStore } from "../store/generation";
@@ -586,6 +586,14 @@ function ImageBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }) {
     );
   }
 
+  const rawAspect = (data.aspectRatio ?? "").toUpperCase();
+  const gridAspectAttr =
+    rawAspect.includes("PORTRAIT") || rawAspect === "9:16" || rawAspect === "3:4"
+      ? "portrait"
+      : rawAspect.includes("SQUARE") || rawAspect === "1:1"
+        ? "square"
+        : undefined;
+
   return (
     <div
       className={`node-body node-body--image${dragOver ? " node-body--image--over" : ""}`}
@@ -593,7 +601,7 @@ function ImageBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }) {
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
     >
-      <div className={`thumbnail-grid thumbnail-grid--${tileCount}`}>
+      <div className={`thumbnail-grid thumbnail-grid--${tileCount}`} data-aspect={gridAspectAttr}>
         {tiles}
       </div>
       {picker && (
@@ -1192,6 +1200,14 @@ export function NodeCard(props: NodeProps<FlowNode>) {
     (data.type === "image" || data.type === "character" || data.type === "visual_asset");
   const [quickBusy, setQuickBusy] = useState<string | null>(null);
   const [openQuickMenu, setOpenQuickMenu] = useState<"angle" | "light" | null>(null);
+  const hasCustomSize = useBoardStore((s) => {
+    const cur = s.nodes.find((it) => it.id === props.id);
+    if (!cur) return false;
+    return (
+      (typeof cur.width === "number" && cur.width > 0 && typeof cur.height === "number" && cur.height > 0) ||
+      (typeof cur.data.customW === "number" && typeof cur.data.customH === "number")
+    );
+  });
 
   useEffect(() => {
     if (!props.selected) {
@@ -1261,9 +1277,40 @@ export function NodeCard(props: NodeProps<FlowNode>) {
     <div
       className={`node-card jm-node-card${isNote ? " node-card--note" : ""}${
         props.selected ? " node-card--selected" : ""
-      }${llmBusy ? " node-card--llm-busy" : ""}${data.groupId ? " node-card--grouped" : ""}`}
+      }${hasCustomSize ? " node-card--resized" : ""}${
+        llmBusy ? " node-card--llm-busy" : ""
+      }${data.groupId ? " node-card--grouped" : ""}`}
       data-status={status}
     >
+      <NodeResizer
+        isVisible={Boolean(props.selected)}
+        minWidth={180}
+        minHeight={120}
+        maxWidth={1800}
+        maxHeight={1800}
+        lineClassName="jm-node-resizer-line"
+        handleClassName="jm-node-resizer-handle"
+        onResizeEnd={(_event, params) => {
+          void useBoardStore.getState().persistNodeDimensions(props.id, params);
+        }}
+      />
+      {!props.selected && (
+        <NodeResizeControl
+          position="bottom-right"
+          minWidth={180}
+          minHeight={120}
+          maxWidth={1800}
+          maxHeight={1800}
+          className="jm-node-corner-grip nodrag"
+          onResizeEnd={(_event, params) => {
+            void useBoardStore.getState().persistNodeDimensions(props.id, params);
+          }}
+        >
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+            <path d="M8.5 2.5L2.5 8.5M8.5 6L6 8.5" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" />
+          </svg>
+        </NodeResizeControl>
+      )}
       {data.groupId && (
         <div className="jm-node-group-badge" title={`所属分镜组：${data.groupTitle || "分镜组"}`}>
           📦 {data.groupTitle || "分镜组"}
@@ -1285,8 +1332,24 @@ export function NodeCard(props: NodeProps<FlowNode>) {
               : status !== "idle" && STATUS_LABELS[status]}
           </span>
         )}
-        {(downloadable || isGenerable) && (
+        {(hasCustomSize || downloadable || isGenerable) && (
           <div className="node-header__actions nodrag">
+            {hasCustomSize && (
+              <button
+                type="button"
+                className="node-header__btn"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  void useBoardStore.getState().resetNodeDimensions(props.id);
+                }}
+                aria-label="恢复原始比例尺寸"
+                title="恢复原始比例尺寸"
+              >
+                <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M4 9V5h4M16 11v4h-4M15.5 5.5 11.5 9.5M4.5 14.5l4-4" />
+                </svg>
+              </button>
+            )}
             {downloadable && (
               <button
                 type="button"

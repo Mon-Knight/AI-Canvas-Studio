@@ -128,6 +128,9 @@ export interface FlowboardNodeData extends Record<string, unknown> {
   groupColor?: string;
   /** 视频节点提取帧缓存：key 为 `${videoMediaId}:last` / `${videoMediaId}:first`，value 为上传后的图片 media_id */
   videoFrameCache?: Record<string, string>;
+  /** 用户手动拉伸后的节点自定义宽高（未设置时按原图比例自适应高度） */
+  customW?: number;
+  customH?: number;
 }
 
 export type FlowNode = Node<FlowboardNodeData>;
@@ -202,10 +205,29 @@ const TYPE_TITLE: Record<NodeType, string> = {
 
 /** 将后端 NodeDTO 统一映射为画布节点模型，确保冷启动、切换画布与增量刷新水合一致。 */
 function nodeFromDto(n: NodeDTO): FlowNode {
+  const rawW = n.data["customW"];
+  const rawH = n.data["customH"];
+  const customW =
+    typeof rawW === "number" && Number.isFinite(rawW) && rawW >= 140
+      ? Math.round(rawW)
+      : undefined;
+  const customH =
+    typeof rawH === "number" && Number.isFinite(rawH) && rawH >= 100
+      ? Math.round(rawH)
+      : undefined;
+  const hasCustomDims = customW !== undefined && customH !== undefined;
+
   return {
     id: String(n.id),
     type: n.type,
     position: { x: n.x, y: n.y },
+    ...(hasCustomDims
+      ? {
+          width: customW,
+          height: customH,
+          style: { width: customW, height: customH },
+        }
+      : {}),
     data: {
       type: n.type,
       shortId: n.short_id,
@@ -237,6 +259,7 @@ function nodeFromDto(n: NodeDTO): FlowNode {
       groupTitle: n.data["groupTitle"] as string | undefined,
       groupColor: n.data["groupColor"] as string | undefined,
       error: n.data["error"] as string | undefined,
+      ...(hasCustomDims ? { customW, customH } : {}),
     },
   };
 }
@@ -311,6 +334,11 @@ interface BoardState {
     position: { x: number; y: number },
   ): Promise<string | null>;
   persistNodePosition(rfId: string, position: { x: number; y: number }): Promise<void>;
+  persistNodeDimensions(
+    rfId: string,
+    rect: { x: number; y: number; width: number; height: number },
+  ): Promise<void>;
+  resetNodeDimensions(rfId: string): Promise<void>;
   deleteNodeByRfId(rfId: string): Promise<void>;
   addEdgeFromConnection(source: string, target: string): Promise<void>;
   deleteEdgeByRfId(rfId: string): Promise<void>;
@@ -598,6 +626,76 @@ export const useBoardStore = create<BoardState>((set, get) => ({
         // ignore persist failures
       }
     });
+  },
+
+  async persistNodeDimensions(rfId, rect) {
+    const w = Math.max(180, Math.round(rect.width));
+    const h = Math.max(120, Math.round(rect.height));
+    const x = Math.round(rect.x);
+    const y = Math.round(rect.y);
+
+    set((s) => ({
+      nodes: s.nodes.map((n) =>
+        n.id === rfId
+          ? {
+              ...n,
+              position: { x, y },
+              width: w,
+              height: h,
+              style: { ...(n.style ?? {}), width: w, height: h },
+              data: { ...n.data, customW: w, customH: h },
+            }
+          : n,
+      ),
+    }));
+
+    const dbId = parseInt(rfId, 10);
+    if (isNaN(dbId)) return;
+    try {
+      await patchNode(dbId, {
+        x,
+        y,
+        w,
+        h,
+        data: { customW: w, customH: h },
+      });
+    } catch {
+      // ignore persist failures
+    }
+  },
+
+  async resetNodeDimensions(rfId) {
+    set((s) => ({
+      nodes: s.nodes.map((n) => {
+        if (n.id !== rfId) return n;
+        const nextData = { ...n.data };
+        delete nextData.customW;
+        delete nextData.customH;
+        const nextStyle = { ...(n.style ?? {}) };
+        delete nextStyle.width;
+        delete nextStyle.height;
+        const nextNode: FlowNode = {
+          ...n,
+          width: undefined,
+          height: undefined,
+          style: Object.keys(nextStyle).length > 0 ? nextStyle : undefined,
+          data: nextData,
+        };
+        return nextNode;
+      }),
+    }));
+
+    const dbId = parseInt(rfId, 10);
+    if (isNaN(dbId)) return;
+    try {
+      await patchNode(dbId, {
+        w: 256,
+        h: 160,
+        data: { customW: null, customH: null },
+      });
+    } catch {
+      // ignore persist failures
+    }
   },
 
   async deleteNodeByRfId(rfId) {
