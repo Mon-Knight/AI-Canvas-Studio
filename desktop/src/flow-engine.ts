@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -18,6 +17,7 @@ import {
   STORAGE_DIR,
   TOKENS_FILE,
 } from "./config";
+import { ManagedChromeController } from "./managed-chrome";
 import type {
   FlowDrawerMode,
   FlowEngineAuthState,
@@ -39,49 +39,6 @@ const AUTH_COOKIE_NAMES = new Set([
   "SAPISID",
   "__Host-GAPS",
 ]);
-
-const CHROME_MINIMIZE_PS = `
-Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-public class Win32Window {
-  [DllImport("user32.dll")]
-  public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
-}
-"@
-$needle = $env:FB_PROFILE_NEEDLE
-$procs = Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -ErrorAction SilentlyContinue | Where-Object {
-  $_.CommandLine -and
-  $_.CommandLine.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
-  $_.CommandLine.IndexOf('--type=', [System.StringComparison]::OrdinalIgnoreCase) -lt 0
-}
-foreach ($p in $procs) {
-  try {
-    $gp = Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue
-    if ($gp -and $gp.MainWindowHandle -ne [IntPtr]::Zero) {
-      [void][Win32Window]::ShowWindowAsync($gp.MainWindowHandle, 6)
-    }
-  } catch {}
-}
-`;
-
-const CHROME_FIND_PIDS_PS = `
-$needle = $env:FB_PROFILE_NEEDLE
-$procs = Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -ErrorAction SilentlyContinue | Where-Object {
-  $_.CommandLine -and
-  $_.CommandLine.IndexOf($needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -and
-  $_.CommandLine.IndexOf('--type=', [System.StringComparison]::OrdinalIgnoreCase) -lt 0
-}
-foreach ($p in $procs) {
-  Write-Output $p.ProcessId
-}
-`;
-
-const CHROME_LAUNCH_MINIMIZED_PS = `
-$argList = [string[]]($env:FB_CHROME_ARGS | ConvertFrom-Json)
-$p = Start-Process -FilePath $env:FB_CHROME_EXE -ArgumentList $argList -WindowStyle Minimized -PassThru
-if ($p) { Write-Output $p.Id }
-`;
 
 interface BackendAccount {
   id: string;
@@ -109,9 +66,7 @@ export class FlowEngineManager {
   private configuredPartitions = new Set<string>();
   private tokens: Record<string, string> = {};
 
-  private managedChromePids = new Map<string, Set<number>>();
-  private managedLaunchTimestamps = new Map<string, number>();
-  private launchingAccounts = new Set<string>();
+  private readonly managedChrome: ManagedChromeController;
   private syncInFlight: Promise<FlowEngineState> | null = null;
 
   private ws: WebSocket | null = null;
@@ -186,6 +141,14 @@ export class FlowEngineManager {
       process.env.FLOWBOARD_FORCE_MANAGED_CHROME === "1" ||
       FLOW_BASE_URL.startsWith("https://");
     this.state.managedChromeMode = this.managedChromeMode;
+    this.managedChrome = new ManagedChromeController({
+      mainWindow: this.mainWindow,
+      isDisposed: () => this.disposed,
+      targetUrlForAccount: (projectId) => this.targetUrlForAccount(projectId),
+      onStateError: (message) =>
+        this.updateState({ authState: "error", lastError: message }),
+      onClearError: () => this.updateState({ lastError: null }),
+    });
     this.loadTokens();
   }
 
@@ -247,7 +210,7 @@ export class FlowEngineManager {
     this.destroyStandaloneAuthWindow();
     this.destroyFlowView();
     if (this.managedChromeMode) {
-      await this.stopManagedChromeProcesses();
+      await this.managedChrome.stopProcesses();
     }
     for (const partition of this.configuredPartitions) {
       try {
@@ -563,269 +526,14 @@ export class FlowEngineManager {
 
   // ── Official Managed Google Chrome Engine (Zero WebView Rejection) ───────
 
-  private resolveChromeExecutable(): string | null {
-    const override = process.env.FLOWBOARD_CHROME_EXE?.trim();
-    if (override) {
-      return fs.existsSync(override) ? override : null;
-    }
-    const candidates: string[] = [];
-    if (process.platform === "win32") {
-      for (const envKey of ["PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"]) {
-        const root = process.env[envKey];
-        if (root) {
-          candidates.push(path.join(root, "Google", "Chrome", "Application", "chrome.exe"));
-        }
-      }
-    }
-    for (const candidate of candidates) {
-      if (fs.existsSync(candidate)) return candidate;
-    }
-    const pathEnv = process.env.PATH || "";
-    const binNames = process.platform === "win32"
-      ? ["chrome.exe"]
-      : ["google-chrome", "chromium", "chromium-browser", "chrome"];
-    for (const dir of pathEnv.split(path.delimiter)) {
-      if (!dir) continue;
-      for (const bin of binNames) {
-        const full = path.join(dir, bin);
-        if (fs.existsSync(full)) return full;
-      }
-    }
-    return null;
-  }
-
-  private managedProfileDir(accountId: string): string {
-    if (!/^[0-9a-f]{32}$/i.test(accountId)) {
-      throw new Error(`Invalid account profile id: ${accountId}`);
-    }
-    return path.resolve(STORAGE_DIR, "flow-browser-profiles", accountId);
-  }
-
-  private recordManagedPid(accountId: string, pid: number | undefined | null): void {
-    if (!pid || !Number.isInteger(pid) || pid <= 0) return;
-    let set = this.managedChromePids.get(accountId);
-    if (!set) {
-      set = new Set<number>();
-      this.managedChromePids.set(accountId, set);
-    }
-    set.add(pid);
-  }
-
-  private runPowerShell(script: string, extraEnv: Record<string, string>): Promise<string> {
-    if (process.platform !== "win32") return Promise.resolve("");
-    return new Promise((resolve) => {
-      const child = spawn(
-        "powershell.exe",
-        ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script],
-        {
-          windowsHide: true,
-          stdio: ["ignore", "pipe", "ignore"],
-          env: { ...process.env, ...extraEnv },
-        },
-      );
-      let stdout = "";
-      child.stdout?.on("data", (d: Buffer) => {
-        stdout += d.toString("utf8");
-      });
-      const timer = setTimeout(() => {
-        try {
-          child.kill();
-        } catch {
-          // ignore
-        }
-        resolve(stdout.trim());
-      }, 4500);
-      child.once("close", () => {
-        clearTimeout(timer);
-        resolve(stdout.trim());
-      });
-      child.once("error", () => {
-        clearTimeout(timer);
-        resolve("");
-      });
-    });
-  }
-
-  private async findManagedChromePids(accountId?: string): Promise<number[]> {
-    const needle = accountId
-      ? this.managedProfileDir(accountId)
-      : path.resolve(STORAGE_DIR, "flow-browser-profiles");
-    const out = await this.runPowerShell(CHROME_FIND_PIDS_PS, {
-      FB_PROFILE_NEEDLE: needle,
-    });
-    const pids = new Set<number>();
-    for (const line of out.split(/\r?\n/)) {
-      const num = Number(line.trim());
-      if (Number.isInteger(num) && num > 0) pids.add(num);
-    }
-    return Array.from(pids);
-  }
-
-  private async minimizeManagedChromeWindows(accountId: string): Promise<void> {
-    if (this.disposed || process.platform !== "win32") return;
-    try {
-      const needle = this.managedProfileDir(accountId);
-      await this.runPowerShell(CHROME_MINIMIZE_PS, { FB_PROFILE_NEEDLE: needle });
-    } catch {
-      // ignore minimize best-effort error
-    }
-    if (!this.disposed && !this.mainWindow.isDestroyed()) {
-      this.mainWindow.focus();
-    }
-  }
-
-  private async launchManagedChrome(
-    accountId: string,
-    projectId: string | null,
-    opts: { minimized: boolean },
-  ): Promise<void> {
-    if (this.disposed || this.launchingAccounts.has(accountId)) return;
-    this.launchingAccounts.add(accountId);
-    try {
-      const chromeExe = this.resolveChromeExecutable();
-      if (!chromeExe) {
-        this.updateState({
-          authState: "error",
-          lastError: "未在本机检测到 Google Chrome，请安装 Chrome 后重试。",
-        });
-        return;
-      }
-
-      const profileDir = this.managedProfileDir(accountId);
-      fs.mkdirSync(profileDir, { recursive: true });
-
-      if (opts.minimized) {
-        const runningPids = await this.findManagedChromePids(accountId);
-        if (runningPids.length > 0) {
-          for (const pid of runningPids) this.recordManagedPid(accountId, pid);
-          this.managedLaunchTimestamps.set(accountId, Date.now());
-          return;
-        }
-      }
-
-      const targetUrl = this.targetUrlForAccount(projectId);
-      const chromeArgs = [
-        `--user-data-dir=${profileDir}`,
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--hide-crash-restore-bubble",
-        "--disable-background-timer-throttling",
-        "--disable-backgrounding-occluded-windows",
-        "--disable-renderer-backgrounding",
-        opts.minimized ? "--start-minimized" : "--new-window",
-        targetUrl,
-      ];
-
-      this.managedLaunchTimestamps.set(accountId, Date.now());
-      this.updateState({ lastError: null });
-
-      if (
-        process.platform === "win32" &&
-        opts.minimized &&
-        chromeExe.toLowerCase().endsWith(".exe")
-      ) {
-        const pidText = await this.runPowerShell(CHROME_LAUNCH_MINIMIZED_PS, {
-          FB_CHROME_EXE: chromeExe,
-          FB_CHROME_ARGS: JSON.stringify(chromeArgs),
-        });
-        const pidNum = Number(pidText.split(/\r?\n/).pop()?.trim() || "");
-        this.recordManagedPid(accountId, pidNum);
-        return;
-      }
-
-      const child =
-        process.platform === "win32" && /\.(cmd|bat)$/i.test(chromeExe)
-          ? spawn("cmd.exe", ["/d", "/c", chromeExe, ...chromeArgs], {
-              detached: true,
-              stdio: "ignore",
-              windowsHide: true,
-              env: { ...process.env },
-            })
-          : spawn(chromeExe, chromeArgs, {
-              detached: true,
-              stdio: "ignore",
-              windowsHide: false,
-              env: { ...process.env },
-            });
-      this.recordManagedPid(accountId, child.pid);
-      child.unref();
-    } catch (err) {
-      this.updateState({
-        authState: "error",
-        lastError: `启动 Chrome 失败：${err instanceof Error ? err.message : String(err)}`,
-      });
-    } finally {
-      this.launchingAccounts.delete(accountId);
-    }
-  }
-
-  private async stopManagedChromeProcesses(accountId?: string): Promise<void> {
-    const pidSet = new Set<number>();
-    if (accountId) {
-      for (const pid of this.managedChromePids.get(accountId) ?? []) pidSet.add(pid);
-      this.managedChromePids.delete(accountId);
-      for (const pid of await this.findManagedChromePids(accountId)) pidSet.add(pid);
-    } else {
-      for (const set of this.managedChromePids.values()) {
-        for (const pid of set) pidSet.add(pid);
-      }
-      this.managedChromePids.clear();
-      for (const pid of await this.findManagedChromePids()) pidSet.add(pid);
-    }
-
-    const pids = Array.from(pidSet).filter((pid) => pid > 0);
-    if (pids.length === 0) return;
-
-    const killTree = (pid: number, force: boolean) =>
-      new Promise<void>((resolve) => {
-        if (process.platform === "win32") {
-          const killer = spawn(
-            "taskkill",
-            force ? ["/PID", String(pid), "/T", "/F"] : ["/PID", String(pid), "/T"],
-            { windowsHide: true, stdio: "ignore" },
-          );
-          killer.once("close", () => resolve());
-          killer.once("error", () => resolve());
-          return;
-        }
-        try {
-          process.kill(pid, force ? "SIGKILL" : "SIGTERM");
-        } catch {
-          // ignore
-        }
-        resolve();
-      });
-
-    await Promise.all(pids.map((pid) => killTree(pid, false)));
-
-    const isAlive = (pid: number) => {
-      try {
-        process.kill(pid, 0);
-        return true;
-      } catch {
-        return false;
-      }
-    };
-
-    const deadline = Date.now() + 2000;
-    while (Date.now() < deadline && pids.some(isAlive)) {
-      await new Promise((r) => setTimeout(r, 180));
-    }
-
-    const survivors = pids.filter(isAlive);
-    if (survivors.length > 0) {
-      await Promise.all(survivors.map((pid) => killTree(pid, true)));
-    }
-  }
-
   private async syncManagedChromeAccounts(snap: BackendAccountsSnapshot): Promise<void> {
     const extensionPath = snap.extension_path || EXTENSION_DIR;
     const activeId = snap.active_account_id;
     const prevActiveId = this.state.activeAccountId;
 
     if (prevActiveId && prevActiveId !== activeId) {
-      this.managedLaunchTimestamps.delete(prevActiveId);
-      void this.stopManagedChromeProcesses(prevActiveId);
+      this.managedChrome.clearLaunchTimestamp(prevActiveId);
+      void this.managedChrome.stopProcesses(prevActiveId);
     }
 
     if (!activeId) {
@@ -875,11 +583,11 @@ export class FlowEngineManager {
       lastError: ready ? null : this.state.lastError,
     });
 
-    if (paired && !wsConnected && !this.launchingAccounts.has(activeId)) {
-      const lastLaunched = this.managedLaunchTimestamps.get(activeId) ?? 0;
+    if (paired && !wsConnected && !this.managedChrome.isLaunching(activeId)) {
+      const lastLaunched = this.managedChrome.getLastLaunchAt(activeId);
       if (Date.now() - lastLaunched > 25_000) {
         const shouldMinimize = !this.state.drawerOpen;
-        await this.launchManagedChrome(activeId, this.activeAccountProjectId, {
+        await this.managedChrome.launch(activeId, this.activeAccountProjectId, {
           minimized: shouldMinimize,
         });
       }
@@ -905,7 +613,7 @@ export class FlowEngineManager {
             drawerOpen: false,
             notice: "Google Flow 正版 Chrome 伴侣引擎已就绪，已最小化转入后台运行。",
           });
-          void this.minimizeManagedChromeWindows(activeId);
+          void this.managedChrome.minimizeWindows(activeId);
         }
       }, 450);
     }
@@ -1649,7 +1357,7 @@ export class FlowEngineManager {
         drawerMode: opts?.mode ?? "auto-onboarding",
       });
       if (targetAccountId) {
-        await this.launchManagedChrome(targetAccountId, this.activeAccountProjectId, {
+        await this.managedChrome.launch(targetAccountId, this.activeAccountProjectId, {
           minimized: false,
         });
       }
@@ -1699,7 +1407,7 @@ export class FlowEngineManager {
   public reloadFlow(): void {
     if (this.managedChromeMode) {
       if (this.state.activeAccountId) {
-        void this.launchManagedChrome(this.state.activeAccountId, this.activeAccountProjectId, {
+        void this.managedChrome.launch(this.state.activeAccountId, this.activeAccountProjectId, {
           minimized: false,
         });
       }
@@ -1719,7 +1427,7 @@ export class FlowEngineManager {
   public openStandaloneAuthWindow(): void {
     if (!this.state.activeAccountId) return;
     if (this.managedChromeMode) {
-      void this.launchManagedChrome(this.state.activeAccountId, this.activeAccountProjectId, {
+      void this.managedChrome.launch(this.state.activeAccountId, this.activeAccountProjectId, {
         minimized: false,
       });
       return;

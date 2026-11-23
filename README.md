@@ -25,6 +25,10 @@
       <strong>📦 下载免安装绿色便携版 Portable.zip (v1.0.0)</strong>
     </a>
     &nbsp;&nbsp;|&nbsp;&nbsp;
+    <a href="docs/USER_MANUAL.md">
+      <strong>📖 阅读完整《创作者使用手册（即梦 / LibTV 工作流指南）》</strong>
+    </a>
+    &nbsp;&nbsp;|&nbsp;&nbsp;
     <a href="https://github.com/Mon-Knight/AI-Canvas-Studio/releases/latest">
       <strong>🔗 查看最新 Release 与更新日志</strong>
     </a>
@@ -76,6 +80,7 @@
 2. 启动后点击右上角账号区域，在内层窗口登录你自己的 Google Flow 账号并打开任意 Flow 项目即可自动完成配对绑定。
 3. 新用户可直接在空画布中央点击任意「新手指引示例工作流」开局，或将他人分享的 `.huabu` 配方包拖入画布一键导入。
 4. （可选）点击「更多 → AI 模型与提供商」，填写自己的 OpenAI 兼容或 Gemini 接口与密钥，即可开启「`✨ AI 润色`」与图像视觉反推能力。
+5. **深入进阶实战**：从角色三视图锁脸、`3×3` 同场多机位无损切分、首尾帧运镜、0 积分图层重绘扩图到时间线成片合成导出，请查阅 **[📖《AI Canvas Studio 创作者使用手册》（docs/USER_MANUAL.md）](docs/USER_MANUAL.md)**。
 
 > **隐私与合规说明**：本软件采用 **本地运行 + 用户自带账号（BYOA）** 架构，所有登录凭证、提示词、画布 SQLite 数据库与媒体文件均仅保存在用户本机，项目仓库与导出的 `.huabu` 配方包均不包含任何个人凭据。
 

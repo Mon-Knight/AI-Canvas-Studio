@@ -85,7 +85,7 @@ export interface FlowboardNodeData extends Record<string, unknown> {
   // render a visible "busy" treatment that blocks duplicate dispatches.
   autoPromptStatus?: "pending" | "done" | "failed";
   // ISO timestamp persisted when a generation completes successfully.
-  // Powers the "5 phút trước" relative-time display in ResultViewer.
+  // Powers the "5 分钟前" relative-time display in ResultViewer.
   // Uploads also stamp this so the timestamp reflects "when the asset
   // landed on the node" regardless of source.
   renderedAt?: string;

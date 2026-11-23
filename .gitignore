@@ -39,21 +39,14 @@ coverage/
 .turbo/
 **/tsconfig.tsbuildinfo
 
-# OMC ephemeral state (session caches, runtime checkpoints) — plans/ kept
-.omc/state/
-
-# Local curl evidence for Veo model dispatch — referenced by flow_sdk.py
-# comments as source-of-truth, but contains raw OAuth bearer tokens.
-# Keep on disk; never commit.
+# Local curl evidence for Veo model dispatch (never commit)
 /video_model*.md
-.omc/autopilot/
-.omc/worktrees/
 
-# Local runtime junk
+# Local runtime logs and profiles
 *.log
 .chrome-profile*/
 
-# Local agent / assistant workspaces & release build outputs
+# Local agent workspaces and release build outputs
 .workbuddy/
 .omc/
 release/

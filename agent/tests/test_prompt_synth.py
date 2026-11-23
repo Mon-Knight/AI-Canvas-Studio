@@ -1404,3 +1404,68 @@ def test_auto_prompt_video_respects_custom_duration_s(client, monkeypatch):
     sp = captured["system_prompt"] or ""
     assert "5-second clip" in sp
     assert "0-5s" in sp
+
+
+@pytest.mark.asyncio
+async def test_auto_prompt_activates_narrative_override_for_storyboard_and_drama(monkeypatch):
+    """Storyboard nodes and dramatic short-drama prompts unlock cinematic angles & emotion."""
+    with get_session() as s:
+        b = Board(name="drama-scene")
+        s.add(b)
+        s.commit()
+        s.refresh(b)
+        char = Node(
+            board_id=b.id,
+            short_id="hero",
+            type="character",
+            x=0,
+            y=0,
+            w=240,
+            h=180,
+            data={"title": "女主", "aiBrief": "古风少女，青色长裙", "mediaId": "m-hero"},
+            status="done",
+        )
+        sb = Node(
+            board_id=b.id,
+            short_id="sb01",
+            type="Storyboard",
+            x=300,
+            y=0,
+            w=240,
+            h=180,
+            data={"title": "故事板"},
+            status="idle",
+        )
+        drama_img = Node(
+            board_id=b.id,
+            short_id="dr01",
+            type="image",
+            x=300,
+            y=260,
+            w=240,
+            h=180,
+            data={"title": "雨夜对峙分镜"},
+            status="idle",
+        )
+        s.add_all([char, sb, drama_img])
+        s.commit()
+        for n in (char, sb, drama_img):
+            s.refresh(n)
+        s.add(Edge(board_id=b.id, source_id=char.id, target_id=sb.id))
+        s.add(Edge(board_id=b.id, source_id=char.id, target_id=drama_img.id))
+        s.commit()
+        sb_id, drama_id = sb.id, drama_img.id
+
+    captured: list[str] = []
+
+    async def stub_run(feature, prompt, *, system_prompt=None, timeout=0):
+        captured.append(system_prompt or "")
+        return "雨夜街头过肩特写，ref_image_1 眼含泪光侧脸对峙，冷蓝霓虹轮廓光。"
+
+    monkeypatch.setattr(prompt_synth, "run_llm", stub_run)
+    await prompt_synth.auto_prompt(sb_id)
+    await prompt_synth.auto_prompt(drama_id, seed_prompt="短剧雨夜哭泣对峙，过肩镜头")
+
+    assert len(captured) == 2
+    assert "NARRATIVE & STORYBOARD OVERRIDE" in captured[0]
+    assert "NARRATIVE & STORYBOARD OVERRIDE" in captured[1]

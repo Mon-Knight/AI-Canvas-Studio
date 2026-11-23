@@ -46,7 +46,8 @@ import mimetypes
 import uuid
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
+from urllib.request import url2pathname
 
 import httpx
 
@@ -65,8 +66,23 @@ def _kind_media_type(kind: str) -> str:
     return "video" if kind in ("video", "video_refs") else "image"
 
 
+def _file_url_to_path(url: str) -> str:
+    """Convert RFC 8089 file:/// URIs and legacy file://C:\\... strings to an OS path."""
+    raw = url[len("file://") :]
+    if len(raw) >= 2 and raw[0].isalpha() and raw[1] == ":":
+        return unquote(raw.replace("/", "\\") if "\\" in raw else raw)
+    parsed = urlparse(url)
+    if parsed.netloc and len(parsed.netloc) >= 2 and parsed.netloc[1] == ":":
+        combined = f"/{parsed.netloc}{parsed.path}"
+        return url2pathname(combined)
+    if parsed.netloc and parsed.netloc != "localhost":
+        return url2pathname(f"//{parsed.netloc}{parsed.path}")
+    return url2pathname(parsed.path)
+
+
 def _guess_mime(url: str, media_type: str) -> str:
-    mime, _ = mimetypes.guess_type(urlparse(url).path)
+    target = _file_url_to_path(url) if url.startswith("file://") else urlparse(url).path
+    mime, _ = mimetypes.guess_type(target)
     if mime and mime.startswith(("image/", "video/")):
         return mime
     return "video/mp4" if media_type == "video" else "image/png"
@@ -77,7 +93,7 @@ async def _read_output_bytes(
 ) -> Optional[tuple[bytes, str]]:
     """Read worker output bytes. Returns (bytes, mime) or None."""
     if url.startswith("file://"):
-        path = urlparse(url).path
+        path = _file_url_to_path(url)
         try:
             import os
 
@@ -119,11 +135,11 @@ async def _resolve_media_input_url(media_id: str) -> Optional[str]:
     try:
         cached = media_service.cached_path(media_id)
         if cached is not None:
-            return f"file://{cached}"
+            return Path(cached).resolve().as_uri()
         fetched = await media_service.fetch_and_cache(media_id)
         if fetched is not None:
             _bytes, _mime, path = fetched
-            return f"file://{path}"
+            return Path(path).resolve().as_uri()
     except Exception:  # noqa: BLE001
         logger.exception("muse media: cache resolve failed for %s", media_id[:12])
     from flowboard.db import get_session
@@ -143,7 +159,7 @@ async def _resolve_media_input_url(media_id: str) -> Optional[str]:
             if row is not None and row.local_path:
                 p = Path(row.local_path)
                 if p.is_file():
-                    return f"file://{p}"
+                    return p.resolve().as_uri()
     except Exception:  # noqa: BLE001
         logger.exception("muse media: asset lookup failed for %s", media_id[:12])
     return None

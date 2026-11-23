@@ -30,6 +30,8 @@ def touch(provider: str, worker_id: str) -> None:
 
 def recent_workers(provider: str, within_s: float = 300) -> list[dict]:
     """Workers seen within the window, newest first."""
+    if within_s <= 0:
+        return []
     now = time.monotonic()
     with _lock:
         items = [
@@ -42,6 +44,8 @@ def recent_workers(provider: str, within_s: float = 300) -> list[dict]:
 
 
 def any_recent(provider: str, within_s: float = 300) -> bool:
+    if within_s <= 0:
+        return False
     now = time.monotonic()
     with _lock:
         return any(

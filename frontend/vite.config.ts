@@ -9,6 +9,16 @@ export default defineConfig({
       "@": path.resolve(__dirname, "src"),
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          "vendor-react": ["react", "react-dom", "zustand"],
+          "vendor-xyflow": ["@xyflow/react"],
+        },
+      },
+    },
+  },
   server: {
     port: 5173,
     proxy: {

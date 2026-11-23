@@ -95,7 +95,7 @@ On Error GoTo 0
 
 If errNum <> 0 Or exitCode <> 0 Then
   Dim detailText
-  detailText = ChrW(26080) & ChrW(27861) & ChrW(21551) & ChrW(21160) & " Flowboard " & ChrW(30011) & ChrW(24067) & ChrW(24037) & ChrW(20316) & ChrW(21488) & ChrW(12290) & vbCr & vbLf & vbCr & vbLf & ChrW(35831) & ChrW(26816) & ChrW(26597) & ChrW(26500) & ChrW(24314) & ChrW(20135) & ChrW(29289) & ChrW(25110) & ChrW(26597) & ChrW(30475) & ChrW(21551) & ChrW(21160) & ChrW(26085) & ChrW(24535) & ChrW(65306) & vbCr & vbLf & logPath
+  detailText = ChrW(26080) & ChrW(27861) & ChrW(21551) & ChrW(21160) & " AI Canvas Studio " & ChrW(30011) & ChrW(24067) & ChrW(24037) & ChrW(20316) & ChrW(21488) & ChrW(12290) & vbCr & vbLf & vbCr & vbLf & ChrW(35831) & ChrW(26816) & ChrW(26597) & ChrW(26500) & ChrW(24314) & ChrW(20135) & ChrW(29289) & ChrW(25110) & ChrW(26597) & ChrW(30475) & ChrW(21551) & ChrW(21160) & ChrW(26085) & ChrW(24535) & ChrW(65306) & vbCr & vbLf & logPath
   If errNum <> 0 Then
     detailText = detailText & vbCr & vbLf & vbCr & vbLf & ChrW(38169) & ChrW(35823) & ChrW(35814) & ChrW(24773) & ChrW(65306) & errDesc & " (" & CStr(errNum) & ")"
   Else

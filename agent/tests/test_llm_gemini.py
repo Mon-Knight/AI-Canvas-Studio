@@ -384,7 +384,9 @@ async def test_run_attachments_use_absolute_paths(monkeypatch, tmp_path):
     _stub_resolve(monkeypatch)
     state = _stub_run(monkeypatch, _FakeResult(returncode=0, stdout=_envelope("ok")))
     await p.run("describe", attachments=[str(img)])
-    assert "@/" in _prompt_of(state)
+    prompt = _prompt_of(state)
+    resolved = img.resolve()
+    assert resolved.is_absolute() and f"@{resolved}" in prompt
 
 
 @pytest.mark.asyncio

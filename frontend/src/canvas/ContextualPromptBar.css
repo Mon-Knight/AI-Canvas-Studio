@@ -2,7 +2,7 @@
   position: absolute;
   display: flex;
   flex-direction: column;
-  z-index: 24;
+  z-index: 31;
   min-height: 0;
 }
 

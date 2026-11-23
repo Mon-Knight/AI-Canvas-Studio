@@ -10,8 +10,20 @@ from flowboard.db import get_session
 from flowboard.db.models import Asset
 from flowboard.services import video_concat
 
+def _has_working_ffmpeg() -> bool:
+    if shutil.which("ffmpeg") is None:
+        return False
+    try:
+        res = subprocess.run(
+            ["ffmpeg", "-version"], capture_output=True, timeout=5
+        )
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
 needs_ffmpeg = pytest.mark.skipif(
-    shutil.which("ffmpeg") is None, reason="ffmpeg not installed"
+    not _has_working_ffmpeg(), reason="working ffmpeg binary not available"
 )
 
 

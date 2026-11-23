@@ -471,6 +471,10 @@ def test_completion_patch_derives_omni_model_from_duration():
     patch = proc._node_completion_patch(req, {"media_ids": ["m-1"]})
     assert "videoQuality" not in patch
 
+    req.params = {"duration_s": 5, "omni_version": "1.2"}
+    patch = proc._node_completion_patch(req, {"media_ids": ["m-1"]})
+    assert patch["videoQuality"] == "omni_1.2_5s"
+
 
 def test_completion_patch_derives_variant_count_from_dispatch():
     """`variant_count` is only stamped into params by `gen_image`. Where

@@ -5,7 +5,7 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Header, Request as FastAPIRequest
+from fastapi import Depends, FastAPI, HTTPException, Header, Request as FastAPIRequest
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -15,6 +15,7 @@ from flowboard.db import get_session, init_db
 from flowboard.db.models import Node, PipelineRun, Request
 from flowboard.routes import activity, auth, boards, chat, edges, flow_projects, llm, media, nodes, plans, projects, prompt, system, upload, vision
 from flowboard.routes import flow_accounts as flow_accounts_route
+from flowboard.routes.local_only import EXTENSION_ORIGIN_REGEX, allowed_ui_origins, local_origin
 from flowboard.routes import provider_jobs as provider_jobs_route
 from flowboard.routes import references as references_route
 from flowboard.routes import requests as requests_route
@@ -147,39 +148,42 @@ async def lifespan(app: FastAPI):
         logger.info("flowboard agent stopped")
 
 
-app = FastAPI(title="Flowboard Agent", version="0.0.2", lifespan=lifespan)
+app = FastAPI(title="AI Canvas Studio Agent", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=sorted(allowed_ui_origins()),
+    allow_origin_regex=EXTENSION_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.include_router(boards.router)
-app.include_router(nodes.router)
-app.include_router(edges.router)
-app.include_router(chat.router)
-app.include_router(projects.router)
-app.include_router(flow_projects.router)
-app.include_router(flow_accounts_route.router)
-app.include_router(references_route.router)
-app.include_router(requests_route.router)
-app.include_router(media.bytes_router)
-app.include_router(media.api_router)
-app.include_router(upload.router)
-app.include_router(plans.router)
-app.include_router(vision.router)
-app.include_router(prompt.router)
-app.include_router(auth.router)
-app.include_router(llm.router)
-app.include_router(activity.router)
-app.include_router(provider_jobs_route.router)
-app.include_router(system.router)
+_LOCAL_DEPS = [Depends(local_origin)]
+
+app.include_router(boards.router, dependencies=_LOCAL_DEPS)
+app.include_router(nodes.router, dependencies=_LOCAL_DEPS)
+app.include_router(edges.router, dependencies=_LOCAL_DEPS)
+app.include_router(chat.router, dependencies=_LOCAL_DEPS)
+app.include_router(projects.router, dependencies=_LOCAL_DEPS)
+app.include_router(flow_projects.router, dependencies=_LOCAL_DEPS)
+app.include_router(flow_accounts_route.router, dependencies=_LOCAL_DEPS)
+app.include_router(references_route.router, dependencies=_LOCAL_DEPS)
+app.include_router(requests_route.router, dependencies=_LOCAL_DEPS)
+app.include_router(media.bytes_router, dependencies=_LOCAL_DEPS)
+app.include_router(media.api_router, dependencies=_LOCAL_DEPS)
+app.include_router(upload.router, dependencies=_LOCAL_DEPS)
+app.include_router(plans.router, dependencies=_LOCAL_DEPS)
+app.include_router(vision.router, dependencies=_LOCAL_DEPS)
+app.include_router(prompt.router, dependencies=_LOCAL_DEPS)
+app.include_router(auth.router, dependencies=_LOCAL_DEPS)
+app.include_router(llm.router, dependencies=_LOCAL_DEPS)
+app.include_router(activity.router, dependencies=_LOCAL_DEPS)
+app.include_router(provider_jobs_route.router, dependencies=_LOCAL_DEPS)
+app.include_router(system.router, dependencies=_LOCAL_DEPS)
 
 
-@app.get("/api/health")
+@app.get("/api/health", dependencies=_LOCAL_DEPS)
 def health() -> dict:
     return {
         "ok": True,

@@ -1,0 +1,99 @@
+:root {
+  color-scheme: dark;
+
+  /* ── 即梦画布 (Jimeng Canvas) 标准设计令牌 ── */
+  --bg-canvas: #09090b;
+  --surface-glass: rgba(20, 20, 24, 0.92);
+  --surface-glass-heavy: rgba(18, 18, 22, 0.985);
+  --surface-menu: #16161b;
+  --surface-1: #131316;
+  --surface-2: #1b1b1f;
+  --surface-3: #27272c;
+  --surface-hover: rgba(255, 255, 255, 0.08);
+  --surface-active: rgba(255, 255, 255, 0.14);
+
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-default: rgba(255, 255, 255, 0.13);
+  --border-hover: rgba(255, 255, 255, 0.24);
+  --border-focus: rgba(56, 189, 248, 0.65);
+
+  --text-primary: #f4f4f6;
+  --text-secondary: #a1a1aa;
+  --text-muted: #71717a;
+  --text-inverse: #09090b;
+
+  --brand-cyan: #38bdf8;
+  --brand-gradient: linear-gradient(135deg, #00e5ff 0%, #2979ff 55%, #6366f1 100%);
+  --cta-primary-bg: #f4f4f6;
+  --cta-primary-hover: #ffffff;
+  --status-success: #34d399;
+  --status-warn: #fbbf24;
+  --status-error: #f87171;
+  --font-sans: "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+
+  --radius-xs: 6px;
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-pill: 9999px;
+
+  --blur-glass: blur(18px) saturate(140%);
+  --shadow-island: 0 8px 28px rgba(0, 0, 0, 0.48), 0 0 0 1px var(--border-subtle);
+  --shadow-modal: 0 28px 72px rgba(0, 0, 0, 0.74), 0 0 0 1px var(--border-subtle);
+  --ease-out-quart: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* ── 兼容旧版组件的语义变量映射（统一收敛为纯黑炭灰阶） ── */
+  --bg: #09090b;
+  --panel: #141418;
+  --panel-high: #1d1d22;
+  --panel-higher: #25252b;
+  --border: rgba(255, 255, 255, 0.09);
+  --text: #f4f4f6;
+  --fg: #f4f4f6;
+  --muted: #9ca3af;
+  --accent: #38bdf8;
+  --success: #34d399;
+  --warn: #fbbf24;
+  --error: #f87171;
+}
+
+/* ── Reset ─────────────────────────────────────────────────────────────── */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei UI", Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  cursor: pointer;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+/* ── Layout（全画布无边框沉浸舞台） ────────────────────────────────────── */
+
+.app {
+  position: relative;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+  background: var(--bg-canvas);
+}

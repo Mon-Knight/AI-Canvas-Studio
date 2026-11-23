@@ -43,6 +43,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+from sqlmodel import select
 
 from flowboard.db import get_session
 from flowboard.db.models import Board, BoardFlowProject
@@ -99,10 +100,10 @@ async def get_sync_status(tool: str = "PINHOLE"):
     """
     remote_ids, unavailable = await _remote_project_ids(tool)
     with get_session() as s:
-        boards = s.query(Board).order_by(Board.created_at.desc()).all()
+        boards = s.exec(select(Board).order_by(Board.created_at.desc())).all()
         binds = {
             b.board_id: b.flow_project_id
-            for b in s.query(BoardFlowProject).all()
+            for b in s.exec(select(BoardFlowProject)).all()
         }
         board_status = []
         for b in boards:

@@ -23,9 +23,18 @@ from flowboard.main import app  # noqa: E402
 @pytest.fixture(autouse=True)
 def _fresh_db():
     """Drop + recreate all tables before each test so state is isolated."""
+    from flowboard.services import worker_presence, ws_server
+    from flowboard.services.flow_client import flow_client
+
     SQLModel.metadata.drop_all(engine)
     SQLModel.metadata.create_all(engine)
+    flow_client._pending.clear()
+    worker_presence._seen.clear()
+    ws_server._connections.clear()
     yield
+    flow_client._pending.clear()
+    worker_presence._seen.clear()
+    ws_server._connections.clear()
 
 
 @pytest.fixture(autouse=True)

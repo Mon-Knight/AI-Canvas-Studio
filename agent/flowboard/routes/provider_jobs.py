@@ -26,16 +26,21 @@ import logging
 import time
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from flowboard.routes.local_only import local_origin, require_worker_auth
 from flowboard.services import provider_jobs as pq
 from flowboard.services import worker_presence
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/provider-jobs", tags=["provider-jobs"])
+router = APIRouter(
+    prefix="/api/provider-jobs",
+    tags=["provider-jobs"],
+    dependencies=[Depends(local_origin)],
+)
 
 DEFAULT_LEASE_TTL_S = 300
 POLL_INTERVAL_S = 2.0
@@ -135,7 +140,7 @@ def workers_status(provider: str = Query(default="muse")):
 # shadowed by the path parameter.
 
 
-@router.get("/wait-next")
+@router.get("/wait-next", dependencies=[Depends(require_worker_auth)])
 async def wait_next_job(
     provider: str = Query(...),
     worker_id: str = Query(...),
@@ -185,8 +190,10 @@ async def wait_job(job_id: str, timeout_s: float = Query(default=600, le=3600)):
 
 # ── worker endpoints ──────────────────────────────────────────────────
 
+_WORKER_DEPS = [Depends(require_worker_auth)]
 
-@router.post("/next")
+
+@router.post("/next", dependencies=_WORKER_DEPS)
 def claim_next_job(body: HeartbeatBody, provider: str = Query(...)):
     """Claim the oldest available job for a provider (non-blocking)."""
     worker_presence.touch(provider, body.worker_id)
@@ -196,7 +203,7 @@ def claim_next_job(body: HeartbeatBody, provider: str = Query(...)):
     return _serialize(job)
 
 
-@router.post("/{job_id}/heartbeat")
+@router.post("/{job_id}/heartbeat", dependencies=_WORKER_DEPS)
 def heartbeat_job(job_id: str, body: HeartbeatBody):
     existing = pq.get_provider_job(job_id)
     if existing is not None:
@@ -210,7 +217,7 @@ def heartbeat_job(job_id: str, body: HeartbeatBody):
     return _serialize(job)
 
 
-@router.post("/{job_id}/progress")
+@router.post("/{job_id}/progress", dependencies=_WORKER_DEPS)
 def progress_job(job_id: str, body: ProgressBody):
     """Report progress. 409 unless the caller holds the lease on a live job."""
     job = pq.report_provider_job_progress(
@@ -224,7 +231,7 @@ def progress_job(job_id: str, body: ProgressBody):
     return _serialize(job)
 
 
-@router.post("/{job_id}/complete")
+@router.post("/{job_id}/complete", dependencies=_WORKER_DEPS)
 def complete_job(job_id: str, body: CompleteBody):
     """Complete a job as its lease holder. Idempotent: re-completing an
     already-SUCCEEDED job returns the existing row. 409 otherwise."""
@@ -238,7 +245,7 @@ def complete_job(job_id: str, body: CompleteBody):
     return _serialize(job)
 
 
-@router.post("/{job_id}/fail")
+@router.post("/{job_id}/fail", dependencies=_WORKER_DEPS)
 def fail_job(job_id: str, body: FailBody):
     """Fail a job as its lease holder. Idempotent for already-FAILED jobs;
     a SUCCEEDED/CANCELLED job cannot be failed. 409 otherwise."""

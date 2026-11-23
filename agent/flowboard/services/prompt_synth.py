@@ -400,17 +400,110 @@ def _distinct_subjects(records: list[dict]) -> list[str]:
     return ordered
 
 
-def _image_system_prompt(subject_count: int) -> str:
-    """Branch the image system prompt on subject count.
+_NARRATIVE_DRAMA_KEYWORDS: tuple[str, ...] = (
+    "分镜",
+    "故事板",
+    "短剧",
+    "番剧",
+    "漫剧",
+    "剧情",
+    "电影感",
+    "叙事",
+    "对峙",
+    "哭",
+    "流泪",
+    "落泪",
+    "呐喊",
+    "怒吼",
+    "大笑",
+    "悲伤",
+    "惊恐",
+    "愤怒",
+    "背影",
+    "侧脸",
+    "过肩",
+    "俯拍",
+    "仰拍",
+    "特写",
+    "大远景",
+    "奔跑",
+    "打斗",
+    "战斗",
+    "拔剑",
+    "拥抱",
+    "storyboard",
+    "cinematic",
+    "dramatic",
+    "crying",
+    "shouting",
+    "laughing",
+    "over-the-shoulder",
+    "backshot",
+)
+
+_NARRATIVE_DRAMA_CLAUSE = (
+    "\n\nNARRATIVE & STORYBOARD OVERRIDE — CRITICAL: This shot is a "
+    "cinematic / short-drama / anime narrative frame rather than a fashion "
+    "lookbook catalog photo. Override the default lookbook GAZE and "
+    "EXPRESSION locks above as follows:\n"
+    "  • CINEMATIC FRAMING & GAZE: Choose camera angles and eyelines that "
+    "serve the dramatic beat — over-the-shoulder, profile, low/high angle, "
+    "wide establishing shot, close-up reaction, or silhouette are ALL "
+    "encouraged when fitting the scene; subjects do NOT need to stare "
+    "into the lens.\n"
+    "  • AUTHENTIC EMOTION: Match the scene's emotional intensity (tears, "
+    "grief, tension, confrontation, joy, shock, shouting, or subtle "
+    "restraint) instead of forcing a flat lookbook expression, while "
+    "keeping facial features coherent with each `ref_image_N` identity.\n"
+    "  • STORYTELLING FOCUS: Prioritize dramatic staging, environmental "
+    "atmosphere, cinematic lighting, and narrative action over garment "
+    "catalog framing."
+)
+
+
+def _is_narrative_context(
+    target: Node,
+    records: list[dict],
+    seed_prompt: Optional[str] = None,
+) -> bool:
+    if target.type == "Storyboard":
+        return True
+    if any(r.get("type") == "Storyboard" for r in records):
+        return True
+    texts: list[str] = []
+    if isinstance(seed_prompt, str) and seed_prompt.strip():
+        texts.append(seed_prompt)
+    t_data = target.data or {}
+    for k in ("prompt", "title"):
+        val = t_data.get(k)
+        if isinstance(val, str) and val.strip():
+            texts.append(val)
+    for r in records:
+        if r.get("type") == "prompt":
+            for k in ("prompt", "brief", "title"):
+                val = r.get(k)
+                if isinstance(val, str) and val.strip():
+                    texts.append(val)
+    haystack = " ".join(texts).lower()
+    return any(kw in haystack for kw in _NARRATIVE_DRAMA_KEYWORDS)
+
+
+def _image_system_prompt(subject_count: int, *, narrative_mode: bool = False) -> str:
+    """Branch the image system prompt on subject count and narrative context.
 
     1 subject → standard editorial single-model prompt.
     2+ subjects → append the multi-subject clause so Claude composes a
     couple/group shot referencing every subject by their positional
     `ref_image_N` label.
+    narrative_mode → append cinematic/drama override unlocking dynamic
+    eyelines, angles, and emotional expression for storyboards & short dramas.
     """
+    out = _SYNTH_SYSTEM_IMAGE
     if subject_count >= 2:
-        return _SYNTH_SYSTEM_IMAGE + _MULTI_SUBJECT_CLAUSE
-    return _SYNTH_SYSTEM_IMAGE
+        out = out + _MULTI_SUBJECT_CLAUSE
+    if narrative_mode:
+        out = out + _NARRATIVE_DRAMA_CLAUSE
+    return out
 
 
 def _format_user_message(
@@ -608,10 +701,16 @@ def build_local_chinese_fallback_prompt(
             "衣料随气流轻柔摆动，配以轻柔纯音乐与细腻环境音效"
         )
     else:
-        pose_part = stance_hint or "主体姿态自然从容、直视镜头"
+        narrative = _is_narrative_context(target, records, seed_prompt)
+        default_pose = (
+            "富有电影叙事张力与戏剧化构图，人物神态与视线自然贴合剧情氛围"
+            if narrative
+            else "主体姿态自然从容、直视镜头"
+        )
+        pose_part = stance_hint or default_pose
         chunks.append(
             f"{pose_part}，构图平衡完整，柔和细腻主光勾勒立体质感，"
-            "色彩自然通透，高清摄影实拍质感"
+            "色彩自然通透，高清光影细节表现"
         )
 
     out = "，".join(chunks).strip("， ")
@@ -652,10 +751,11 @@ async def auto_prompt_batch(
 
     is_video = target.type == "video"
     subject_count = len(_distinct_subjects(records))
+    narrative_mode = _is_narrative_context(target, records, seed_prompt)
     if is_video:
         base_system = _video_system_prompt(camera, subject_count)
     else:
-        base_system = _image_system_prompt(subject_count)
+        base_system = _image_system_prompt(subject_count, narrative_mode=narrative_mode)
     system_prompt = base_system + _BATCH_SUFFIX.format(count=count)
     user_msg = _format_user_message(records, target, seed_prompt=seed_prompt)
 
@@ -746,12 +846,13 @@ async def auto_prompt(
 
     is_video = target.type == "video"
     subject_count = len(_distinct_subjects(records))
+    narrative_mode = _is_narrative_context(target, records, seed_prompt)
     if is_video:
         system_prompt = _video_system_prompt(
             camera, subject_count, duration_s=duration_s
         )
     else:
-        system_prompt = _image_system_prompt(subject_count)
+        system_prompt = _image_system_prompt(subject_count, narrative_mode=narrative_mode)
     user_msg = _format_user_message(records, target, seed_prompt=seed_prompt)
 
     activity_params: dict[str, object] = {"node_id": node_id, "camera": camera}

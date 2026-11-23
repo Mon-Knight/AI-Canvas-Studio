@@ -75,7 +75,7 @@ RULES
 - The reply must be in the same language as the user's message.
 - Node positions: x grows right, y grows down. Lay new content out
   left-to-right starting near x=0, spacing nodes ~300px apart.
-- Prefer reusing existing nodes on follow-up turns ("sửa", "gen lại"):
+- Prefer reusing existing nodes on follow-up turns ("修改", "重绘", "微调", "regenerate"):
   regenerate into the same node instead of creating duplicates.
 - Keep prompts you send to gen_image/gen_video concrete and visual.
 - If a tool returns an error, adapt (fix args, try another tool) instead

@@ -71,7 +71,7 @@ def test_me_surfaces_a_misconfigured_tier_instead_of_guessing(monkeypatch):
 
     flow_client._paygate_tier = None
     monkeypatch.setattr(flow_sdk, "DEFAULT_PAYGATE_TIER", "PAYGATE_TIER_GOLD")
-    body = TestClient(app).get("/api/auth/me").json()
+    body = TestClient(app, base_url="http://127.0.0.1:8434").get("/api/auth/me").json()
     assert body["paygate_tier"] is None
     assert "paygate_tier_invalid" in body["paygate_tier_error"]
     assert "PAYGATE_TIER_GOLD" in body["paygate_tier_error"]

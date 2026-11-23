@@ -16,10 +16,7 @@ import {
   normaliseStoryboardMode,
   totalPanels,
 } from "../lib/storyboardPrompt";
-import {
-  VIDEO_CAMERA_PRESETS,
-  composeVideoPromptWithDirectives,
-} from "../lib/promptMentions";
+import { composeVideoPromptWithDirectives } from "../lib/promptMentions";
 import { filterDirectorSkills, type DirectorSkillEntry } from "../constants/directorSkills";
 import {
   useSettingsStore,
@@ -32,15 +29,11 @@ import {
 } from "../store/settings";
 import {
   CHINESE_PROMPT_PRESETS,
-  IMAGE_ASPECT_OPTIONS,
   IMAGE_MODEL_CATALOG,
   IMAGE_RESOLUTION_OPTIONS,
   IMAGE_THINKING_OPTIONS,
-  OMNI_1_1_CREDIT_COST,
-  OMNI_1_2_CREDIT_COST,
   OMNI_1_2_DURATIONS,
   OUTPUT_COUNT_OPTIONS,
-  VIDEO_ASPECT_OPTIONS,
   VIDEO_MODEL_CATALOG,
   VIDEO_RESOLUTION_OPTIONS,
   estimateImageCreditCost,
@@ -53,134 +46,30 @@ import {
 import {
   autoPrompt as autoPromptApi,
   autoPromptBatch as autoPromptBatchApi,
-  mediaUrl,
   patchEdge,
   patchNode,
 } from "../api/client";
+import { applySubjectTemplateText } from "../constants/character";
 import {
-  OFFICIAL_SUBJECT_TEMPLATES,
-  SUBJECT_TEMPLATE_CATEGORIES,
-  applySubjectTemplateText,
-  useSubjectTemplatesStore,
-  type CustomSubjectTemplate,
-  type SubjectTemplateCategory,
-} from "../constants/character";
+  CAMERA_MOVEMENTS,
+  IMAGE_ASPECT_RATIOS,
+  PROMPT_MAX_LENGTH,
+  VIDEO_ASPECT_RATIOS,
+  pickDefaultAspect,
+  type AspectKey,
+  type CameraKey,
+} from "./generation/aspectHelpers";
+import { SubjectTemplatesPanel } from "./generation/SubjectTemplatesPanel";
+import { UpstreamReferencesSection } from "./generation/UpstreamReferencesSection";
+import { ModalParameterControls } from "./generation/ModalParameterControls";
 
 const REF_SOURCE_TYPES = new Set([
   "character",
   "image",
   "visual_asset",
-  // Storyboard outputs are first-class refs — they're composite images
-  // that can feed downstream image / Omni-video / character nodes.
   "Storyboard",
-  // Upstream video nodes can feed both video and image nodes (browser-side frame extraction).
   "video",
 ]);
-
-const PROMPT_MAX_LENGTH = 2000;
-
-const IMAGE_ASPECT_RATIOS = IMAGE_ASPECT_OPTIONS.map((a) => ({
-  key: a.value,
-  label: a.shortLabel,
-  fullLabel: a.label,
-}));
-
-const VIDEO_ASPECT_RATIOS = VIDEO_ASPECT_OPTIONS.map((a) => ({
-  key: a.value,
-  label: a.label,
-  shortLabel: a.shortLabel,
-}));
-
-const CAMERA_MOVEMENTS = VIDEO_CAMERA_PRESETS;
-type CameraKey = string;
-
-type ImageAspectKey = (typeof IMAGE_ASPECT_OPTIONS)[number]["value"];
-type VideoAspectKey = (typeof VIDEO_ASPECT_OPTIONS)[number]["value"];
-type AspectKey = ImageAspectKey | VideoAspectKey;
-
-// Map an upstream image aspect onto the closest video aspect. Square has
-// no direct video equivalent — fall back to portrait per the
-// "default-to-9:16 on mismatch" rule.
-function imageAspectToVideo(img: string | undefined): VideoAspectKey | null {
-  if (img === "VIDEO_ASPECT_RATIO_LANDSCAPE" || img === "VIDEO_ASPECT_RATIO_PORTRAIT") {
-    return img;
-  }
-  if (img === "IMAGE_ASPECT_RATIO_LANDSCAPE" || img === "IMAGE_ASPECT_RATIO_LANDSCAPE_FOUR_THREE") {
-    return "VIDEO_ASPECT_RATIO_LANDSCAPE";
-  }
-  if (
-    img === "IMAGE_ASPECT_RATIO_PORTRAIT" ||
-    img === "IMAGE_ASPECT_RATIO_PORTRAIT_THREE_FOUR" ||
-    img === "IMAGE_ASPECT_RATIO_SQUARE"
-  ) {
-    return "VIDEO_ASPECT_RATIO_PORTRAIT";
-  }
-  return null;
-}
-
-function videoAspectToImage(ar: string): ImageAspectKey | null {
-  if (ar === "VIDEO_ASPECT_RATIO_LANDSCAPE") return "IMAGE_ASPECT_RATIO_LANDSCAPE";
-  if (ar === "VIDEO_ASPECT_RATIO_PORTRAIT") return "IMAGE_ASPECT_RATIO_PORTRAIT";
-  return IMAGE_ASPECT_RATIOS.some((p) => p.key === ar) ? (ar as ImageAspectKey) : null;
-}
-
-// Walk upstream of the target node, collect each upstream's aspectRatio,
-// then apply the user's rule:
-//   • single distinct aspect → match it
-//   • multiple distinct aspects → fall back to 9:16
-//   • zero upstream / unknown → caller's default
-function pickDefaultAspect(
-  rfId: string,
-  targetType: string,
-  nodes: ReturnType<typeof useBoardStore.getState>["nodes"],
-  edges: ReturnType<typeof useBoardStore.getState>["edges"],
-): AspectKey | null {
-  const upstreamAspects: string[] = [];
-  for (const e of edges) {
-    if (e.target !== rfId) continue;
-    const src = nodes.find((n) => n.id === e.source);
-    if (!src) continue;
-    const ar = src.data.aspectRatio;
-    if (typeof ar === "string" && ar.length > 0) upstreamAspects.push(ar);
-  }
-  if (upstreamAspects.length === 0) return null;
-
-  if (targetType === "video") {
-    const mapped = upstreamAspects
-      .map(imageAspectToVideo)
-      .filter((x): x is VideoAspectKey => x !== null);
-    if (mapped.length === 0) return null;
-    const unique = new Set(mapped);
-    if (unique.size === 1) return mapped[0];
-    return "VIDEO_ASPECT_RATIO_PORTRAIT";
-  }
-  // Image (and character — though character has its own opinionated
-  // default; the caller short-circuits before reaching here).
-  const validImg = upstreamAspects
-    .map(videoAspectToImage)
-    .filter((a): a is ImageAspectKey => a !== null);
-  if (validImg.length === 0) return null;
-  const unique = new Set(validImg);
-  if (unique.size === 1) return validImg[0];
-  return "IMAGE_ASPECT_RATIO_PORTRAIT";
-}
-
-// Small "ⓘ" affordance for moving static help-text out of the layout
-// into a hover tooltip — keeps the dialog short while preserving the
-// information for users who want it. Native `title` (plain text) is
-// enough; we don't need rich markup in tooltips.
-function InfoTip({ tip }: { tip: string }) {
-  return (
-    <span
-      className="gen-dialog__info-tip"
-      title={tip}
-      aria-label={tip}
-      role="img"
-    >
-      ⓘ
-    </span>
-  );
-}
 
 export function GenerationDialog() {
   const { rfId, prompt } = useGenerationStore((s) => s.openDialog);
@@ -218,17 +107,6 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
   const [atSuggestOpen, setAtSuggestOpen] = useState(false);
   const [slashSkillOpen, setSlashSkillOpen] = useState(false);
 
-  // 主体（character）官方推荐模板 & 自定义模板选择器状态
-  const customSubjectTemplates = useSubjectTemplatesStore((s) => s.customTemplates);
-  const addCustomTemplate = useSubjectTemplatesStore((s) => s.addCustomTemplate);
-  const updateCustomTemplate = useSubjectTemplatesStore((s) => s.updateCustomTemplate);
-  const removeCustomTemplate = useSubjectTemplatesStore((s) => s.removeCustomTemplate);
-  const [subjectTab, setSubjectTab] = useState<"official" | "custom">("official");
-  const [subjectCategory, setSubjectCategory] = useState<SubjectTemplateCategory>("all");
-  const [templateFormOpen, setTemplateFormOpen] = useState(false);
-  const [editingTemplateId, setEditingTemplateId] = useState<string | null>(null);
-  const [tplTitleDraft, setTplTitleDraft] = useState("");
-  const [tplPromptDraft, setTplPromptDraft] = useState("");
   const lastAppliedTemplateRef = useRef<string | null>(null);
 
   // Auto-prompt state — set when AI polish or auto-synth produces text.
@@ -515,10 +393,6 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
       setAtSuggestOpen(false);
       setSlashSkillOpen(false);
       setSeedInput(openNodeData?.seed != null ? String(openNodeData.seed) : "");
-      setTemplateFormOpen(false);
-      setEditingTemplateId(null);
-      setTplTitleDraft("");
-      setTplPromptDraft("");
       lastAppliedTemplateRef.current = null;
       setAutoBuilding(false);
       setAutoPromptUsed(false);
@@ -820,38 +694,11 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     window.requestAnimationFrame(() => firstFocusRef.current?.focus());
   }
 
-  function handleOpenCreateTemplate() {
-    setEditingTemplateId(null);
-    setTplTitleDraft("");
-    setTplPromptDraft(prompt.trim());
-    setTemplateFormOpen(true);
-  }
-
-  function handleOpenEditTemplate(tpl: CustomSubjectTemplate) {
-    setEditingTemplateId(tpl.id);
-    setTplTitleDraft(tpl.title);
-    setTplPromptDraft(tpl.prompt);
-    setTemplateFormOpen(true);
-  }
-
-  function handleSaveTemplateDraft() {
-    const cleanTitle = tplTitleDraft.trim();
-    const cleanPrompt = tplPromptDraft.trim();
-    if (!cleanTitle || !cleanPrompt) return;
-    if (editingTemplateId) {
-      updateCustomTemplate(editingTemplateId, cleanTitle, cleanPrompt);
-    } else {
-      const created = addCustomTemplate(cleanTitle, cleanPrompt);
-      if (created && !prompt.trim()) {
-        lastAppliedTemplateRef.current = created.prompt;
-        promptManuallyEditedRef.current = true;
-        setPrompt(created.prompt);
-        if (inline) persistNodeDraftPatch({ prompt: created.prompt });
-      }
-    }
-    setSubjectTab("custom");
-    setTemplateFormOpen(false);
-    setEditingTemplateId(null);
+  function handleAutoFillCreatedTemplatePrompt(createdPrompt: string) {
+    lastAppliedTemplateRef.current = createdPrompt;
+    promptManuallyEditedRef.current = true;
+    setPrompt(createdPrompt);
+    if (inline) persistNodeDraftPatch({ prompt: createdPrompt });
   }
 
   async function handleAiPolish() {
@@ -1143,177 +990,15 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     ? sourceMediaIds.some((_, idx) => selectedSourceIdx.has(idx))
     : true);
 
-  const visibleOfficialTemplates =
-    subjectCategory === "all"
-      ? OFFICIAL_SUBJECT_TEMPLATES
-      : OFFICIAL_SUBJECT_TEMPLATES.filter((t) => t.category === subjectCategory);
-
   const subjectTemplatesSection = isCharacter ? (
-    <div className="gen-dialog__field jm-subject-tpl">
-      <div className="jm-subject-tpl__header">
-        <div className="jm-subject-tpl__tabs" role="tablist" aria-label="主体模板来源">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={subjectTab === "official"}
-            className={`jm-subject-tpl__tab${subjectTab === "official" ? " jm-subject-tpl__tab--active" : ""}`}
-            onClick={() => setSubjectTab("official")}
-          >
-            官方推荐模板
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={subjectTab === "custom"}
-            className={`jm-subject-tpl__tab${subjectTab === "custom" ? " jm-subject-tpl__tab--active" : ""}`}
-            onClick={() => setSubjectTab("custom")}
-          >
-            自定义模板 ({customSubjectTemplates.length})
-          </button>
-        </div>
-        <button
-          type="button"
-          className="jm-subject-tpl__add-btn"
-          onClick={handleOpenCreateTemplate}
-          disabled={isWorking || queued}
-          title="将当前提示词保存为自定义主体模板，或新建专属设定模板"
-        >
-          + {prompt.trim() ? "存为模板" : "新建模板"}
-        </button>
-      </div>
-
-      {templateFormOpen && (
-        <div className="jm-subject-tpl__editor" role="region" aria-label="编辑自定义主体模板">
-          <input
-            type="text"
-            className="jm-subject-tpl__input"
-            maxLength={40}
-            value={tplTitleDraft}
-            onChange={(e) => setTplTitleDraft(e.target.value)}
-            placeholder="模板名称（如：赛博二次元女主立绘 / 品牌吉祥物设定）"
-            aria-label="自定义模板名称"
-          />
-          <textarea
-            className="jm-subject-tpl__textarea"
-            rows={2}
-            maxLength={PROMPT_MAX_LENGTH}
-            value={tplPromptDraft}
-            onChange={(e) => setTplPromptDraft(e.target.value)}
-            placeholder="输入可复用的主体设定提示词（支持二次元、3D、写实、萌宠、道具等任意风格）…"
-            aria-label="自定义模板提示词"
-          />
-          <div className="jm-subject-tpl__editor-actions">
-            <button
-              type="button"
-              className="gen-dialog__revert-btn"
-              onClick={() => {
-                setTemplateFormOpen(false);
-                setEditingTemplateId(null);
-              }}
-            >
-              取消
-            </button>
-            <button
-              type="button"
-              className="jm-subject-tpl__save-btn"
-              disabled={!tplTitleDraft.trim() || !tplPromptDraft.trim()}
-              onClick={handleSaveTemplateDraft}
-            >
-              {editingTemplateId ? "保存修改" : "保存模板"}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {subjectTab === "official" ? (
-        <>
-          <div className="jm-subject-tpl__cats" aria-label="官方模板分类">
-            {SUBJECT_TEMPLATE_CATEGORIES.map((cat) => (
-              <button
-                key={cat.key}
-                type="button"
-                className={`jm-subject-tpl__cat${subjectCategory === cat.key ? " jm-subject-tpl__cat--active" : ""}`}
-                onClick={() => setSubjectCategory(cat.key)}
-              >
-                {cat.label}
-              </button>
-            ))}
-          </div>
-          <div className={`jm-subject-tpl__grid${inline ? " jm-subject-tpl__grid--inline" : ""}`}>
-            {visibleOfficialTemplates.map((tpl) => {
-              const isApplied = prompt.trim() === tpl.prompt.trim() || prompt.startsWith(tpl.prompt);
-              return (
-                <button
-                  key={tpl.id}
-                  type="button"
-                  className={`jm-subject-tpl__card${isApplied ? " jm-subject-tpl__card--active" : ""}`}
-                  onClick={() => handleApplySubjectTemplate(tpl)}
-                  disabled={isWorking || queued}
-                  title={`${tpl.summary}\n\n点击插入模板提示词，插入后可自由增删角色细节`}
-                >
-                  <div className="jm-subject-tpl__card-top">
-                    <span className="jm-subject-tpl__card-title">{tpl.title}</span>
-                    <span className="jm-subject-tpl__badge">{tpl.badge}</span>
-                  </div>
-                  {!inline && <p className="jm-subject-tpl__card-desc">{tpl.summary}</p>}
-                </button>
-              );
-            })}
-          </div>
-        </>
-      ) : customSubjectTemplates.length === 0 ? (
-        <div className="jm-subject-tpl__empty">
-          暂无自定义模板。可在下方输入常用动漫/角色/IP设定词后点击右上角「+ 存为模板」，方便随时一键复用。
-        </div>
-      ) : (
-        <div className={`jm-subject-tpl__grid${inline ? " jm-subject-tpl__grid--inline" : ""}`}>
-          {customSubjectTemplates.map((tpl) => {
-            const isApplied = prompt.trim() === tpl.prompt.trim() || prompt.startsWith(tpl.prompt);
-            return (
-              <div
-                key={tpl.id}
-                className={`jm-subject-tpl__card jm-subject-tpl__card--custom${isApplied ? " jm-subject-tpl__card--active" : ""}`}
-              >
-                <button
-                  type="button"
-                  className="jm-subject-tpl__custom-pick"
-                  onClick={() => handleApplySubjectTemplate(tpl)}
-                  disabled={isWorking || queued}
-                  title={tpl.prompt}
-                >
-                  <span className="jm-subject-tpl__card-title">{tpl.title}</span>
-                  {!inline && (
-                    <span className="jm-subject-tpl__card-desc">
-                      {tpl.prompt.length > 54 ? `${tpl.prompt.slice(0, 54)}…` : tpl.prompt}
-                    </span>
-                  )}
-                </button>
-                <div className="jm-subject-tpl__custom-actions">
-                  <button
-                    type="button"
-                    className="jm-subject-tpl__icon-btn"
-                    onClick={() => handleOpenEditTemplate(tpl)}
-                    title="编辑此自定义模板"
-                    aria-label={`编辑模板 ${tpl.title}`}
-                  >
-                    ✎
-                  </button>
-                  <button
-                    type="button"
-                    className="jm-subject-tpl__icon-btn jm-subject-tpl__icon-btn--del"
-                    onClick={() => removeCustomTemplate(tpl.id)}
-                    title="删除此自定义模板"
-                    aria-label={`删除模板 ${tpl.title}`}
-                  >
-                    ×
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
+    <SubjectTemplatesPanel
+      key={rfId}
+      prompt={prompt}
+      inline={inline}
+      disabled={isWorking || queued}
+      onApplyTemplate={handleApplySubjectTemplate}
+      onAutoFillCreatedPrompt={handleAutoFillCreatedTemplatePrompt}
+    />
   ) : null;
 
   const promptField = (
@@ -1525,369 +1210,34 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     </div>
   );
 
-  const references = (<>
-        {isVideo && videoCandidateFrames.length >= 2 && (
-          <div className="gen-dialog__field">
-            <div className="gen-dialog__label-row">
-              <span className="gen-dialog__label">视频驱动方式</span>
-              <div className="aspect-chip-row">
-                <button
-                  type="button"
-                  className={`aspect-chip${videoSubMode === "auto" ? " aspect-chip--active" : ""}`}
-                  onClick={() => setVideoSubMode("auto")}
-                >
-                  {isOmniVideo ? "多图参考驱动" : "首帧/变体生视频"}
-                </button>
-                <button
-                  type="button"
-                  className={`aspect-chip${videoSubMode === "first_last" ? " aspect-chip--active" : ""}`}
-                  onClick={() => setVideoSubMode("first_last")}
-                  title="调用 Flow 原生首尾帧锁定接口（nprQif），精准控制视频起始与结束画面"
-                >
-                  ⇄ 首尾帧锁定
-                </button>
-                <button
-                  type="button"
-                  className={`aspect-chip${videoSubMode === "t2v" ? " aspect-chip--active" : ""}`}
-                  onClick={() => setVideoSubMode("t2v")}
-                  title="忽略参考图，调用 Flow 纯文生视频（YhhmEf）"
-                >
-                  纯文生视频
-                </button>
-              </div>
-            </div>
-            {videoSubMode === "first_last" && (
-              <div className="gen-dialog__first-last-row">
-                <div className="gen-dialog__first-last-slot">
-                  <span className="gen-dialog__first-last-tag">首帧（Start）</span>
-                  <select
-                    aria-label="选择首帧参考图"
-                    value={firstFrameId}
-                    onChange={(e) => setFirstFrameId(e.target.value)}
-                  >
-                    {videoCandidateFrames.map((c) => (
-                      <option key={`start-${c.mediaId}`} value={c.mediaId}>
-                        {c.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <button
-                  type="button"
-                  className="source-select-mini"
-                  onClick={() => {
-                    const prevStart = firstFrameId;
-                    setFirstFrameId(lastFrameId);
-                    setLastFrameId(prevStart);
-                  }}
-                  title="互换首帧与尾帧"
-                >
-                  ⇄ 互换
-                </button>
-                <div className="gen-dialog__first-last-slot">
-                  <span className="gen-dialog__first-last-tag">尾帧（End）</span>
-                  <select
-                    aria-label="选择尾帧参考图"
-                    value={lastFrameId}
-                    onChange={(e) => setLastFrameId(e.target.value)}
-                  >
-                    {videoCandidateFrames.map((c) => (
-                      <option key={`end-${c.mediaId}`} value={c.mediaId}>
-                        {c.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {isVideo && !isOmniVideo && !isVideoFirstLastMode && !isVideoTextMode && (
-          <div className="gen-dialog__field">
-            <div className="gen-dialog__label-row">
-              <span className="gen-dialog__label">
-                {sourceNode?.data.type === "video" ? "源视频参考" : "源图像变体"}
-                {sourceMediaIds.length > 1 ? ` (${sourceMediaIds.length})` : ""}
-              </span>
-              {sourceMediaIds.length > 1 && (
-                <div className="source-select-actions">
-                  <button
-                    type="button"
-                    className="source-select-mini"
-                    onClick={() =>
-                      setSelectedSourceIdx(
-                        new Set(sourceMediaIds.map((_, i) => i)),
-                      )
-                    }
-                  >
-                    全选
-                  </button>
-                  <button
-                    type="button"
-                    className="source-select-mini"
-                    onClick={() => setSelectedSourceIdx(new Set())}
-                  >
-                    清空
-                  </button>
-                </div>
-              )}
-            </div>
-            {sourceMediaIds.length > 0 && sourceNode ? (
-              <>
-                <div className="source-image-row">
-                  {sourceMediaIds.map((mid, i) => {
-                    const checked = selectedSourceIdx.has(i);
-                    const isVideoSrc = sourceNode.data.type === "video";
-                    return (
-                      <button
-                        key={mid}
-                        type="button"
-                        className={`source-thumb${checked ? " source-thumb--checked" : ""}`}
-                        onClick={() => {
-                          setSelectedSourceIdx((prev) => {
-                            const next = new Set(prev);
-                            if (next.has(i)) next.delete(i);
-                            else next.add(i);
-                            return next;
-                          });
-                        }}
-                        aria-pressed={checked}
-                        aria-label={`变体 ${i + 1}${checked ? " 已选中" : ""}`}
-                      >
-                        {isVideoSrc ? (
-                          <video
-                            className="source-image-row__thumb"
-                            src={mediaUrl(mid)}
-                            muted
-                            playsInline
-                            preload="metadata"
-                          />
-                        ) : (
-                          <img
-                            className="source-image-row__thumb"
-                            src={mediaUrl(mid)}
-                            alt={sourceNode.data.title}
-                          />
-                        )}
-                        <span className="source-thumb__check" aria-hidden="true">
-                          {checked ? "✓" : ""}
-                        </span>
-                      </button>
-                    );
-                  })}
-                  <span className="source-image-row__label">
-                    #{sourceNode.data.shortId}
-                  </span>
-                </div>
-                <p className="gen-dialog__hint">
-                  {selectedSourceIdx.size === 0 ? (
-                    <span style={{ color: "#f87171" }}>
-                      请至少勾选 1 个源参考以生成视频。
-                    </span>
-                  ) : (
-                    <>
-                      将批量生成 <strong>{selectedSourceIdx.size} 条视频</strong>
-                      {selectedSourceIdx.size === sourceMediaIds.length
-                        ? "（全部变体）"
-                        : `（已选 ${selectedSourceIdx.size}/${sourceMediaIds.length} 个变体）`}
-                      {sourceNode.data.type === "video"
-                        ? "，提交时自动截取参考视频帧作为起始参考。"
-                        : "，共享当前提示词与镜头设置。"}
-                    </>
-                  )}
-                </p>
-              </>
-            ) : (
-              <div className="source-image-row source-image-row--empty">
-                {videoCandidateFrames.length === 0
-                  ? "当前未连线参考图 —— 可直接输入视频提示词走 Flow 原生纯文生视频（YhhmEf）"
-                  : "请先勾选至少一个用于生成的源参考"}
-              </div>
-            )}
-          </div>
-        )}
-
-        {(refSourceNodes.length > 0 || promptSourceNodes.length > 0)
-          && (
-          <div className="gen-dialog__field">
-            <span className="gen-dialog__label">
-              已连线上游参考 ({refSourceNodes.length + promptSourceNodes.length})
-            </span>
-            <div className="ref-source-row">
-              {promptSourceNodes.map((p) => {
-                const preview = p.text.trim() || "空白文本";
-                return (
-                  <div
-                    key={p.edgeId}
-                    className="ref-source-chip ref-source-chip--prompt"
-                    title={`${displayNodeTitle(p.node.data.title, p.node.data.type) || "文本"} — ${preview}`}
-                  >
-                    <div className="ref-source-chip__prompt-body">
-                      <span className="ref-source-chip__prompt-icon" aria-hidden="true">✦</span>
-                      <span className="ref-source-chip__prompt-text">
-                        {preview}
-                      </span>
-                    </div>
-                    <span className="ref-source-chip__id">
-                      #{p.node.data.shortId}
-                    </span>
-                  </div>
-                );
-              })}
-              {refSourceNodes.map((r, rIdx) => {
-                const refTitle = displayNodeTitle(r.node.data.title, r.node.data.type);
-                const isMulti = r.allVariants.length >= 2;
-                const isPickerOpen = openVariantPicker === r.edgeId;
-                const isVideoChip = r.node.data.type === "video";
-                const tooltip = isMulti
-                  ? `${refTitle} — 变体 ${(r.variantIdx ?? 0) + 1} · 点击切换`
-                  : refTitle;
-                return (
-                  <div key={r.edgeId} className="ref-source-chip-wrap">
-                    <button
-                      type="button"
-                      className="ref-source-chip__at-btn"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        insertRefMentionTag(rIdx + 1);
-                      }}
-                      title={`点击在提示词中插入 @图${rIdx + 1} 引用此参考素材`}
-                    >
-                      @图{rIdx + 1}
-                    </button>
-                    {isMulti ? (
-                      <button
-                        type="button"
-                        className={`ref-source-chip ref-source-chip--switchable${
-                          isPickerOpen ? " ref-source-chip--active" : ""
-                        }`}
-                        title={tooltip}
-                        onClick={() =>
-                          setOpenVariantPicker(isPickerOpen ? null : r.edgeId)
-                        }
-                      >
-                        {isVideoChip ? (
-                          <video
-                            className="ref-source-chip__img"
-                            src={mediaUrl(r.mediaId)}
-                            muted
-                            playsInline
-                            preload="metadata"
-                          />
-                        ) : (
-                          <img
-                            className="ref-source-chip__img"
-                            src={mediaUrl(r.mediaId)}
-                            alt={refTitle}
-                          />
-                        )}
-                        <span className="ref-source-chip__variant">
-                          v{(r.variantIdx ?? 0) + 1}
-                        </span>
-                        <span className="ref-source-chip__id">
-                          #{r.node.data.shortId}
-                        </span>
-                      </button>
-                    ) : (
-                      <div className="ref-source-chip" title={tooltip}>
-                        {isVideoChip ? (
-                          <video
-                            className="ref-source-chip__img"
-                            src={mediaUrl(r.mediaId)}
-                            muted
-                            playsInline
-                            preload="metadata"
-                          />
-                        ) : (
-                          <img
-                            className="ref-source-chip__img"
-                            src={mediaUrl(r.mediaId)}
-                            alt={refTitle}
-                          />
-                        )}
-                        <span className="ref-source-chip__id">
-                          #{r.node.data.shortId}
-                        </span>
-                      </div>
-                    )}
-                    {isMulti && isPickerOpen && (
-                      <div
-                        className="ref-source-chip__picker"
-                        role="dialog"
-                        aria-label={`为 ${refTitle} 选择变体`}
-                      >
-                        {r.allVariants.map((mid, i) => {
-                            if (!mid) return null;
-                          const isCurrent = i === (r.variantIdx ?? 0);
-                          return (
-                            <button
-                              key={i}
-                              type="button"
-                              className={`ref-source-chip__picker-item${
-                                isCurrent ? " ref-source-chip__picker-item--current" : ""
-                              }`}
-                              onClick={() => void pickVariantForEdge(r.edgeId, i)}
-                              title={`变体 ${i + 1}`}
-                              aria-current={isCurrent ? "true" : undefined}
-                            >
-                              {isVideoChip ? (
-                                <video
-                                  className="ref-source-chip__picker-img"
-                                  src={mediaUrl(mid)}
-                                  muted
-                                  playsInline
-                                  preload="metadata"
-                                />
-                              ) : (
-                                <img
-                                  className="ref-source-chip__picker-img"
-                                  src={mediaUrl(mid)}
-                                  alt={`变体 ${i + 1}`}
-                                />
-                              )}
-                              <span className="ref-source-chip__picker-label">
-                                v{i + 1}
-                              </span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {hasVideoUpstream && (
-          <div className="gen-dialog__field">
-            <div className="gen-dialog__video-ref-row">
-              <span className="gen-dialog__label">视频参考抽帧</span>
-              <div className="aspect-chip-row">
-                <button
-                  type="button"
-                  className={`aspect-chip${videoRefFrame === "last" ? " aspect-chip--active" : ""}`}
-                  onClick={() => setVideoRefFrame("last")}
-                  title="截取上游视频尾帧作为画面参考（适合镜头续接）"
-                >
-                  尾帧续接（默认）
-                </button>
-                <button
-                  type="button"
-                  className={`aspect-chip${videoRefFrame === "first" ? " aspect-chip--active" : ""}`}
-                  onClick={() => setVideoRefFrame("first")}
-                  title="截取上游视频首帧作为画面参考（适合首帧定调/风格延展）"
-                >
-                  首帧参考
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-  </>);
+  const references = (
+    <UpstreamReferencesSection
+      isVideo={isVideo}
+      isOmniVideo={isOmniVideo}
+      isVideoFirstLastMode={isVideoFirstLastMode}
+      isVideoTextMode={isVideoTextMode}
+      videoSubMode={videoSubMode}
+      setVideoSubMode={setVideoSubMode}
+      videoCandidateFrames={videoCandidateFrames}
+      firstFrameId={firstFrameId}
+      setFirstFrameId={setFirstFrameId}
+      lastFrameId={lastFrameId}
+      setLastFrameId={setLastFrameId}
+      sourceNode={sourceNode ?? null}
+      sourceMediaIds={sourceMediaIds}
+      selectedSourceIdx={selectedSourceIdx}
+      setSelectedSourceIdx={setSelectedSourceIdx}
+      refSourceNodes={refSourceNodes}
+      promptSourceNodes={promptSourceNodes}
+      openVariantPicker={openVariantPicker}
+      setOpenVariantPicker={setOpenVariantPicker}
+      pickVariantForEdge={pickVariantForEdge}
+      insertRefMentionTag={insertRefMentionTag}
+      hasVideoUpstream={hasVideoUpstream}
+      videoRefFrame={videoRefFrame}
+      setVideoRefFrame={setVideoRefFrame}
+    />
+  );
 
   const liveCredits = account?.credits ?? null;
   const showCreditsPill =
@@ -2219,369 +1569,44 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
         {promptField}
         {references}
 
-        {isVideo && accountIssue && (
-          <p className="gen-dialog__hint" role="status">{accountIssue}</p>
-        )}
-        {!isVideo && !isPrompt && (
-          <div className="gen-dialog__field">
-            <span className="gen-dialog__label">
-              渲染引擎
-              <InfoTip tip="Flow：通过 Chrome 扩展桥接 Google Flow 渲染；Muse：通过本地配置的 muse2api 网关或 worker 渲染。" />
-            </span>
-            <div className="aspect-chip-row">
-              <button
-                key="flow"
-                type="button"
-                className={`aspect-chip${mediaProvider === "flow" ? " aspect-chip--active" : ""}`}
-                onClick={() => setMediaProvider("flow")}
-              >
-                Flow
-              </button>
-              <button
-                key="muse"
-                type="button"
-                className={`aspect-chip${mediaProvider === "muse" ? " aspect-chip--active" : ""}`}
-                onClick={() => setMediaProvider("muse")}
-              >
-                Muse
-              </button>
-
-            </div>
-            </div>
-        )}
-
-        {!isVideo && !isPrompt && mediaProvider === "flow" && (
-          <div className="gen-dialog__field">
-            <span className="gen-dialog__label">
-              照片模型
-              <InfoTip tip="切换后同步为默认照片模型。Pro 主力写实与汉字；2.1 支持思考深度；Lite 极速批量抽卡。" />
-            </span>
-            <select
-              className="gen-dialog__select"
-              value={imageModel}
-              onChange={(e) => setImageModel(e.target.value as ImageModelKey)}
-            >
-              {IMAGE_MODEL_CATALOG.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.label}（{m.officialBadge}）
-                </option>
-              ))}
-            </select>
-            <div className="gen-dialog__model-note">
-              {selectedImageEntry.deprecationNote && (
-                <div className="gen-dialog__model-deprecation">{selectedImageEntry.deprecationNote}</div>
-              )}
-              <div>画质：{selectedImageEntry.qualityTier} · 速度：{selectedImageEntry.speedTier}</div>
-              <div>积分：{selectedImageEntry.creditTag}</div>
-              <div>适用：{selectedImageEntry.bestFor}</div>
-            </div>
-          </div>
-        )}
-
-        {!isPrompt && (
-          <div className="gen-dialog__field">
-            <span className="gen-dialog__label">画幅比例</span>
-            <div className="aspect-chip-row">
-              {(isVideo ? VIDEO_ASPECT_RATIOS : IMAGE_ASPECT_RATIOS).map((ar) => (
-                <button
-                  key={ar.key}
-                  className={`aspect-chip${aspectRatio === ar.key ? " aspect-chip--active" : ""}`}
-                  onClick={() => updateAspectRatio(ar.key)}
-                  type="button"
-                >
-                  {ar.label}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {!isVideo && !isPrompt && (
-          <div className="gen-dialog__field">
-            <span className="gen-dialog__label">
-              图片清晰度
-              <InfoTip tip="1K 原生极速直出；2K/4K 将在生成完成后调用官方 SPrCad 超清重塑。" />
-            </span>
-            <div className="aspect-chip-row">
-              {IMAGE_RESOLUTION_OPTIONS.map((r) => (
-                <button
-                  key={r.value}
-                  type="button"
-                  className={`aspect-chip${imageResolution === r.value ? " aspect-chip--active" : ""}`}
-                  onClick={() => setImageResolution(r.value)}
-                  title={r.hint}
-                >
-                  {r.label}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {!isVideo && !isPrompt && imageModel === "NANO_BANANA_2_1" && (
-          <div className="gen-dialog__field">
-            <span className="gen-dialog__label">
-              思考深度（Nano Banana 2.1）
-              <InfoTip tip="提升思考深度可显著改善多主体空间逻辑与文字构图精度。" />
-            </span>
-            <div className="aspect-chip-row">
-              {IMAGE_THINKING_OPTIONS.map((t) => (
-                <button
-                  key={t.value}
-                  type="button"
-                  className={`aspect-chip${imageThinkingLevel === t.value ? " aspect-chip--active" : ""}`}
-                  onClick={() => setImageThinkingLevel(t.value)}
-                  title={t.hint}
-                >
-                  {t.label}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {isVideo && (
-          <div className="gen-dialog__field">
-            <span className="gen-dialog__label">
-              视频模型
-              <InfoTip tip="含官方停用提示与场景画质建议；Omni 支持多参考图，Veo 3.1 适合首尾帧图生视频。" />
-            </span>
-            <select
-              className="gen-dialog__select"
-              value={selectedVideoId}
-              onChange={(e) => applyVideoSelection(e.target.value as VideoModelCatalogEntry["id"])}
-            >
-              {VIDEO_MODEL_CATALOG.map((m) => {
-                const locked = !!m.ultraOnly && paygateTier !== "PAYGATE_TIER_TWO";
-                return (
-                  <option key={m.id} value={m.id} disabled={locked}>
-                    {m.label}
-                    {m.deprecationNote ? `（${m.deprecationNote}）` : m.ultraOnly ? "（仅限 Ultra · 0 积分）" : ""}
-                  </option>
-                );
-              })}
-            </select>
-            <div className="gen-dialog__model-note">
-              {selectedVideoEntry.deprecationNote && (
-                <div className="gen-dialog__model-deprecation">{selectedVideoEntry.deprecationNote}</div>
-              )}
-              <div>画质：{selectedVideoEntry.qualityTier} · {selectedVideoEntry.speedTier}</div>
-              <div>积分：{selectedVideoEntry.creditTag}</div>
-              <div>适用：{selectedVideoEntry.bestFor}</div>
-            </div>
-          </div>
-        )}
-
-        {isVideo && (
-          <div className="gen-dialog__field">
-            <span className="gen-dialog__label">
-              视频分辨率
-              <InfoTip tip="360p/720p 为原生输出；1080p/4K 先出 720p 成片后再自动调用官方超分（需对应会员权限）。" />
-            </span>
-            <div className="aspect-chip-row">
-              {VIDEO_RESOLUTION_OPTIONS.map((r) => {
-                const unsupported = !!r.omniOnly && !isOmniVideo;
-                return (
-                  <button
-                    key={r.value}
-                    type="button"
-                    className={`aspect-chip${videoResolution === r.value ? " aspect-chip--active" : ""}`}
-                    onClick={() => setVideoResolution(r.value)}
-                    disabled={unsupported}
-                    title={unsupported ? "仅 Omni Flash 支持 360p，Veo 3.1 原生 720p 起" : r.hint}
-                  >
-                    {unsupported ? `${r.label} (仅Omni)` : r.label}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {isVideo && (
-          <div className="gen-dialog__field">
-            <span className="gen-dialog__label">
-              {isOmniVideo ? `生成时长 (Omni ${omniVersion})` : "生成时长（支持 3–15 秒调节）"}
-              <InfoTip
-                tip={
-                  isOmniVideo
-                    ? omniVersion === "1.2"
-                      ? "Omni 1.2 Flash 支持 3–15 秒连续时长（11–15 秒需 Plus/Ultra）。"
-                      : "Omni 1.1 Flash 原生支持 4/6/8/10 秒；选其他秒数将自动升级至 Omni 1.2 Flash。"
-                    : "Veo 3.1 官方固定 8 秒；拖动滑块或点选其他秒数将自动切换至支持 3–15 秒的 Omni 1.2 Flash。"
-                }
-              />
-            </span>
-            <div className="gen-dialog__duration-control">
-              <div className="gen-dialog__duration-slider-row">
-                <input
-                  type="range"
-                  className="gen-dialog__duration-slider"
-                  min={3}
-                  max={15}
-                  step={1}
-                  value={activeVideoDuration}
-                  onChange={(e) => handleSelectVideoDuration(Number(e.target.value))}
-                  aria-label="视频时长滑块"
-                />
-                <span className="gen-dialog__duration-readout">
-                  {activeVideoDuration} 秒
-                  {isOmniVideo && (omniVersion === "1.2" ? OMNI_1_2_CREDIT_COST[activeVideoDuration] : OMNI_1_1_CREDIT_COST[activeVideoDuration]) != null
-                    ? ` · ${omniVersion === "1.2" ? OMNI_1_2_CREDIT_COST[activeVideoDuration] : OMNI_1_1_CREDIT_COST[activeVideoDuration]}积分/条`
-                    : ""}
-                </span>
-              </div>
-              <div className="aspect-chip-row">
-                {OMNI_1_2_DURATIONS.map((d) => {
-                  const active = activeVideoDuration === d;
-                  const perClipCost = isOmniVideo
-                    ? omniVersion === "1.2"
-                      ? OMNI_1_2_CREDIT_COST[d]
-                      : OMNI_1_1_CREDIT_COST[d]
-                    : undefined;
-                  const creditSuffix = perClipCost != null ? ` · ${perClipCost}积分` : "";
-                  return (
-                    <button
-                      key={d}
-                      type="button"
-                      className={`aspect-chip${active ? " aspect-chip--active" : ""}`}
-                      onClick={() => handleSelectVideoDuration(d)}
-                    >
-                      {d}秒{creditSuffix}
-                    </button>
-                  );
-                })}
-              </div>
-              {!isOmniVideo && (
-                <p className="gen-dialog__hint">
-                  Veo 3.1 官方固定 8 秒；选择任意非 8 秒时长将自动切换至 Omni 1.2 Flash。
-                </p>
-              )}
-            </div>
-          </div>
-        )}
-
-        {isVideo && (
-          <div className="gen-dialog__field">
-            <span className="gen-dialog__label">
-              镜头运动
-              <InfoTip tip="固定机位：锁定画幅不推拉摇移，适合电商商品展示防止裁切；动态运镜：由 AI 根据场景自动设计推轨/摇移运镜。" />
-            </span>
-            <div className="aspect-chip-row">
-              {CAMERA_MOVEMENTS.map((c) => (
-                <button
-                  key={c.key}
-                  className={`aspect-chip${camera === c.key ? " aspect-chip--active" : ""}`}
-                  onClick={() => setCamera(c.key)}
-                  type="button"
-                  title={c.instruction}
-                >
-                  {c.label}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {!isPrompt && (
-          <div className="gen-dialog__field">
-            <span className="gen-dialog__label">输出数量</span>
-            {isVideo && !isOmniVideo && selectedSourceIdx.size > 1 ? (
-              <div className="aspect-chip-row">
-                <span className="jm-context-generator__badge">
-                  已选 {selectedSourceIdx.size} 张参考帧（每帧生成 1 条，共 {selectedSourceIdx.size} 条）
-                </span>
-              </div>
-            ) : (
-              <div className="aspect-chip-row">
-                {OUTPUT_COUNT_OPTIONS.map((cnt) => (
-                  <button
-                    key={cnt}
-                    type="button"
-                    className={`aspect-chip${variants === cnt ? " aspect-chip--active" : ""}`}
-                    onClick={() => updateVariants(cnt)}
-                  >
-                    x{cnt}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {!isVideo && !isPrompt && (
-          <div className="gen-dialog__field">
-            <span className="gen-dialog__label">
-              固定随机种子（Seed，可选）
-              <InfoTip tip="填入正整数可复现相近构图与随机噪点分布；留空由 Flow 自动随机采样。" />
-            </span>
-            <input
-              type="text"
-              inputMode="numeric"
-              className="gen-dialog__seed-input"
-              value={seedInput}
-              onChange={(e) => setSeedInput(e.target.value.replace(/[^\d]/g, "").slice(0, 12))}
-              placeholder="留空随机生成（或输入如 421088 以复现种子）"
-            />
-          </div>
-        )}
-
-        {isStoryboard && (
-          <>
-            <div className="gen-dialog__field">
-              <span className="gen-dialog__label">
-                分镜模式
-                <InfoTip tip="剧情连贯：按时间推进演绎前后情节；同场多机位：锁定同一人物与场景同步拍摄多机位角度，生成后可一键切分。" />
-              </span>
-              <div className="aspect-chip-row">
-                <button
-                  type="button"
-                  className={`aspect-chip${storyboardMode === "narrative" ? " aspect-chip--active" : ""}`}
-                  onClick={() => setStoryboardMode("narrative")}
-                >
-                  剧情连贯分镜
-                </button>
-                <button
-                  type="button"
-                  className={`aspect-chip${storyboardMode === "multicam" ? " aspect-chip--active" : ""}`}
-                  onClick={() => setStoryboardMode("multicam")}
-                >
-                  同场多机位（可切分重用）
-                </button>
-              </div>
-            </div>
-            <div className="gen-dialog__field">
-              <span className="gen-dialog__label">
-                分镜宫格布局
-                <InfoTip tip="故事板将以单张高清多宫格分镜图渲染输出，3×3 为九宫格标准方阵，生成后支持一键无损切分为独立节点。" />
-              </span>
-              <div className="aspect-chip-row">
-                {STORYBOARD_GRIDS.map((g) => {
-                  const total = totalPanels(g);
-                  const isPortrait = aspectRatio.includes("PORTRAIT");
-                  let dimsLabel = "2×2";
-                  if (g === "3x3") {
-                    dimsLabel = "3×3";
-                  } else if (g !== "2x2") {
-                    const big = g === "2x3" ? 3 : 4;
-                    dimsLabel = isPortrait ? `${big}×2` : `2×${big}`;
-                  }
-                  return (
-                    <button
-                      key={g}
-                      type="button"
-                      className={`aspect-chip${storyboardGrid === g ? " aspect-chip--active" : ""}`}
-                      onClick={() => setStoryboardGrid(g)}
-                      title={`${total} 格分镜 (${dimsLabel})`}
-                    >
-                      {dimsLabel} · {total} 格
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          </>
-        )}
+        <ModalParameterControls
+          isVideo={isVideo}
+          isPrompt={isPrompt}
+          isStoryboard={isStoryboard}
+          isOmniVideo={isOmniVideo}
+          accountIssue={accountIssue ?? null}
+          mediaProvider={mediaProvider}
+          setMediaProvider={setMediaProvider}
+          imageModel={imageModel}
+          setImageModel={setImageModel}
+          selectedImageEntry={selectedImageEntry}
+          aspectRatio={aspectRatio}
+          updateAspectRatio={updateAspectRatio}
+          imageResolution={imageResolution}
+          setImageResolution={setImageResolution}
+          imageThinkingLevel={imageThinkingLevel}
+          setImageThinkingLevel={setImageThinkingLevel}
+          selectedVideoId={selectedVideoId}
+          applyVideoSelection={applyVideoSelection}
+          selectedVideoEntry={selectedVideoEntry}
+          paygateTier={paygateTier ?? null}
+          videoResolution={videoResolution}
+          setVideoResolution={setVideoResolution}
+          omniVersion={omniVersion}
+          activeVideoDuration={activeVideoDuration}
+          handleSelectVideoDuration={handleSelectVideoDuration}
+          camera={camera}
+          setCamera={setCamera}
+          selectedSourceCount={selectedSourceIdx.size}
+          variants={variants}
+          updateVariants={updateVariants}
+          seedInput={seedInput}
+          setSeedInput={setSeedInput}
+          storyboardMode={storyboardMode}
+          setStoryboardMode={setStoryboardMode}
+          storyboardGrid={storyboardGrid}
+          setStoryboardGrid={setStoryboardGrid}
+        />
         </div>
 
         {/* Footer */}

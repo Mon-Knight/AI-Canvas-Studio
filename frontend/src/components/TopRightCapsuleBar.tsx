@@ -446,13 +446,21 @@ export function TopRightCapsuleBar() {
         ? "本地 Agent 与 Flow 浏览器扩展均在线"
         : "本地 Agent 在线 · 等待 Flow 扩展连接";
 
-  const tier = profile?.paygate_tier ?? null;
+  const tier = activeAccount?.paygate_tier ?? profile?.paygate_tier ?? null;
   const tierLabel =
     tier === "PAYGATE_TIER_TWO"
       ? "Ultra"
       : tier === "PAYGATE_TIER_ONE"
         ? "Pro"
         : "未配置";
+  const tierSourceNote =
+    activeAccount?.paygate_tier
+      ? "账号指定"
+      : profile?.paygate_tier_source === "extension"
+        ? "实时识别"
+        : profile?.paygate_tier
+          ? "默认配置"
+          : "待设置";
 
   const credits = activeAccount ? activeAccount.credits : profile?.credits ?? null;
   const badgeNumber = credits !== null ? new Intl.NumberFormat("zh-CN").format(credits) : "—";
@@ -1022,6 +1030,9 @@ export function TopRightCapsuleBar() {
               >
                 <IconSubject size={18} />
                 <span>Flow 账号与积分</span>
+                <span className="jm-more-menu__sub" title={`当前视频档位来源：${tierSourceNote}`}>
+                  ✦ {tierLabel}
+                </span>
                 <svg className="jm-account-popover__chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg>
               </button>
               <div id="jm-account-details" className="jm-account-popover__details" hidden={!accountDetails}>
@@ -1056,12 +1067,12 @@ export function TopRightCapsuleBar() {
       </div>
 
       {/* 套餐未配置告警浮条 */}
-      {activeAccount && !profile?.paygate_tier && pollsWithoutTier >= 2 && (
+      {(Boolean(activeAccount) || Boolean(profile?.paygate_tier_error)) && !tier && pollsWithoutTier >= 2 && (
         <div className="jm-tier-banner" role="alert">
           <span>⚠ 尚未配置有效套餐等级：</span>
           <span>
             {activeAccount
-              ? "请在账号设置里选择实际套餐等级。"
+              ? "请在账号设置里选择实际套餐等级（Pro / Ultra）。"
               : profile?.paygate_tier_error ??
                 "请在 .env 中将 FLOWBOARD_PAYGATE_TIER 设为 PAYGATE_TIER_ONE (Pro) 或 PAYGATE_TIER_TWO (Ultra)。"}
           </span>
