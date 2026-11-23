@@ -94,6 +94,15 @@ try {
         --collect-submodules starlette `
         --collect-submodules httpx `
         --collect-submodules pydantic `
+        --collect-submodules sqlalchemy `
+        --collect-submodules python_multipart `
+        --collect-submodules multipart `
+        --collect-submodules anyio `
+        --collect-submodules httpcore `
+        --collect-data certifi `
+        --copy-metadata python-multipart `
+        --copy-metadata fastapi `
+        --copy-metadata pydantic `
         (Join-Path $AgentDir "run_agent.py")
     Assert-LastExit "PyInstaller flowboard-agent"
 } finally {
@@ -110,6 +119,11 @@ Write-Host "==> Smoke testing flowboard-agent.exe --pick-images --self-test..."
 $pickerSelfTest = & $PackagedAgentExe --pick-images --self-test
 Assert-LastExit "flowboard-agent.exe --pick-images --self-test"
 Write-Host "Picker self-test output: $pickerSelfTest"
+
+Write-Host "==> Smoke testing flowboard-agent.exe --self-test-server..."
+$serverSelfTest = & $PackagedAgentExe --self-test-server
+Assert-LastExit "flowboard-agent.exe --self-test-server"
+Write-Host "Server self-test output: $serverSelfTest"
 
 Write-Host "==> [4/6] Assembling standalone AI-Canvas-Studio runtime..."
 if (Test-Path $ReleaseDir) { Remove-Item $ReleaseDir -Recurse -Force }

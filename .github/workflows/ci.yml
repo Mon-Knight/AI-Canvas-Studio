@@ -57,4 +57,6 @@ jobs:
             agent/tests/test_current_flow_video.py \
             agent/tests/test_system_shutdown.py \
             agent/tests/test_llm_routes.py \
+            agent/tests/test_chat_agent.py \
+            agent/tests/test_chat_analysis.py \
             -q

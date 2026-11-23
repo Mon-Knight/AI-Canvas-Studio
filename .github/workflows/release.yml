@@ -48,6 +48,15 @@ jobs:
           if (-not $ver) { $ver = "1.4.0" }
           Add-Content -Path $env:GITHUB_ENV -Value "APP_VERSION=$ver"
 
+      - name: Ensure Inno Setup 6 is installed
+        shell: pwsh
+        run: |
+          $iscc = Get-Command iscc -ErrorAction SilentlyContinue
+          $defaultPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not $iscc -and -not (Test-Path $defaultPath)) {
+            choco install innosetup -y --no-progress
+          }
+
       - name: Build Windows portable & installer packages
         shell: pwsh
         run: |
