@@ -10362,3 +10362,239 @@ video.source-image-row__thumb {
   color: #f4f4f6;
 }
 
+/* ılı 声画导演浮窗 & 升级版时间线剪辑合成导出样式 */
+.jm-audio-modal {
+  max-width: 720px;
+  width: min(94vw, 720px);
+}
+
+.jm-audio-node-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.jm-audio-empty-hint {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.jm-audio-preview-box {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  background: #141417;
+}
+
+.jm-audio-preview-box p {
+  margin: 6px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: #e4e4e7;
+}
+
+.jm-audio-success-msg {
+  margin: 0;
+  font-size: 12px;
+  color: #34d399;
+}
+
+.jm-audio-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.jm-audio-bgm-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: #141417;
+}
+
+.jm-audio-bgm-card__title {
+  display: block;
+  font-size: 13px;
+  color: #f4f4f6;
+}
+
+.jm-audio-bgm-card__desc {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.jm-audio-bgm-player {
+  width: 100%;
+  height: 34px;
+}
+
+.jm-audio-mixer-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: #141417;
+}
+
+.jm-audio-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: #e4e4e7;
+  cursor: pointer;
+}
+
+.jm-seq-header-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.jm-seq-ctrl-btn--cyan {
+  border-color: rgba(56, 189, 248, 0.42);
+  background: rgba(56, 189, 248, 0.14);
+  color: #7dd3fc;
+  font-weight: 600;
+}
+
+.jm-seq-ctrl-btn--cyan:hover:not(:disabled) {
+  background: rgba(56, 189, 248, 0.24);
+  color: #e0f2fe;
+}
+
+.jm-seq-ctrl-btn--danger {
+  border-color: rgba(248, 113, 113, 0.45);
+  background: rgba(248, 113, 113, 0.15);
+  color: #fca5a5;
+}
+
+.jm-seq-export-bar {
+  padding: 8px 20px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: rgba(56, 189, 248, 0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.jm-seq-export-bar__meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: #bae6fd;
+}
+
+.jm-seq-export-bar__track {
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+
+.jm-seq-export-bar__fill {
+  height: 100%;
+  border-radius: 999px;
+  background: #38bdf8;
+  transition: width 160ms ease;
+}
+
+.jm-seq-export-error {
+  padding: 8px 20px;
+  font-size: 12px;
+  color: #fca5a5;
+  background: rgba(248, 113, 113, 0.1);
+  border-bottom: 1px solid rgba(248, 113, 113, 0.25);
+}
+
+.jm-seq-duration-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  padding-left: 10px;
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.jm-seq-dur-btn {
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #141417;
+  color: #d4d4d8;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.jm-seq-dur-btn--active {
+  border-color: rgba(56, 189, 248, 0.45);
+  background: rgba(56, 189, 248, 0.16);
+  color: #7dd3fc;
+}
+
+.jm-seq-thumb-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.jm-seq-thumb-card--excluded {
+  opacity: 0.42;
+}
+
+.jm-seq-thumb__dur {
+  position: absolute;
+  right: 4px;
+  bottom: 3px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #7dd3fc;
+  font-size: 9.5px;
+  line-height: 1.2;
+}
+
+.jm-seq-thumb-actions {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.jm-seq-thumb-mini {
+  width: 20px;
+  height: 18px;
+  padding: 0;
+  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #141417;
+  color: #a1a1aa;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.jm-seq-thumb-mini:hover:not(:disabled) {
+  background: #27272c;
+  color: #ffffff;
+}
+
+.jm-seq-thumb-mini--checked {
+  color: #34d399;
+  border-color: rgba(52, 211, 153, 0.35);
+}
+
+

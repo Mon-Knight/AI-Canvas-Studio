@@ -17,12 +17,12 @@
   </p>
 
   <p>
-    <a href="https://github.com/Mon-Knight/AI-Canvas-Studio/releases/download/v0.9.0/AI-Canvas-Studio-v0.9.0-win64-setup.exe">
-      <strong>📥 下载 Windows 安装版 Setup.exe (v0.9.0)</strong>
+    <a href="https://github.com/Mon-Knight/AI-Canvas-Studio/releases/download/v1.0.0/AI-Canvas-Studio-v1.0.0-win64-setup.exe">
+      <strong>📥 下载 Windows 安装版 Setup.exe (v1.0.0)</strong>
     </a>
     &nbsp;&nbsp;|&nbsp;&nbsp;
-    <a href="https://github.com/Mon-Knight/AI-Canvas-Studio/releases/download/v0.9.0/AI-Canvas-Studio-v0.9.0-win64-portable.zip">
-      <strong>📦 下载免安装绿色便携版 Portable.zip (v0.9.0)</strong>
+    <a href="https://github.com/Mon-Knight/AI-Canvas-Studio/releases/download/v1.0.0/AI-Canvas-Studio-v1.0.0-win64-portable.zip">
+      <strong>📦 下载免安装绿色便携版 Portable.zip (v1.0.0)</strong>
     </a>
     &nbsp;&nbsp;|&nbsp;&nbsp;
     <a href="https://github.com/Mon-Knight/AI-Canvas-Studio/releases/latest">
@@ -53,6 +53,12 @@
   - 自动检查 GitHub Releases 最新版本，在右上角温和提示「`✦ 新版 vX.Y.Z`」，支持直接跳转安装版/便携版下载与忽略指定版本。
 - **全能创作节点与上下文工作流**：
   - **文本 → 图片 / 视频**：直接继承上游文本提示词出图/出视频；点击「`✨ AI 润色`」后强制人工检查确认（支持「`↩ 还原原词`」），不擅自扣积分提交。
+  - **3×3 多机位故事板与一键无损切分**：支持 `2×2 / 2×3 / 2×4 / 3×3` 连续叙事与同场多机位分镜网格，并在画布内直接无损裁剪为独立 Flow 节点。
+  - **单图快捷衍生与无损历史版本**：选中图像即可一键触发「⏮ 前一幕 / ⏭ 下一幕 / 🎥 换机位 / 💡 重打光 / 🔍 2K 超清」，支持 `< 第 1/2 版 >` 历史版本自由切换。
+  - **Flow 原生首尾帧锁定 & 纯文生视频**：支持 `[首帧 ⇄ 尾帧]` 运镜过渡与零图参考纯文生视频，支持 `@图N` 参考图引用、7 种电影运镜预设与台词/拟音输入槽。
+  - **AI 导演台、`斜杠 /` 技能与画布编组**：内置 `📜 AI 剧本拆分镜`、`🎬 爆款视频拉片复刻`（抽帧上传并识别复刻），支持 `Ctrl/Cmd+G` 分镜编组与部分导出 / 非破坏性追加导入。
+  - **❖ 图层精修画板**：提供画笔涂抹「局部重绘 / 一键消除笔」、「16:9 / 9:16 / 1:1 / 1.4x 比例扩图」及「多节点拖拽拼贴光影融合」（100% 走 Flow 0 积分 `edit_image`）。
+  - **ılı 声画导演 & 时间线成片合成导出**：编排人声台词/拟音音效与本地 BGM 配乐轨，并在时间线内重排镜序、调节停留时长与纯浏览器原生一键合成导出完整视频成片。
   - **视频 → 视频 / 图片**：自动通过离屏 `<video> + <canvas>` 抽取上游视频尾帧（默认续接）或首帧参考，缓存在源节点上，实现连续分镜续拍与图生扩展。
   - **官方主体模板 & 自定义主体**：支持动漫二创、日系立绘、角色三视图、国漫 3D、真人影视定妆与萌宠道具模板及本地持久化自定义主体。
 - **完整 Google Flow 模型目录与积分预估**：
@@ -103,22 +109,22 @@ cd ..
 安装 PyInstaller 后，运行一体化打包脚本即可生成 `release/AI-Canvas-Studio-v*-win64-portable.zip`（若本机装有 Inno Setup 6 将同步生成 `setup.exe`）：
 ```powershell
 agent\.venv\Scripts\python.exe -m pip install pyinstaller
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\package-windows.ps1 -Version "0.9.0" -SkipNpmCi
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\package-windows.ps1 -Version "1.0.0" -SkipNpmCi
 ```
 
 ### 4. GitHub Actions 自动发版
 本仓库已配置两套工作流：
 - `.github/workflows/ci.yml`：每次向 `main` 分支 `push` 或提交 PR 时，自动校验前端 `tsc` + `vite build` + `node --test`、桌面端 TypeScript 构建以及后端 `pytest`。
-- `.github/workflows/release.yml`：打版本标签（如 `git tag -a v0.9.0 -m "AI Canvas Studio v0.9.0" && git push origin v0.9.0`）或在 GitHub 网页 **Actions → Build & Release Windows Studio → Run workflow** 一键触发，云端自动编译 `Setup.exe` 与 `Portable.zip` 并发布至 Releases。
+- `.github/workflows/release.yml`：打版本标签（如 `git tag -a v1.0.0 -m "AI Canvas Studio v1.0.0" && git push origin v1.0.0`）或在 GitHub 网页 **Actions → Build & Release Windows Studio → Run workflow** 一键触发，云端自动编译 `Setup.exe` 与 `Portable.zip` 并发布至 Releases。
 
 ---
 
 ## 迭代路线图（Roadmap）
 
 - [x] **阶段 1：工程脱敏 + 免环境独立打包 + GitHub CI/Release 自动构建**
-- [x] **阶段 2：`.huabu` 画布工作流包导出 / 拖拽导入 + 跨项目参考素材自动同步**
-- [x] **阶段 3：3 套内置新手指引示例画布 + 专属桌面图标 + 画布内新版自动提醒闭环**
-- [ ] **阶段 4：单文件只读作品预览页导出** — 生成可直接在浏览器查看创作链路与成片的静态 `.html`。
+- [x] **阶段 2：`.huabu` 画布工作流包导出 / 拖拽导入 + 3 套新手指引画布 + 新版自动提醒闭环**
+- [x] **阶段 3（v0.9.1 – v0.9.2）：Flow 原生首尾帧/文生视频、`3×3` 分镜切分、单图快捷衍生、AI 剧本拆镜、拉片复刻与编组**
+- [x] **阶段 4（v0.9.5 – v1.0.0）：❖ 交互式图层精修（局部重绘/消除笔/扩图/拼贴）、ılı 声画导演与时间线成片一键导出**
 
 ---
 

@@ -121,6 +121,7 @@ export interface FlowboardNodeData extends Record<string, unknown> {
   // multi-shot data is now ignored).
   storyboardGrid?: StoryboardGrid;
   storyboardMode?: StoryboardMode;
+  audioPrompt?: string;
   history?: NodeHistoryEntry[];
   groupId?: string;
   groupTitle?: string;
@@ -228,6 +229,7 @@ function nodeFromDto(n: NodeDTO): FlowNode {
       charGender: n.data["charGender"] as string | undefined,
       storyboardGrid: n.data["storyboardGrid"] as StoryboardGrid | undefined,
       storyboardMode: n.data["storyboardMode"] as StoryboardMode | undefined,
+      audioPrompt: n.data["audioPrompt"] as string | undefined,
       history: Array.isArray(n.data["history"])
         ? (n.data["history"] as NodeHistoryEntry[])
         : undefined,

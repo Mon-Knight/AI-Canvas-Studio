@@ -918,3 +918,65 @@ test("Stage 3A: layerCanvasOps mask bounding-box, inpaint/erase prompts, outpain
     await server.close();
   }
 });
+
+test("Stage 3B: timelineAudio directives, shot ordering/exclusion & timelineExporter geometry", async () => {
+  const server = await createServer({ server: { middlewareMode: true, hmr: false, ws: false }, logLevel: "error" });
+  try {
+    const {
+      composeAudioDirective,
+      resolveOrderedTimelineShots,
+      useTimelineAudioStore,
+      VOICE_PRESETS,
+      AMBIENCE_PRESETS,
+    } = await server.ssrLoadModule("/src/store/timelineAudio.ts");
+    const {
+      computeContainRect,
+      pickSupportedVideoRecorderMime,
+    } = await server.ssrLoadModule("/src/lib/timelineExporter.ts");
+
+    assert.ok(VOICE_PRESETS.length >= 5 && AMBIENCE_PRESETS.length >= 5);
+    const dir = composeAudioDirective({
+      voiceKey: "deep_cinema_male",
+      dialogue: "今晚的雨还没停",
+      sfx: "玻璃推门风铃声",
+      ambienceKey: "city_rain_neon",
+    });
+    assert.ok(
+      dir.includes("【声画指令】") &&
+        dir.includes("电影深沉男声") &&
+        dir.includes("今晚的雨还没停") &&
+        dir.includes("玻璃推门风铃声"),
+    );
+
+    const store = useTimelineAudioStore.getState();
+    store.resetTimelineOverrides();
+    store.moveShotKey(["k1", "k2", "k3"], 2, -1); // -> [k1, k3, k2]
+    store.toggleShotExcluded("k1");
+    store.setShotImageDuration("k3", 5);
+
+    const resolved = resolveOrderedTimelineShots(
+      [{ key: "k1" }, { key: "k2" }, { key: "k3" }],
+      useTimelineAudioStore.getState().customOrderKeys,
+      useTimelineAudioStore.getState().shotOverrides,
+      3,
+    );
+    assert.deepEqual(
+      resolved.map((r) => [r.shot.key, r.excluded, r.imageDurationSec]),
+      [
+        ["k1", true, 3],
+        ["k3", false, 5],
+        ["k2", false, 3],
+      ],
+    );
+
+    const fit = computeContainRect(720, 1280, 1280, 720, 1);
+    assert.equal(fit.dh, 720);
+    assert.equal(fit.dw, 405);
+    assert.ok(fit.dx > 0 && fit.dy === 0);
+
+    const mimeRes = pickSupportedVideoRecorderMime();
+    assert.ok(mimeRes.ext === "webm" || mimeRes.ext === "mp4");
+  } finally {
+    await server.close();
+  }
+});

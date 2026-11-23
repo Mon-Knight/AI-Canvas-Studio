@@ -12,6 +12,7 @@ import { ResultViewer } from "./components/ResultViewer";
 import { EmbeddedFlowModal } from "./components/EmbeddedFlowModal";
 import { DirectorStageModal } from "./components/DirectorStageModal";
 import { LayerEditorModal } from "./components/LayerEditorModal";
+import { AudioDirectorModal } from "./components/AudioDirectorModal";
 import { ShutdownOverlay } from "./components/ShutdownOverlay";
 import { useBoardStore } from "./store/board";
 import { useDesktopFlowStore } from "./store/desktopFlow";
@@ -66,6 +67,7 @@ export function App() {
         <EmbeddedFlowModal />
         <DirectorStageModal />
         <LayerEditorModal />
+        <AudioDirectorModal />
         <ShutdownOverlay />
       </div>
     </ReactFlowProvider>

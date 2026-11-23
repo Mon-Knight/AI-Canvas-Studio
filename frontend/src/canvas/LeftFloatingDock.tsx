@@ -263,9 +263,13 @@ export function LeftFloatingDock() {
       return;
     }
     if (item.action === "audio") {
-      useBoardStore.setState({
-        error: "音频配音轨即将开放，当前画布可先完成图片、故事板与视频镜头编排。",
-      });
+      const { nodes } = useBoardStore.getState();
+      const selectedVid = nodes.find((n) => n.selected && n.data.type === "video");
+      window.dispatchEvent(
+        new CustomEvent("flowboard:open-audio-director", {
+          detail: { tab: "voice", rfId: selectedVid?.id },
+        }),
+      );
       return;
     }
     if (item.action === "timeline") {

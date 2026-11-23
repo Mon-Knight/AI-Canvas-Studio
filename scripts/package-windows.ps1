@@ -6,7 +6,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Version = "0.9.5",
+    [string]$Version = "1.0.0",
     [string]$PythonExe = "",
     [switch]$SkipNpmCi
 )
