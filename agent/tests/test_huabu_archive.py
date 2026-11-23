@@ -252,3 +252,47 @@ def test_gen_image_cross_project_sync_fallback():
     assert mock_sync.await_count == 1
     assert calls == [[foreign_mid], [synced_mid]]
     assert resp["media_entries"][0]["media_id"] == "new-out-id"
+
+
+def test_partial_huabu_export_append_and_script_breakdown(client):
+    with get_session() as s:
+        b = Board(name="分镜主画布")
+        s.add(b)
+        s.commit()
+        s.refresh(b)
+        n1 = Node(board_id=b.id, short_id="s1", type="character", x=100, y=100, w=250, h=200, data={"title": "角色", "groupId": "g1", "groupTitle": "开场组"})
+        n2 = Node(board_id=b.id, short_id="s2", type="image", x=450, y=100, w=250, h=200, data={"title": "画面1"})
+        n3 = Node(board_id=b.id, short_id="s3", type="video", x=850, y=100, w=250, h=200, data={"title": "视频1"})
+        s.add_all([n1, n2, n3])
+        s.flush()
+        s.add(Edge(board_id=b.id, source_id=n1.id, target_id=n2.id, kind="ref"))
+        s.add(Edge(board_id=b.id, source_id=n2.id, target_id=n3.id, kind="ref"))
+        s.commit()
+        bid, id1, id2 = b.id, n1.id, n2.id
+
+    part_res = client.get(f"/api/boards/{bid}/export.huabu?include_media=false&node_ids={id1},{id2}")
+    assert part_res.status_code == 200
+    manifest = json.loads(zipfile.ZipFile(io.BytesIO(part_res.content)).read("manifest.json"))
+    assert len(manifest["nodes"]) == 2
+    assert len(manifest["edges"]) == 1
+    assert manifest["nodes"][0]["data"]["groupId"] == "g1"
+
+    app_res = client.post(
+        f"/api/boards/import-huabu?append_to_board_id={bid}",
+        files={"file": ("sub.huabu", part_res.content, "application/octet-stream")},
+    )
+    assert app_res.status_code == 200
+    detail = client.get(f"/api/boards/{bid}").json()
+    assert len(detail["nodes"]) == 5
+    max_new_x = max(n["x"] for n in detail["nodes"])
+    assert max_new_x > 1100
+
+    bd = client.post(
+        "/api/prompt/script-breakdown",
+        json={"script": "雨夜女孩撑伞走进老旧书店。她翻开旧日记露出一丝微笑。窗外霓虹渐渐亮起。", "shot_count": 3},
+    )
+    assert bd.status_code == 200, bd.text
+    body = bd.json()
+    assert len(body["shots"]) == 3
+    assert body["character_prompt"]
+    assert all(shot["image_prompt"] and shot["video_prompt"] for shot in body["shots"])

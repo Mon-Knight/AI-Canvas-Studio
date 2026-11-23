@@ -31,6 +31,7 @@ import {
 import { pickImageFiles } from "../lib/filePicker";
 import { AiProviderDialog } from "./AiProviderDialog";
 import { useGenerationStore } from "../store/generation";
+import { filterDirectorSkills, type DirectorSkillEntry } from "../constants/directorSkills";
 import "./ChatAnalysis.css";
 import { IconAiWave } from "./JimengIcons";
 
@@ -240,6 +241,7 @@ function BoardChat({ boardId }: { boardId: number }) {
   const [pinnedNodeIds, setPinnedNodeIds] = useState<string[]>([]);
   const [nodePickerOpen, setNodePickerOpen] = useState(false);
   const [nodeFilterQuery, setNodeFilterQuery] = useState("");
+  const [slashMenuOpen, setSlashMenuOpen] = useState(false);
 
   const placingRef = useRef(false);
   const pickerWrapRef = useRef<HTMLDivElement>(null);
@@ -651,11 +653,33 @@ function BoardChat({ boardId }: { boardId: number }) {
     setFiles([]);
   }, [canSend, boardId, activeCanvasRefs, nodes, text, files, mode, sendMessage, notifyError]);
 
+  const slashSkills = useMemo(() => {
+    if (!slashMenuOpen && !text.startsWith("/")) return [];
+    const query = text.startsWith("/") ? text.slice(1) : "";
+    return filterDirectorSkills(query);
+  }, [slashMenuOpen, text]);
+
+  function handleSelectDirectorSkill(skill: DirectorSkillEntry) {
+    setSlashMenuOpen(false);
+    if (skill.action.kind === "open_director_stage") {
+      setText("");
+      window.dispatchEvent(
+        new CustomEvent("flowboard:open-director-stage", {
+          detail: { tab: skill.action.tab },
+        }),
+      );
+      return;
+    }
+    setText(skill.action.preferredChatPrompt);
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }
+
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
-      if (e.key === "Escape" && nodePickerOpen) {
+      if (e.key === "Escape" && (nodePickerOpen || slashMenuOpen)) {
         e.preventDefault();
         setNodePickerOpen(false);
+        setSlashMenuOpen(false);
         return;
       }
       if (
@@ -668,7 +692,7 @@ function BoardChat({ boardId }: { boardId: number }) {
         void handleSend();
       }
     },
-    [handleSend, nodePickerOpen],
+    [handleSend, nodePickerOpen, slashMenuOpen],
   );
 
   if (collapsed) {
@@ -906,6 +930,15 @@ function BoardChat({ boardId }: { boardId: number }) {
                   )}
                   <button
                     type="button"
+                    className={`chat-canvas-refs__pick-btn${slashMenuOpen ? " chat-canvas-refs__pick-btn--open" : ""}`}
+                    onClick={() => setSlashMenuOpen((v) => !v)}
+                    disabled={pending || uploading || activeRun !== null}
+                    title="唤出 / 斜杠导演技能菜单"
+                  >
+                    / 导演技能
+                  </button>
+                  <button
+                    type="button"
                     className={`chat-canvas-refs__pick-btn${nodePickerOpen ? " chat-canvas-refs__pick-btn--open" : ""}`}
                     onClick={() => {
                       setNodePickerOpen((v) => !v);
@@ -1049,6 +1082,27 @@ function BoardChat({ boardId }: { boardId: number }) {
               </span>
             </div>
           )}
+          {(slashMenuOpen || text.startsWith("/")) && slashSkills.length > 0 && (
+            <div className="jm-slash-popover" role="listbox" aria-label="斜杠导演技能">
+              {slashSkills.map((skill) => (
+                <button
+                  key={skill.id}
+                  type="button"
+                  className="jm-slash-popover__item"
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    handleSelectDirectorSkill(skill);
+                  }}
+                >
+                  <div className="jm-slash-popover__top">
+                    <span className="jm-slash-popover__cmd">{skill.slash}</span>
+                    <span className="jm-slash-popover__badge">{skill.badge}</span>
+                  </div>
+                  <div className="jm-slash-popover__desc">{skill.desc}</div>
+                </button>
+              ))}
+            </div>
+          )}
           <div className="chat-dock__input-row">
             <button
               type="button"
@@ -1083,6 +1137,11 @@ function BoardChat({ boardId }: { boardId: number }) {
               onChange={(e) => {
                 const val = e.target.value;
                 setText(val);
+                if (val.startsWith("/")) {
+                  setSlashMenuOpen(true);
+                } else if (slashMenuOpen && val.trim().length > 0) {
+                  setSlashMenuOpen(false);
+                }
                 if (/(?:^|\s)#$/.test(val) && nodes.length > 0) {
                   setNodePickerOpen(true);
                   setNodeFilterQuery("");

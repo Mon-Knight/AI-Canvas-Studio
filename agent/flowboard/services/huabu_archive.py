@@ -73,6 +73,9 @@ _SAFE_DATA_KEYS = {
     "cameraPreset",
     "audioPrompt",
     "endMediaId",
+    "groupId",
+    "groupTitle",
+    "groupColor",
     "mediaId",
     "mediaIds",
     "history",
@@ -163,9 +166,10 @@ def instantiate_board_recipe(
     nodes_spec: list[dict[str, Any]],
     edges_spec: list[dict[str, Any]],
     target_board_id: Optional[int] = None,
+    append_to_board_id: Optional[int] = None,
     media_count: int = 0,
 ) -> dict[str, Any]:
-    """Create (or populate an empty) Board with sanitized nodes & edges atomically."""
+    """Create, populate an empty board, or append non-destructively onto an existing board."""
     if not isinstance(nodes_spec, list) or not isinstance(edges_spec, list):
         raise HuabuArchiveError("工作流配方格式无效：nodes 与 edges 必须为数组。")
     if len(nodes_spec) > MAX_NODES_PER_BOARD:
@@ -177,7 +181,24 @@ def instantiate_board_recipe(
 
     with get_session() as s:
         board: Optional[Board] = None
-        if target_board_id is not None:
+        x_offset = 0.0
+        if append_to_board_id is not None:
+            candidate = s.get(Board, append_to_board_id)
+            if candidate is None:
+                raise HuabuArchiveError("要追加导入的目标画布不存在。")
+            existing_nodes = s.exec(
+                select(Node).where(Node.board_id == candidate.id)
+            ).all()
+            if existing_nodes and nodes_spec:
+                existing_max_right = max(float(n.x) + float(n.w or 260.0) for n in existing_nodes)
+                incoming_min_x = min(
+                    _clamp(spec.get("x"), _COORD_MIN, _COORD_MAX, 0.0)
+                    for spec in nodes_spec
+                    if isinstance(spec, dict)
+                )
+                x_offset = (existing_max_right + 160.0) - incoming_min_x
+            board = candidate
+        elif target_board_id is not None:
             candidate = s.get(Board, target_board_id)
             if candidate is not None:
                 existing_node = s.exec(
@@ -227,7 +248,7 @@ def instantiate_board_recipe(
                 board_id=board.id,
                 short_id=short_id,
                 type=node_type,
-                x=_clamp(spec.get("x"), _COORD_MIN, _COORD_MAX, 0.0),
+                x=_clamp(spec.get("x"), _COORD_MIN, _COORD_MAX, 0.0) + x_offset,
                 y=_clamp(spec.get("y"), _COORD_MIN, _COORD_MAX, 0.0),
                 w=_clamp(spec.get("w"), 1.0, _SIZE_MAX, 240.0),
                 h=_clamp(spec.get("h"), 1.0, _SIZE_MAX, 160.0),
@@ -277,8 +298,13 @@ def instantiate_board_recipe(
     }
 
 
-def export_board_huabu(board_id: int, *, include_media: bool = True) -> tuple[bytes, str]:
-    """Serialize a board into a sanitized ``.huabu`` ZIP archive."""
+def export_board_huabu(
+    board_id: int,
+    *,
+    include_media: bool = True,
+    node_ids: Optional[list[int]] = None,
+) -> tuple[bytes, str]:
+    """Serialize a board (or a selected node subset) into a sanitized ``.huabu`` ZIP archive."""
     with get_session() as s:
         board = s.get(Board, board_id)
         if board is None:
@@ -289,6 +315,11 @@ def export_board_huabu(board_id: int, *, include_media: bool = True) -> tuple[by
         edges = s.exec(
             select(Edge).where(Edge.board_id == board_id).order_by(Edge.id)
         ).all()
+
+    if node_ids:
+        selected_set = set(node_ids)
+        nodes = [n for n in nodes if n.id in selected_set]
+        edges = [e for e in edges if e.source_id in selected_set and e.target_id in selected_set]
 
     node_id_to_key: dict[int, str] = {}
     for idx, node in enumerate(nodes, start=1):
@@ -433,6 +464,7 @@ def import_board_huabu(
     raw_zip: bytes,
     *,
     target_board_id: Optional[int] = None,
+    append_to_board_id: Optional[int] = None,
 ) -> dict[str, Any]:
     """Validate and import a ``.huabu`` archive into the local workspace."""
     if not raw_zip or len(raw_zip) > MAX_ARCHIVE_BYTES:
@@ -516,5 +548,6 @@ def import_board_huabu(
             nodes_spec=nodes_spec,
             edges_spec=edges_spec,
             target_board_id=target_board_id,
+            append_to_board_id=append_to_board_id,
             media_count=ingested_media,
         )

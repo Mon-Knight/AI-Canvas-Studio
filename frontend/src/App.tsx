@@ -10,6 +10,7 @@ import { Toaster } from "./components/Toaster";
 import { GenerationDialog } from "./components/GenerationDialog";
 import { ResultViewer } from "./components/ResultViewer";
 import { EmbeddedFlowModal } from "./components/EmbeddedFlowModal";
+import { DirectorStageModal } from "./components/DirectorStageModal";
 import { ShutdownOverlay } from "./components/ShutdownOverlay";
 import { useBoardStore } from "./store/board";
 import { useDesktopFlowStore } from "./store/desktopFlow";
@@ -62,6 +63,7 @@ export function App() {
         <GenerationDialog />
         <ResultViewer />
         <EmbeddedFlowModal />
+        <DirectorStageModal />
         <ShutdownOverlay />
       </div>
     </ReactFlowProvider>

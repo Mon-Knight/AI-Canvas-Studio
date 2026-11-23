@@ -348,3 +348,36 @@ def test_gen_image_tool_supports_reference_node_short_ids():
 
     assert captured_refs == [["anime-ref-mid-01"]]
     assert _run_row(run_id).status == "done"
+
+
+def test_gen_image_tool_routes_to_flow_sdk_by_default(monkeypatch):
+    board_id, run_id = _mk_run(message="画一只赛博白猫")
+    calls = []
+
+    class FakeSdk:
+        async def gen_image(self, **kwargs):
+            calls.append(kwargs)
+            return {
+                "media_ids": ["flow-cat-01"],
+                "media_entries": [{"media_id": "flow-cat-01", "url": "https://flow-content.google/image/flow-cat-01"}],
+            }
+
+    script = [
+        json.dumps({"tool": "gen_image", "args": {"prompt": "赛博霓虹白猫"}}),
+        json.dumps({"done": True, "reply": "已使用 Google Flow 生成白猫"}),
+    ]
+
+    async def fake_llm(*args, **kwargs):
+        return script.pop(0)
+
+    monkeypatch.setattr("flowboard.services.flow_accounts.active_project", lambda: (True, "proj-uuid-123"))
+    monkeypatch.setattr("flowboard.services.flow_sdk.get_flow_sdk", lambda: FakeSdk())
+    monkeypatch.setattr("flowboard.services.media.ingest_urls", lambda entries: None)
+
+    with patch.object(chat_agent, "run_llm", fake_llm):
+        asyncio.run(chat_agent.run_chat_agent(board_id, run_id, "画一只赛博白猫", [], []))
+
+    assert len(calls) == 1
+    assert calls[0]["project_id"] == "proj-uuid-123"
+    assert calls[0]["prompt"] == "赛博霓虹白猫"
+    assert _run_row(run_id).status == "done"

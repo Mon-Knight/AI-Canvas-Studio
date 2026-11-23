@@ -109,6 +109,7 @@ export function TopRightCapsuleBar() {
   const accountWrapRef = useRef<HTMLDivElement>(null);
   const accountButtonRef = useRef<HTMLButtonElement>(null);
   const huabuInputRef = useRef<HTMLInputElement>(null);
+  const appendHuabuInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let alive = true;
@@ -752,7 +753,15 @@ export function TopRightCapsuleBar() {
                 className="jm-more-menu__item"
                 onClick={() => huabuInputRef.current?.click()}
               >
-                <span>导入 .huabu 画布包…</span>
+                <span>导入 .huabu 新建画布…</span>
+              </button>
+              <button
+                type="button"
+                className="jm-more-menu__item"
+                onClick={() => appendHuabuInputRef.current?.click()}
+              >
+                <span>追加 .huabu 到当前画布…</span>
+                <span className="jm-more-menu__sub">不覆盖</span>
               </button>
               <div className="jm-more-menu__divider" />
               <button
@@ -779,7 +788,20 @@ export function TopRightCapsuleBar() {
               e.target.value = "";
               if (!file) return;
               setExportOpen(false);
-              void importHuabuFile(file);
+              void importHuabuFile(file, false);
+            }}
+          />
+          <input
+            ref={appendHuabuInputRef}
+            type="file"
+            accept=".huabu,application/zip"
+            hidden
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              e.target.value = "";
+              if (!file) return;
+              setExportOpen(false);
+              void importHuabuFile(file, true);
             }}
           />
         </div>

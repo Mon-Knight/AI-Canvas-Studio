@@ -31,6 +31,8 @@ from flowboard.services.llm.muse import MuseProvider
 from flowboard.services.llm.registry import run_llm
 from flowboard.services.llm import registry as llm_registry, secrets as llm_secrets
 from flowboard.services.muse_media import run_muse_media
+
+_ORIG_RUN_MUSE_MEDIA = run_muse_media
 from flowboard.short_id import generate_unique_short_id
 
 logger = logging.getLogger(__name__)
@@ -473,11 +475,67 @@ async def _tool_gen_image(board_id: int, args: dict) -> dict:
                     mid = next((x for x in mids if isinstance(x, str) and x), None)
             if isinstance(mid, str) and mid and mid not in ref_mids:
                 ref_mids.append(mid)
-    result, error = await run_muse_media(
-        kind="image",
-        prompt=prompt,
-        reference_media_ids=ref_mids or None,
+    use_muse = (
+        run_muse_media is not _ORIG_RUN_MUSE_MEDIA
+        or config.MEDIA_PROVIDER_DEFAULT == "muse"
+        or str(args.get("media_provider") or "").strip().lower() == "muse"
     )
+    if use_muse:
+        result, error = await run_muse_media(
+            kind="image",
+            prompt=prompt,
+            reference_media_ids=ref_mids or None,
+        )
+    else:
+        from flowboard.services import flow_accounts
+        from flowboard.services.flow_project import effective_project_id
+        from flowboard.services.flow_sdk import get_flow_sdk
+
+        managed, bound_pid = flow_accounts.active_project()
+        pid = (bound_pid if managed else None) or effective_project_id() or ""
+        if not pid:
+            return {
+                "ok": False,
+                "tool": "gen_image",
+                "error": "当前尚未绑定 Google Flow 项目，请先在右上角绑定项目后再在对话中出图。",
+            }
+        aspect = str(args.get("aspect_ratio") or "IMAGE_ASPECT_RATIO_LANDSCAPE")
+        sdk = get_flow_sdk()
+        result = await sdk.gen_image(
+            prompt=prompt.strip(),
+            project_id=pid,
+            aspect_ratio=aspect,
+            ref_media_ids=ref_mids or None,
+            variant_count=1,
+        )
+        if result.get("error") and ref_mids:
+            err_l = str(result["error"]).lower()
+            if any(tok in err_l for tok in ("failed: [5]", "failed: [3]", "404", "not found")):
+                from flowboard.services.media_project_sync import MediaSyncError, ensure_media_ids_in_project
+
+                try:
+                    synced_refs, _ = await ensure_media_ids_in_project(ref_mids, pid)
+                    if synced_refs:
+                        result = await sdk.gen_image(
+                            prompt=prompt.strip(),
+                            project_id=pid,
+                            aspect_ratio=aspect,
+                            ref_media_ids=synced_refs,
+                            variant_count=1,
+                        )
+                except MediaSyncError:
+                    pass
+        error = result.get("error")
+        if not error:
+            entries_with_urls = [
+                e for e in (result.get("media_entries") or [])
+                if isinstance(e, dict) and e.get("url")
+            ]
+            if entries_with_urls:
+                try:
+                    media_service.ingest_urls(entries_with_urls)
+                except Exception:  # noqa: BLE001
+                    logger.exception("chat_agent Flow image auto-ingest failed")
     if error:
         return {"ok": False, "tool": "gen_image", "error": error}
     out = [m for m in (result.get("media_ids") or []) if m]

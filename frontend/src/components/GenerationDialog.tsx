@@ -20,6 +20,7 @@ import {
   VIDEO_CAMERA_PRESETS,
   composeVideoPromptWithDirectives,
 } from "../lib/promptMentions";
+import { filterDirectorSkills, type DirectorSkillEntry } from "../constants/directorSkills";
 import {
   useSettingsStore,
   type ImageModelKey,
@@ -215,6 +216,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
   const [dialogueText, setDialogueText] = useState("");
   const [sfxText, setSfxText] = useState("");
   const [atSuggestOpen, setAtSuggestOpen] = useState(false);
+  const [slashSkillOpen, setSlashSkillOpen] = useState(false);
 
   // 主体（character）官方推荐模板 & 自定义模板选择器状态
   const customSubjectTemplates = useSubjectTemplatesStore((s) => s.customTemplates);
@@ -511,6 +513,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
       setDialogueText("");
       setSfxText("");
       setAtSuggestOpen(false);
+      setSlashSkillOpen(false);
       setSeedInput(openNodeData?.seed != null ? String(openNodeData.seed) : "");
       setTemplateFormOpen(false);
       setEditingTemplateId(null);
@@ -1079,6 +1082,24 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     }
   }
 
+  function handleApplyPromptSlashSkill(skill: DirectorSkillEntry) {
+    setSlashSkillOpen(false);
+    if (skill.action.kind === "open_director_stage") {
+      setPrompt("");
+      window.dispatchEvent(
+        new CustomEvent("flowboard:open-director-stage", {
+          detail: { tab: skill.action.tab },
+        }),
+      );
+      return;
+    }
+    const clean = skill.action.snippet.slice(0, PROMPT_MAX_LENGTH);
+    promptManuallyEditedRef.current = true;
+    setPrompt(clean);
+    if (inline) persistNodeDraftPatch({ prompt: clean });
+    window.requestAnimationFrame(() => firstFocusRef.current?.focus());
+  }
+
   function insertRefMentionTag(refIdxOneBased: number) {
     if (isWorking || queued || hasStoryboardUpstream) return;
     const tag = `@图${refIdxOneBased} `;
@@ -1327,6 +1348,17 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
           {!hasStoryboardUpstream && (
             <button
               type="button"
+              className="gen-dialog__revert-btn"
+              onClick={() => setSlashSkillOpen((v) => !v)}
+              disabled={isWorking || queued}
+              title="唤出 / 导演技能模板"
+            >
+              / 技能
+            </button>
+          )}
+          {!hasStoryboardUpstream && (
+            <button
+              type="button"
               className="gen-dialog__zh-btn"
               onClick={() => void handleAiPolish()}
               disabled={isWorking || queued}
@@ -1357,6 +1389,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
           const cursor = e.target.selectionStart ?? val.length;
           const beforeCursor = val.slice(0, cursor);
           setAtSuggestOpen(refSourceNodes.length > 0 && /@(?:图\s*)?$/.test(beforeCursor));
+          setSlashSkillOpen(val.startsWith("/"));
           promptManuallyEditedRef.current = true;
           setPrompt(val);
           if (pendingBatchPrompts) setPendingBatchPrompts(undefined);
@@ -1390,6 +1423,25 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
             : undefined
         }
       />
+      {(slashSkillOpen || prompt.startsWith("/")) && !hasStoryboardUpstream && (
+        <div className="gen-dialog__at-bar" role="listbox" aria-label="斜杠导演技能">
+          <span className="gen-dialog__at-hint">/ 导演技能：</span>
+          {filterDirectorSkills(prompt.startsWith("/") ? prompt.slice(1) : "").map((skill) => (
+            <button
+              key={skill.id}
+              type="button"
+              className="gen-dialog__preset-chip gen-dialog__at-chip"
+              title={skill.desc}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                handleApplyPromptSlashSkill(skill);
+              }}
+            >
+              {skill.slash}
+            </button>
+          ))}
+        </div>
+      )}
       {atSuggestOpen && refSourceNodes.length > 0 && !hasStoryboardUpstream && (
         <div className="gen-dialog__at-bar" role="listbox" aria-label="选择要引用的上游参考图">
           <span className="gen-dialog__at-hint">点选插入参考图标记：</span>

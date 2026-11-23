@@ -80,6 +80,7 @@ class RecipeImportBody(BaseModel):
     nodes: list[dict[str, Any]]
     edges: list[dict[str, Any]] = []
     target_board_id: Optional[int] = None
+    append_to_board_id: Optional[int] = None
 
 
 @router.get("")
@@ -274,10 +275,22 @@ def delete_board(board_id: int):
 def export_huabu(
     board_id: int,
     include_media: bool = Query(True, description="Include locally cached image/video assets"),
+    node_ids: Optional[str] = Query(None, description="Comma-separated node DB IDs for partial export"),
 ):
-    """Export the board as a sanitized standalone ``.huabu`` workflow package."""
+    """Export the board (or a selected node subset) as a sanitized ``.huabu`` workflow package."""
+    parsed_ids: Optional[list[int]] = None
+    if isinstance(node_ids, str) and node_ids.strip():
+        parsed_ids = [
+            int(tok)
+            for tok in node_ids.split(",")
+            if tok.strip().isdigit()
+        ]
     try:
-        archive_bytes, filename = export_board_huabu(board_id, include_media=include_media)
+        archive_bytes, filename = export_board_huabu(
+            board_id,
+            include_media=include_media,
+            node_ids=parsed_ids or None,
+        )
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
 
@@ -302,11 +315,16 @@ def export_huabu(
 async def import_huabu(
     file: UploadFile = File(...),
     target_board_id: Optional[int] = Query(None),
+    append_to_board_id: Optional[int] = Query(None),
 ):
-    """Import a ``.huabu`` workflow archive into a new or empty board."""
+    """Import a ``.huabu`` workflow archive into a new, empty, or appended board."""
     raw = await file.read()
     try:
-        return import_board_huabu(raw, target_board_id=target_board_id)
+        return import_board_huabu(
+            raw,
+            target_board_id=target_board_id,
+            append_to_board_id=append_to_board_id,
+        )
     except HuabuArchiveError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -320,6 +338,7 @@ def import_recipe(body: RecipeImportBody):
             nodes_spec=body.nodes,
             edges_spec=body.edges,
             target_board_id=body.target_board_id,
+            append_to_board_id=body.append_to_board_id,
         )
     except HuabuArchiveError as exc:
         raise HTTPException(400, str(exc)) from exc

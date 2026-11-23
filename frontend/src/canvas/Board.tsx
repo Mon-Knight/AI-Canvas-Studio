@@ -288,6 +288,9 @@ export function Board() {
   const deleteEdgeByRfId = useBoardStore((s) => s.deleteEdgeByRfId);
   const importHuabuFile = useBoardStore((s) => s.importHuabuFile);
   const applyStarterRecipe = useBoardStore((s) => s.applyStarterRecipe);
+  const groupNodes = useBoardStore((s) => s.groupNodes);
+  const ungroupNodes = useBoardStore((s) => s.ungroupNodes);
+  const exportCurrentBoardHuabu = useBoardStore((s) => s.exportCurrentBoardHuabu);
   const setPanelOpen = useReferencesStore((s) => s.setPanelOpen);
   const { screenToFlowPosition, fitView, getZoom } = useReactFlow();
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -602,10 +605,9 @@ export function Board() {
     [],
   );
 
-  // 快捷键：选中节点按 g 打开生成/预览，按 l 切换资产库
+  // 快捷键：选中节点按 g 打开生成/预览，按 l 切换资产库，多选 Ctrl/Cmd+G 编组分镜
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
       const active = document.activeElement;
       const tag = (active?.tagName ?? "").toLowerCase();
       if (
@@ -616,6 +618,15 @@ export function Board() {
       ) {
         return;
       }
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "g") {
+        const picked = useBoardStore.getState().nodes.filter((n) => n.selected);
+        if (picked.length >= 2) {
+          e.preventDefault();
+          void useBoardStore.getState().groupNodes(picked.map((n) => n.id));
+        }
+        return;
+      }
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
       const key = e.key.toLowerCase();
       if (key === "l") {
         e.preventDefault();
@@ -811,6 +822,43 @@ export function Board() {
       {selected && !quickMenu && (
         <div hidden={dialogNodeId !== null}>
           <ContextualPromptBar key={selected.id} node={selected} />
+        </div>
+      )}
+      {selectedNodes.length >= 2 && (
+        <div className="jm-multi-select-bar" role="toolbar" aria-label="多选节点批量操作">
+          <span className="jm-multi-select-bar__count">
+            已选 {selectedNodes.length} 个节点
+          </span>
+          <button
+            type="button"
+            className="jm-multi-select-bar__btn"
+            onClick={() => void groupNodes(selectedNodes.map((n) => n.id))}
+            title="将当前多选节点编入同一分镜组（快捷键 Ctrl/⌘ + G）"
+          >
+            📦 编组分镜 (⌘G)
+          </button>
+          {selectedNodes.some((n) => Boolean(n.data.groupId)) && (
+            <button
+              type="button"
+              className="jm-multi-select-bar__btn"
+              onClick={() => void ungroupNodes(selectedNodes.map((n) => n.id))}
+            >
+              ✕ 解除编组
+            </button>
+          )}
+          <button
+            type="button"
+            className="jm-multi-select-bar__btn jm-multi-select-bar__btn--cyan"
+            onClick={() => {
+              const dbIds = selectedNodes
+                .map((n) => parseInt(n.id, 10))
+                .filter((id) => !isNaN(id));
+              if (dbIds.length > 0) void exportCurrentBoardHuabu(true, dbIds);
+            }}
+            title="仅将当前选中的节点及内部连线导出为独立 .huabu 子工作流包"
+          >
+            📤 导出选中 .huabu
+          </button>
         </div>
       )}
       <SequencePlayerModal open={sequenceOpen} onClose={() => setSequenceOpen(false)} />

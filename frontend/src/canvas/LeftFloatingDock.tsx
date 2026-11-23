@@ -159,7 +159,6 @@ function DockAction({
 export function LeftFloatingDock() {
   const { screenToFlowPosition, viewportInitialized } = useReactFlow();
   const addNodeOfType = useBoardStore((s) => s.addNodeOfType);
-  const addEdgeFromConnection = useBoardStore((s) => s.addEdgeFromConnection);
   const panelOpen = useReferencesStore((s) => s.panelOpen);
   const openPanel = useReferencesStore((s) => s.openPanel);
   const setPanelOpen = useReferencesStore((s) => s.setPanelOpen);
@@ -237,29 +236,10 @@ export function LeftFloatingDock() {
     }
   }
 
-  async function handleDirectorStage() {
-    const boardId = ensureBoardReady();
-    if (boardId === null || pendingRef.current.has("director_stage")) return;
-    const sbPos = findFreeSpawnPos(576, 260);
-    pendingRef.current.set("director_stage", sbPos);
-    setPending(new Set(pendingRef.current.keys()));
-    try {
-      const sbId = await addNodeOfType("Storyboard", sbPos);
-      if (useBoardStore.getState().boardId !== boardId) return;
-      if (!sbId) {
-        useBoardStore.setState({ error: "创建导演台分镜组合失败，请检查本地服务连接后重试。" });
-        return;
-      }
-      const videoId = await addNodeOfType("video", { x: sbPos.x + 320, y: sbPos.y });
-      if (useBoardStore.getState().boardId !== boardId) return;
-      if (videoId) {
-        await addEdgeFromConnection(sbId, videoId);
-      }
-      selectSingleNode(sbId);
-    } finally {
-      pendingRef.current.delete("director_stage");
-      setPending(new Set(pendingRef.current.keys()));
-    }
+  function handleDirectorStage(tab: "script" | "remake" = "script") {
+    window.dispatchEvent(
+      new CustomEvent("flowboard:open-director-stage", { detail: { tab } }),
+    );
   }
 
   function handleLayersAction() {
@@ -292,7 +272,7 @@ export function LeftFloatingDock() {
       return;
     }
     if (item.action === "director_stage") {
-      void handleDirectorStage();
+      handleDirectorStage("script");
       return;
     }
     handleLayersAction();

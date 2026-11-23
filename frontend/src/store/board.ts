@@ -122,6 +122,9 @@ export interface FlowboardNodeData extends Record<string, unknown> {
   storyboardGrid?: StoryboardGrid;
   storyboardMode?: StoryboardMode;
   history?: NodeHistoryEntry[];
+  groupId?: string;
+  groupTitle?: string;
+  groupColor?: string;
   /** 视频节点提取帧缓存：key 为 `${videoMediaId}:last` / `${videoMediaId}:first`，value 为上传后的图片 media_id */
   videoFrameCache?: Record<string, string>;
 }
@@ -228,6 +231,9 @@ function nodeFromDto(n: NodeDTO): FlowNode {
       history: Array.isArray(n.data["history"])
         ? (n.data["history"] as NodeHistoryEntry[])
         : undefined,
+      groupId: n.data["groupId"] as string | undefined,
+      groupTitle: n.data["groupTitle"] as string | undefined,
+      groupColor: n.data["groupColor"] as string | undefined,
       error: n.data["error"] as string | undefined,
     },
   };
@@ -321,9 +327,11 @@ interface BoardState {
   setNodes(nodes: FlowNode[]): void;
   setEdges(edges: Edge[]): void;
   clearError(): void;
-  exportCurrentBoardHuabu(includeMedia?: boolean): Promise<void>;
-  importHuabuFile(file: File): Promise<Board | null>;
+  exportCurrentBoardHuabu(includeMedia?: boolean, nodeIds?: number[]): Promise<void>;
+  importHuabuFile(file: File, appendToCurrentBoard?: boolean): Promise<Board | null>;
   applyStarterRecipe(recipeId: string, forceNewBoard?: boolean): Promise<Board | null>;
+  groupNodes(rfIds: string[], groupTitle?: string): Promise<string | null>;
+  ungroupNodes(rfIds: string[]): Promise<void>;
 }
 
 function isBlankDefaultBoard(nodes: FlowNode[], boardName: string): boolean {
@@ -737,11 +745,11 @@ export const useBoardStore = create<BoardState>((set, get) => ({
   setEdges: (edges) => set({ edges }),
   clearError: () => set({ error: null }),
 
-  async exportCurrentBoardHuabu(includeMedia = true) {
+  async exportCurrentBoardHuabu(includeMedia = true, nodeIds) {
     const { boardId } = get();
     if (boardId === null) return;
     try {
-      const { blob, filename } = await exportBoardHuabu(boardId, includeMedia);
+      const { blob, filename } = await exportBoardHuabu(boardId, includeMedia, nodeIds);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -755,12 +763,14 @@ export const useBoardStore = create<BoardState>((set, get) => ({
     }
   },
 
-  async importHuabuFile(file) {
+  async importHuabuFile(file, appendToCurrentBoard = false) {
     const { boardId, nodes, boardName } = get();
-    const targetId = boardId !== null && isBlankDefaultBoard(nodes, boardName) ? boardId : null;
+    const blank = boardId !== null && isBlankDefaultBoard(nodes, boardName);
+    const targetId = !appendToCurrentBoard && blank ? boardId : null;
+    const appendId = appendToCurrentBoard && boardId !== null && !blank ? boardId : null;
     set({ loading: true, error: null });
     try {
-      const res = await importBoardHuabu(file, targetId);
+      const res = await importBoardHuabu(file, targetId, appendId);
       await get().refreshBoardList();
       if (res.board.id === get().boardId) {
         const detail = await getBoard(res.board.id);
@@ -782,6 +792,51 @@ export const useBoardStore = create<BoardState>((set, get) => ({
       });
       return null;
     }
+  },
+
+  async groupNodes(rfIds, groupTitle = "分镜组") {
+    const cleanIds = Array.from(new Set(rfIds)).filter((id) =>
+      get().nodes.some((n) => n.id === id),
+    );
+    if (cleanIds.length < 2) return null;
+    const groupId = `grp_${Date.now().toString(36)}`;
+    const title = groupTitle.trim() || "分镜组";
+    set((s) => ({
+      nodes: s.nodes.map((n) =>
+        cleanIds.includes(n.id)
+          ? { ...n, data: { ...n.data, groupId, groupTitle: title } }
+          : n,
+      ),
+    }));
+    await Promise.all(
+      cleanIds.map((rfId) => {
+        const dbId = parseInt(rfId, 10);
+        if (isNaN(dbId)) return Promise.resolve();
+        return patchNode(dbId, { data: { groupId, groupTitle: title } }).catch(() => {});
+      }),
+    );
+    return groupId;
+  },
+
+  async ungroupNodes(rfIds) {
+    const idSet = new Set(rfIds);
+    set((s) => ({
+      nodes: s.nodes.map((n) => {
+        if (!idSet.has(n.id)) return n;
+        const nextData = { ...n.data };
+        delete nextData.groupId;
+        delete nextData.groupTitle;
+        delete nextData.groupColor;
+        return { ...n, data: nextData };
+      }),
+    }));
+    await Promise.all(
+      rfIds.map((rfId) => {
+        const dbId = parseInt(rfId, 10);
+        if (isNaN(dbId)) return Promise.resolve();
+        return patchNode(dbId, { data: { groupId: null, groupTitle: null, groupColor: null } }).catch(() => {});
+      }),
+    );
   },
 
   async applyStarterRecipe(recipeId, forceNewBoard = false) {

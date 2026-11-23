@@ -1261,9 +1261,14 @@ export function NodeCard(props: NodeProps<FlowNode>) {
     <div
       className={`node-card jm-node-card${isNote ? " node-card--note" : ""}${
         props.selected ? " node-card--selected" : ""
-      }${llmBusy ? " node-card--llm-busy" : ""}`}
+      }${llmBusy ? " node-card--llm-busy" : ""}${data.groupId ? " node-card--grouped" : ""}`}
       data-status={status}
     >
+      {data.groupId && (
+        <div className="jm-node-group-badge" title={`所属分镜组：${data.groupTitle || "分镜组"}`}>
+          📦 {data.groupTitle || "分镜组"}
+        </div>
+      )}
       <div className="node-header">
         <NodeIcon className="node-icon" size={15} />
         <span className="node-title" title={`${title} · #${data.shortId}`}>{title}</span>

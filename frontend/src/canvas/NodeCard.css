@@ -349,3 +349,25 @@
   background: #27272c;
   color: #f4f4f6;
 }
+
+.jm-node-group-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  background: rgba(56, 189, 248, 0.1);
+  color: #7dd3fc;
+  font-size: 10px;
+  font-weight: 500;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.node-card--grouped .jm-node-surface::after {
+  border-color: rgba(56, 189, 248, 0.24);
+}

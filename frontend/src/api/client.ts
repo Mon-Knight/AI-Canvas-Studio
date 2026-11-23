@@ -1328,9 +1328,16 @@ function parseContentDispositionFilename(header: string | null): string | null {
 export async function exportBoardHuabu(
   boardId: number,
   includeMedia = true,
+  nodeIds?: number[],
 ): Promise<{ blob: Blob; filename: string }> {
+  const qs = new URLSearchParams({
+    include_media: includeMedia ? "true" : "false",
+  });
+  if (nodeIds && nodeIds.length > 0) {
+    qs.set("node_ids", nodeIds.join(","));
+  }
   const res = await fetch(
-    `/api/boards/${boardId}/export.huabu?include_media=${includeMedia ? "true" : "false"}`,
+    `/api/boards/${boardId}/export.huabu?${qs.toString()}`,
   );
   if (!res.ok) {
     throw new Error(await extractErrorMessage(res));
@@ -1344,14 +1351,19 @@ export async function exportBoardHuabu(
 export async function importBoardHuabu(
   file: File,
   targetBoardId?: number | null,
+  appendToBoardId?: number | null,
 ): Promise<HuabuImportResponse> {
   const form = new FormData();
   form.append("file", file);
-  const qs =
-    typeof targetBoardId === "number" && targetBoardId > 0
-      ? `?target_board_id=${targetBoardId}`
-      : "";
-  const res = await fetch(`/api/boards/import-huabu${qs}`, {
+  const qs = new URLSearchParams();
+  if (typeof targetBoardId === "number" && targetBoardId > 0) {
+    qs.set("target_board_id", String(targetBoardId));
+  }
+  if (typeof appendToBoardId === "number" && appendToBoardId > 0) {
+    qs.set("append_to_board_id", String(appendToBoardId));
+  }
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  const res = await fetch(`/api/boards/import-huabu${suffix}`, {
     method: "POST",
     body: form,
   });
@@ -1366,8 +1378,34 @@ export function instantiateBoardRecipe(payload: {
   nodes: RecipeNodeInput[];
   edges: RecipeEdgeInput[];
   target_board_id?: number | null;
+  append_to_board_id?: number | null;
 }): Promise<RecipeImportResponse> {
   return api<RecipeImportResponse>("/api/boards/import-recipe", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export interface ScriptShotSpec {
+  title: string;
+  image_prompt: string;
+  video_prompt: string;
+  camera: string;
+}
+
+export interface ScriptBreakdownResponse {
+  title: string;
+  character_prompt: string;
+  shots: ScriptShotSpec[];
+  source: string;
+}
+
+export function breakdownScript(payload: {
+  script: string;
+  shot_count?: number;
+  aspect_ratio?: string;
+}): Promise<ScriptBreakdownResponse> {
+  return api<ScriptBreakdownResponse>("/api/prompt/script-breakdown", {
     method: "POST",
     body: JSON.stringify(payload),
   });

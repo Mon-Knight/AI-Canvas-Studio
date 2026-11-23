@@ -836,3 +836,37 @@ test("Stage 1: 3x3 multicam storyboard, @ref mentions, video directives, and nod
     await server.close();
   }
 });
+
+test("Stage 2: director skills filter & canvas multi-select grouping", async () => {
+  const server = await createServer({ server: { middlewareMode: true, hmr: false, ws: false }, logLevel: "error" });
+  const savedFetch = globalThis.fetch;
+  try {
+    const { filterDirectorSkills, DIRECTOR_SKILLS } = await server.ssrLoadModule("/src/constants/directorSkills.ts");
+    const { useBoardStore } = await server.ssrLoadModule("/src/store/board.ts");
+
+    assert.ok(DIRECTOR_SKILLS.length >= 5);
+    assert.ok(filterDirectorSkills("剧本").some((s) => s.id === "script_breakdown"));
+    assert.ok(filterDirectorSkills("拉片").some((s) => s.id === "video_remake"));
+
+    globalThis.fetch = async () => Response.json({});
+    useBoardStore.setState({
+      boardId: 1,
+      nodes: [
+        { id: "1", type: "image", position: { x: 0, y: 0 }, data: { type: "image", shortId: "A1", title: "画面1" } },
+        { id: "2", type: "video", position: { x: 300, y: 0 }, data: { type: "video", shortId: "V1", title: "视频1" } },
+      ],
+      edges: [],
+    });
+
+    const gid = await useBoardStore.getState().groupNodes(["1", "2"], "开场三镜");
+    assert.ok(gid && gid.startsWith("grp_"));
+    assert.equal(useBoardStore.getState().nodes[0].data.groupId, gid);
+    assert.equal(useBoardStore.getState().nodes[1].data.groupTitle, "开场三镜");
+
+    await useBoardStore.getState().ungroupNodes(["1", "2"]);
+    assert.equal(useBoardStore.getState().nodes[0].data.groupId, undefined);
+  } finally {
+    globalThis.fetch = savedFetch;
+    await server.close();
+  }
+});
