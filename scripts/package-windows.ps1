@@ -136,7 +136,19 @@ if (-not (Test-Path (Join-Path $ElectronDist "electron.exe"))) {
 Copy-Item -Path (Join-Path $ElectronDist "*") -Destination $AppOutDir -Recurse -Force
 Rename-Item -Path (Join-Path $AppOutDir "electron.exe") -NewName "AI-Canvas-Studio.exe"
 
+$IconIco = Join-Path $RepoRoot "desktop\assets\icon.ico"
+$IconPng = Join-Path $RepoRoot "desktop\assets\icon.png"
+if (Test-Path $IconIco) {
+    Write-Host "==> Embedding custom icon into AI-Canvas-Studio.exe..."
+    npx --yes rcedit@3.1.0 (Join-Path $AppOutDir "AI-Canvas-Studio.exe") --set-icon $IconIco
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "rcedit failed (exit code $LASTEXITCODE) — continuing without executable resource icon patch."
+    }
+}
+
 $ResourcesDir = Join-Path $AppOutDir "resources"
+if (Test-Path $IconIco) { Copy-Item -Path $IconIco -Destination (Join-Path $ResourcesDir "icon.ico") -Force }
+if (Test-Path $IconPng) { Copy-Item -Path $IconPng -Destination (Join-Path $ResourcesDir "icon.png") -Force }
 $DefaultAsar = Join-Path $ResourcesDir "default_app.asar"
 if (Test-Path $DefaultAsar) { Remove-Item $DefaultAsar -Force }
 

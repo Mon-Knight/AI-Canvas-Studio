@@ -628,3 +628,139 @@ test("chatReferences syncs selected canvas nodes automatically, respects mute/pi
     await server.close();
   }
 });
+
+test("STARTER_RECIPES provides 3 complete Chinese workflows with valid node/edge graphs", async () => {
+  const server = await createServer({ server: { middlewareMode: true, hmr: false, ws: false }, logLevel: "error" });
+  try {
+    const { STARTER_RECIPES } = await server.ssrLoadModule("/src/constants/starterTemplates.ts");
+    assert.equal(STARTER_RECIPES.length, 3);
+    const seenIds = new Set();
+    for (const recipe of STARTER_RECIPES) {
+      assert.ok(recipe.id && !seenIds.has(recipe.id));
+      seenIds.add(recipe.id);
+      assert.ok(recipe.title.length > 0 && recipe.badge.length > 0 && recipe.boardName.length > 0);
+      assert.ok(recipe.nodes.length >= 4);
+      assert.ok(recipe.edges.length >= 2);
+      const keys = new Set(recipe.nodes.map((n) => n.key));
+      assert.equal(keys.size, recipe.nodes.length);
+      for (const edge of recipe.edges) {
+        assert.ok(keys.has(edge.source_key), `Missing source_key ${edge.source_key}`);
+        assert.ok(keys.has(edge.target_key), `Missing target_key ${edge.target_key}`);
+        assert.notEqual(edge.source_key, edge.target_key);
+      }
+    }
+  } finally {
+    await server.close();
+  }
+});
+
+test("github release helper parses Setup/Portable assets, handles dismissal, and checks semver", async () => {
+  const server = await createServer({ server: { middlewareMode: true, hmr: false, ws: false }, logLevel: "error" });
+  const savedFetch = globalThis.fetch;
+  try {
+    const {
+      CURRENT_APP_VERSION,
+      dismissReleaseTag,
+      getDismissedReleaseTag,
+      getLatestRelease,
+      isNewerVersion,
+    } = await server.ssrLoadModule("/src/api/github.ts");
+
+    assert.ok(/^\d+\.\d+\.\d+/.test(CURRENT_APP_VERSION));
+    assert.equal(isNewerVersion("v1.5.0", "1.4.0"), true);
+    assert.equal(isNewerVersion("v1.4.1", "1.4.0"), true);
+    assert.equal(isNewerVersion("v1.4.0", "1.4.0"), false);
+    assert.equal(isNewerVersion("v1.10.0", "1.9.0"), true);
+
+    globalThis.fetch = async () =>
+      Response.json({
+        tag_name: "v1.5.0",
+        name: "AI Canvas Studio v1.5.0",
+        body: "新增 .huabu 创作配方包导入导出与新手指引画布。",
+        html_url: "https://github.com/Mon-Knight/AI-Canvas-Studio/releases/tag/v1.5.0",
+        published_at: "2026-11-23T04:00:00Z",
+        assets: [
+          {
+            name: "AI-Canvas-Studio-v1.5.0-win64-setup.exe",
+            browser_download_url: "https://example.com/setup.exe",
+          },
+          {
+            name: "AI-Canvas-Studio-v1.5.0-win64-portable.zip",
+            browser_download_url: "https://example.com/portable.zip",
+          },
+        ],
+      });
+
+    const rel = await getLatestRelease(true);
+    assert.ok(rel);
+    assert.equal(rel.tagName, "v1.5.0");
+    assert.equal(rel.setupUrl, "https://example.com/setup.exe");
+    assert.equal(rel.portableUrl, "https://example.com/portable.zip");
+
+    dismissReleaseTag("v1.5.0");
+    if (typeof localStorage !== "undefined") {
+      assert.equal(getDismissedReleaseTag(), "v1.5.0");
+    }
+  } finally {
+    globalThis.fetch = savedFetch;
+    await server.close();
+  }
+});
+
+test("useBoardStore.applyStarterRecipe populates blank default board in place", async () => {
+  const server = await createServer({ server: { middlewareMode: true, hmr: false, ws: false }, logLevel: "error" });
+  const savedFetch = globalThis.fetch;
+  try {
+    const { useBoardStore } = await server.ssrLoadModule("/src/store/board.ts");
+    const populatedBoard = { id: 1, name: "示例·番剧角色锁脸与续拍", created_at: "2026-11-23T04:00:00Z" };
+    let postedBody = null;
+
+    useBoardStore.setState({
+      boardId: 1,
+      boardName: "未命名项目",
+      boards: [{ id: 1, name: "未命名项目", created_at: "2026-11-23T04:00:00Z" }],
+      nodes: [],
+      edges: [],
+    });
+
+    globalThis.fetch = async (url, init) => {
+      if (url === "/api/boards/import-recipe") {
+        postedBody = JSON.parse(String(init?.body ?? "{}"));
+        return Response.json({ board: populatedBoard, nodes_count: 5, edges_count: 3, media_count: 0 });
+      }
+      if (url === "/api/boards") return Response.json([populatedBoard]);
+      if (url === "/api/boards/1") {
+        return Response.json({
+          board: populatedBoard,
+          nodes: [
+            {
+              id: 11,
+              board_id: 1,
+              short_id: "aa11",
+              type: "character",
+              x: 40,
+              y: 210,
+              w: 256,
+              h: 196,
+              status: "idle",
+              created_at: "2026-11-23T04:00:00Z",
+              data: { title: "主角三视图", prompt: "三视图" },
+            },
+          ],
+          edges: [],
+        });
+      }
+      if (typeof url === "string" && url.includes("/requests")) return Response.json({ items: [] });
+      throw new Error(`Unexpected fetch: ${url}`);
+    };
+
+    const resBoard = await useBoardStore.getState().applyStarterRecipe("anime-series");
+    assert.equal(postedBody.target_board_id, 1);
+    assert.equal(resBoard?.id, 1);
+    assert.equal(useBoardStore.getState().boardName, "示例·番剧角色锁脸与续拍");
+    assert.equal(useBoardStore.getState().nodes.length, 1);
+  } finally {
+    globalThis.fetch = savedFetch;
+    await server.close();
+  }
+});

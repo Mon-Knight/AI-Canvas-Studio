@@ -11,11 +11,15 @@ import {
   deleteNode,
   createEdge,
   deleteEdge,
+  exportBoardHuabu,
+  importBoardHuabu,
+  instantiateBoardRecipe,
   type Board,
   type NodeDTO,
   type NodeType,
 } from "../api/client";
 import { displayNodeTitle } from "../constants/nodeLabels";
+import { STARTER_RECIPES } from "../constants/starterTemplates";
 
 export type { NodeType };
 
@@ -299,6 +303,14 @@ interface BoardState {
   setNodes(nodes: FlowNode[]): void;
   setEdges(edges: Edge[]): void;
   clearError(): void;
+  exportCurrentBoardHuabu(includeMedia?: boolean): Promise<void>;
+  importHuabuFile(file: File): Promise<Board | null>;
+  applyStarterRecipe(recipeId: string, forceNewBoard?: boolean): Promise<Board | null>;
+}
+
+function isBlankDefaultBoard(nodes: FlowNode[], boardName: string): boolean {
+  const clean = boardName.trim();
+  return nodes.length === 0 && (clean === "" || clean === "未命名项目" || clean === "Untitled");
 }
 
 export const useBoardStore = create<BoardState>((set, get) => ({
@@ -706,4 +718,88 @@ export const useBoardStore = create<BoardState>((set, get) => ({
   setNodes: (nodes) => set({ nodes }),
   setEdges: (edges) => set({ edges }),
   clearError: () => set({ error: null }),
+
+  async exportCurrentBoardHuabu(includeMedia = true) {
+    const { boardId } = get();
+    if (boardId === null) return;
+    try {
+      const { blob, filename } = await exportBoardHuabu(boardId, includeMedia);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : "导出 .huabu 创作配方失败" });
+    }
+  },
+
+  async importHuabuFile(file) {
+    const { boardId, nodes, boardName } = get();
+    const targetId = boardId !== null && isBlankDefaultBoard(nodes, boardName) ? boardId : null;
+    set({ loading: true, error: null });
+    try {
+      const res = await importBoardHuabu(file, targetId);
+      await get().refreshBoardList();
+      if (res.board.id === get().boardId) {
+        const detail = await getBoard(res.board.id);
+        set({
+          boardId: detail.board.id,
+          boardName: detail.board.name,
+          nodes: detail.nodes.map(nodeFromDto),
+          edges: detail.edges.map(edgeFromDto),
+          loading: false,
+        });
+      } else {
+        await get().switchBoard(res.board.id);
+      }
+      return res.board;
+    } catch (err) {
+      set({
+        loading: false,
+        error: err instanceof Error ? err.message : "导入 .huabu 创作配方失败",
+      });
+      return null;
+    }
+  },
+
+  async applyStarterRecipe(recipeId, forceNewBoard = false) {
+    const recipe = STARTER_RECIPES.find((r) => r.id === recipeId);
+    if (!recipe) return null;
+    const { boardId, nodes, boardName } = get();
+    const targetId =
+      !forceNewBoard && boardId !== null && isBlankDefaultBoard(nodes, boardName) ? boardId : null;
+    set({ loading: true, error: null });
+    try {
+      const res = await instantiateBoardRecipe({
+        name: recipe.boardName,
+        nodes: recipe.nodes,
+        edges: recipe.edges,
+        target_board_id: targetId,
+      });
+      await get().refreshBoardList();
+      if (res.board.id === get().boardId) {
+        const detail = await getBoard(res.board.id);
+        set({
+          boardId: detail.board.id,
+          boardName: detail.board.name,
+          nodes: detail.nodes.map(nodeFromDto),
+          edges: detail.edges.map(edgeFromDto),
+          loading: false,
+        });
+      } else {
+        await get().switchBoard(res.board.id);
+      }
+      return res.board;
+    } catch (err) {
+      set({
+        loading: false,
+        error: err instanceof Error ? err.message : "创建新手指引画布失败",
+      });
+      return null;
+    }
+  },
 }));

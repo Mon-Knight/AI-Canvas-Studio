@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { useBoardStore } from "../store/board";
 import { useReferencesStore } from "../store/references";
 import { displayBoardName } from "../constants/nodeLabels";
+import { STARTER_RECIPES } from "../constants/starterTemplates";
 import { JimengPrismLogo } from "./JimengIcons";
 
 /**
@@ -16,6 +17,9 @@ export function TopLeftProjectBar() {
   const createNewBoard = useBoardStore((s) => s.createNewBoard);
   const deleteBoardById = useBoardStore((s) => s.deleteBoardById);
   const renameBoard = useBoardStore((s) => s.renameBoard);
+  const exportCurrentBoardHuabu = useBoardStore((s) => s.exportCurrentBoardHuabu);
+  const importHuabuFile = useBoardStore((s) => s.importHuabuFile);
+  const applyStarterRecipe = useBoardStore((s) => s.applyStarterRecipe);
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [editingCurrent, setEditingCurrent] = useState(false);
@@ -23,16 +27,19 @@ export function TopLeftProjectBar() {
   const [creating, setCreating] = useState(false);
   const [newNameDraft, setNewNameDraft] = useState("");
   const [creatingBusy, setCreatingBusy] = useState(false);
+  const [recipesOpen, setRecipesOpen] = useState(false);
   const [armedDeleteId, setArmedDeleteId] = useState<number | null>(null);
 
   const wrapRef = useRef<HTMLDivElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
   const newInputRef = useRef<HTMLInputElement>(null);
+  const huabuInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!menuOpen) {
       setCreating(false);
       setNewNameDraft("");
+      setRecipesOpen(false);
       setArmedDeleteId(null);
       return;
     }
@@ -193,6 +200,62 @@ export function TopLeftProjectBar() {
             >
               <span>▦</span> 打开画布管理库
             </button>
+            <button
+              type="button"
+              className="jm-project-menu__action"
+              aria-expanded={recipesOpen}
+              onClick={() => setRecipesOpen((v) => !v)}
+            >
+              <span>✦</span> {recipesOpen ? "收起新手指引示例" : "从新手指引示例新建"}
+            </button>
+            {recipesOpen && (
+              <div className="jm-project-menu__recipes">
+                {STARTER_RECIPES.map((r) => (
+                  <button
+                    key={r.id}
+                    type="button"
+                    className="jm-project-menu__recipe-item"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      void applyStarterRecipe(r.id, true);
+                    }}
+                  >
+                    <span className="jm-project-menu__recipe-badge">{r.badge}</span>
+                    <span>{r.title}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+            <button
+              type="button"
+              className="jm-project-menu__action"
+              onClick={() => huabuInputRef.current?.click()}
+            >
+              <span>⇩</span> 导入 .huabu 配方包…
+            </button>
+            <button
+              type="button"
+              className="jm-project-menu__action"
+              onClick={() => {
+                setMenuOpen(false);
+                void exportCurrentBoardHuabu(true);
+              }}
+            >
+              <span>⇧</span> 导出当前画布 (.huabu)
+            </button>
+            <input
+              ref={huabuInputRef}
+              type="file"
+              accept=".huabu,application/zip"
+              hidden
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                e.target.value = "";
+                if (!file) return;
+                setMenuOpen(false);
+                void importHuabuFile(file);
+              }}
+            />
           </div>
 
           <div className="jm-project-menu__divider" />

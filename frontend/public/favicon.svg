@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none">
+  <defs>
+    <linearGradient id="bgGrad" x1="24" y1="24" x2="232" y2="232" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#141417" />
+      <stop offset="100%" stop-color="#09090b" />
+    </linearGradient>
+    <radialGradient id="auroraGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(128 118) rotate(90) scale(110)">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.28" />
+      <stop offset="60%" stop-color="#2563eb" stop-opacity="0.10" />
+      <stop offset="100%" stop-color="#09090b" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="prismGrad" x1="68" y1="54" x2="194" y2="198" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#00e5ff" />
+      <stop offset="52%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#2563eb" />
+    </linearGradient>
+    <linearGradient id="prismInner" x1="86" y1="74" x2="170" y2="178" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#e0f7ff" />
+      <stop offset="50%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#1d4ed8" />
+    </linearGradient>
+  </defs>
+
+  <rect x="12" y="12" width="232" height="232" rx="54" fill="url(#bgGrad)" stroke="rgba(255,255,255,0.14)" stroke-width="4" />
+  <rect x="16" y="16" width="224" height="224" rx="50" fill="url(#auroraGlow)" />
+
+  <!-- Subtle canvas connection curves -->
+  <path d="M56 178 C86 178, 92 128, 128 128 C164 128, 170 78, 200 78" stroke="url(#prismGrad)" stroke-opacity="0.55" stroke-width="7" stroke-linecap="round" />
+  <path d="M56 80 C92 80, 96 128, 128 128 C160 128, 166 178, 200 178" stroke="url(#prismGrad)" stroke-opacity="0.38" stroke-width="5" stroke-linecap="round" />
+
+  <!-- Central Jimeng-inspired luminous cyan-blue prism -->
+  <path d="M128 54 L188 158 C191 163, 187 170, 181 170 H75 C69 170, 65 163, 68 158 Z" fill="url(#prismGrad)" fill-opacity="0.22" stroke="url(#prismGrad)" stroke-width="7" stroke-linejoin="round" />
+  <path d="M128 80 L166 148 H90 Z" fill="url(#prismInner)" />
+
+  <!-- Three glowing workflow nodes -->
+  <circle cx="56" cy="80" r="13" fill="#09090b" stroke="#00e5ff" stroke-width="5" />
+  <circle cx="56" cy="178" r="13" fill="#09090b" stroke="#38bdf8" stroke-width="5" />
+  <circle cx="200" cy="78" r="14" fill="#38bdf8" stroke="#e0f7ff" stroke-width="4" />
+  <circle cx="200" cy="178" r="12" fill="#09090b" stroke="#2563eb" stroke-width="5" />
+</svg>

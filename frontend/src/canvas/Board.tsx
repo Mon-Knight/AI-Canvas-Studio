@@ -29,6 +29,7 @@ import { useGenerationStore } from "../store/generation";
 import { patchNode, uploadImage } from "../api/client";
 import { requestAutoBrief } from "../api/autoBrief";
 import { pickImageFiles } from "../lib/filePicker";
+import { STARTER_RECIPES } from "../constants/starterTemplates";
 import {
   IconAssetLibrary,
   IconImage,
@@ -285,9 +286,15 @@ export function Board() {
   const addNodeOfType = useBoardStore((s) => s.addNodeOfType);
   const deleteNodeByRfId = useBoardStore((s) => s.deleteNodeByRfId);
   const deleteEdgeByRfId = useBoardStore((s) => s.deleteEdgeByRfId);
+  const importHuabuFile = useBoardStore((s) => s.importHuabuFile);
+  const applyStarterRecipe = useBoardStore((s) => s.applyStarterRecipe);
   const setPanelOpen = useReferencesStore((s) => s.setPanelOpen);
   const { screenToFlowPosition, fitView, getZoom } = useReactFlow();
   const wrapperRef = useRef<HTMLDivElement>(null);
+  const huabuInputRef = useRef<HTMLInputElement>(null);
+  const dragDepthRef = useRef(0);
+  const [dragHintVisible, setDragHintVisible] = useState(false);
+  const [starterBusyId, setStarterBusyId] = useState<string | null>(null);
 
   const [quickMenu, setQuickMenu] = useState<QuickMenuState | null>(null);
   const quickMenuOpenedAtRef = useRef(0);
@@ -327,6 +334,20 @@ export function Board() {
     sourceId: null,
     didConnect: false,
   });
+
+  const onCanvasDragEnter = useCallback((e: React.DragEvent) => {
+    if (e.dataTransfer.types.includes("Files")) {
+      dragDepthRef.current += 1;
+      setDragHintVisible(true);
+    }
+  }, []);
+
+  const onCanvasDragLeave = useCallback((e: React.DragEvent) => {
+    if (e.dataTransfer.types.includes("Files")) {
+      dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+      if (dragDepthRef.current === 0) setDragHintVisible(false);
+    }
+  }, []);
 
   const onCanvasDragOver = useCallback((e: React.DragEvent) => {
     const hasRef = e.dataTransfer.types.includes("application/x-flowboard-reference");
@@ -402,6 +423,9 @@ export function Board() {
 
   const onCanvasDrop = useCallback(
     async (e: React.DragEvent) => {
+      dragDepthRef.current = 0;
+      setDragHintVisible(false);
+
       // 1. 资产库卡片拖入画布
       const raw = e.dataTransfer.getData("application/x-flowboard-reference");
       if (raw) {
@@ -423,17 +447,28 @@ export function Board() {
         return;
       }
 
-      // 2. 本地图片文件直接拖入空白画布自动创建节点
-      const droppedFiles = Array.from(e.dataTransfer.files ?? []).filter((f) =>
-        f.type.startsWith("image/"),
-      );
+      // 2. .huabu 工作流配方包拖入画布一键导入
+      const allFiles = Array.from(e.dataTransfer.files ?? []);
+      const huabuFile = allFiles.find((f) => f.name.toLowerCase().endsWith(".huabu"));
+      if (huabuFile) {
+        e.preventDefault();
+        e.stopPropagation();
+        const imported = await importHuabuFile(huabuFile);
+        if (imported) {
+          setTimeout(() => void fitView({ duration: 280, padding: 0.22 }), 80);
+        }
+        return;
+      }
+
+      // 3. 本地图片文件直接拖入空白画布自动创建节点
+      const droppedFiles = allFiles.filter((f) => f.type.startsWith("image/"));
       if (droppedFiles.length === 0) return;
       e.preventDefault();
       e.stopPropagation();
       const flowPos = screenToFlowPosition({ x: e.clientX, y: e.clientY });
       await uploadImagesAtPosition(droppedFiles, flowPos);
     },
-    [screenToFlowPosition, uploadImagesAtPosition],
+    [screenToFlowPosition, uploadImagesAtPosition, importHuabuFile, fitView],
   );
 
   const onNodesChange = useCallback(
@@ -625,18 +660,91 @@ export function Board() {
       ref={wrapperRef}
       className={edgesHidden ? "jm-edges-hidden" : undefined}
       style={{ flex: 1, minHeight: 0, width: "100%", height: "100%", position: "relative" }}
+      onDragEnter={onCanvasDragEnter}
+      onDragLeave={onCanvasDragLeave}
       onDragOver={onCanvasDragOver}
       onDrop={(e) => void onCanvasDrop(e)}
       onDoubleClick={handleWrapperDoubleClick}
     >
+      <input
+        ref={huabuInputRef}
+        type="file"
+        accept=".huabu,application/zip"
+        hidden
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          e.target.value = "";
+          if (!file) return;
+          void importHuabuFile(file).then((board) => {
+            if (board) setTimeout(() => void fitView({ duration: 280, padding: 0.22 }), 80);
+          });
+        }}
+      />
+
+      {dragHintVisible && (
+        <div className="jm-drop-hint" aria-live="polite">
+          <div className="jm-drop-hint__card">
+            <JimengPrismLogo size={22} />
+            <span>松开鼠标 · 导入 .huabu 创作配方或上传图片素材</span>
+          </div>
+        </div>
+      )}
+
       {/* 即梦风格空画布中心引导（0 节点且未展开创建菜单时浮现） */}
       {nodes.length === 0 && !quickMenu && (
-        <div className="jm-empty-guide" aria-hidden="true">
-          <span className="jm-empty-guide__text">双击画布</span>
-          <span className="jm-empty-guide__logo">
-            <JimengPrismLogo size={24} />
-          </span>
-          <span className="jm-empty-guide__text">创建节点</span>
+        <div className="jm-empty-stage">
+          <div className="jm-empty-guide" aria-hidden="true">
+            <span className="jm-empty-guide__text">双击画布</span>
+            <span className="jm-empty-guide__logo">
+              <JimengPrismLogo size={24} />
+            </span>
+            <span className="jm-empty-guide__text">创建节点</span>
+          </div>
+
+          <div className="jm-starter-guide" role="region" aria-label="新手指引示例画布与配方导入">
+            <div className="jm-starter-guide__head">
+              <span className="jm-starter-guide__title">快速开局 · 新手指引示例工作流</span>
+              <button
+                type="button"
+                className="jm-starter-guide__import"
+                onClick={() => huabuInputRef.current?.click()}
+              >
+                导入 .huabu 配方包…
+              </button>
+            </div>
+            <div className="jm-starter-guide__grid">
+              {STARTER_RECIPES.map((recipe) => {
+                const busy = starterBusyId === recipe.id;
+                return (
+                  <button
+                    key={recipe.id}
+                    type="button"
+                    className="jm-starter-card"
+                    disabled={starterBusyId !== null}
+                    onClick={() => {
+                      setStarterBusyId(recipe.id);
+                      void applyStarterRecipe(recipe.id)
+                        .then((board) => {
+                          if (board) {
+                            setTimeout(() => void fitView({ duration: 280, padding: 0.22 }), 80);
+                          }
+                        })
+                        .finally(() => setStarterBusyId(null));
+                    }}
+                  >
+                    <div className="jm-starter-card__top">
+                      <span className="jm-starter-card__badge">{recipe.badge}</span>
+                      <span className="jm-starter-card__action">
+                        {busy ? "载入中…" : "一键铺开 →"}
+                      </span>
+                    </div>
+                    <div className="jm-starter-card__title">{recipe.title}</div>
+                    <div className="jm-starter-card__summary">{recipe.summary}</div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
         </div>
       )}
 

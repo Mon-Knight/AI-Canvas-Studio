@@ -1274,3 +1274,101 @@ export function shutdownService(opts?: {
     body: JSON.stringify(opts ?? {}),
   });
 }
+
+// ── .huabu Workflow Archive & Starter Recipes ───────────────────────────────
+
+export interface RecipeNodeInput {
+  key: string;
+  type: NodeType;
+  x: number;
+  y: number;
+  w?: number;
+  h?: number;
+  status?: "idle" | "done";
+  data: Record<string, unknown>;
+}
+
+export interface RecipeEdgeInput {
+  source_key: string;
+  target_key: string;
+  source_variant_idx?: number | null;
+}
+
+export interface HuabuImportResponse {
+  board: Board;
+  nodes_count: number;
+  edges_count: number;
+  media_count: number;
+}
+
+export interface RecipeImportResponse {
+  board: Board;
+  nodes_count: number;
+  edges_count: number;
+  media_count: number;
+}
+
+function parseContentDispositionFilename(header: string | null): string | null {
+  if (!header) return null;
+  const utf8Match = header.match(/filename\*\s*=\s*UTF-8''([^;]+)/i);
+  if (utf8Match && utf8Match[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1].trim());
+    } catch {
+      // fall through
+    }
+  }
+  const plainMatch = header.match(/filename\s*=\s*"?([^";]+)"?/i);
+  if (plainMatch && plainMatch[1]) {
+    return plainMatch[1].trim();
+  }
+  return null;
+}
+
+export async function exportBoardHuabu(
+  boardId: number,
+  includeMedia = true,
+): Promise<{ blob: Blob; filename: string }> {
+  const res = await fetch(
+    `/api/boards/${boardId}/export.huabu?include_media=${includeMedia ? "true" : "false"}`,
+  );
+  if (!res.ok) {
+    throw new Error(await extractErrorMessage(res));
+  }
+  const blob = await res.blob();
+  const filename =
+    parseContentDispositionFilename(res.headers.get("content-disposition")) ?? "workflow.huabu";
+  return { blob, filename };
+}
+
+export async function importBoardHuabu(
+  file: File,
+  targetBoardId?: number | null,
+): Promise<HuabuImportResponse> {
+  const form = new FormData();
+  form.append("file", file);
+  const qs =
+    typeof targetBoardId === "number" && targetBoardId > 0
+      ? `?target_board_id=${targetBoardId}`
+      : "";
+  const res = await fetch(`/api/boards/import-huabu${qs}`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) {
+    throw new Error(await extractErrorMessage(res));
+  }
+  return res.json() as Promise<HuabuImportResponse>;
+}
+
+export function instantiateBoardRecipe(payload: {
+  name: string;
+  nodes: RecipeNodeInput[];
+  edges: RecipeEdgeInput[];
+  target_board_id?: number | null;
+}): Promise<RecipeImportResponse> {
+  return api<RecipeImportResponse>("/api/boards/import-recipe", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}

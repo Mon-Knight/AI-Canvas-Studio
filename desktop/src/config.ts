@@ -17,6 +17,9 @@ export const FRONTEND_DIST_DIR = IS_PACKAGED
   : path.join(REPO_ROOT, "frontend", "dist");
 export const FRONTEND_DIST_INDEX = path.join(FRONTEND_DIST_DIR, "index.html");
 export const EXTENSION_DIR = path.join(RESOURCES_ROOT, "extension");
+export const APP_ICON_PATH = IS_PACKAGED
+  ? path.join(RESOURCES_ROOT, process.platform === "win32" ? "icon.ico" : "icon.png")
+  : path.join(REPO_ROOT, "desktop", "assets", process.platform === "win32" ? "icon.ico" : "icon.png");
 
 function resolveStorageDir(): string {
   const envDir = process.env.FLOWBOARD_STORAGE?.trim();

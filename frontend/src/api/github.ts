@@ -7,17 +7,26 @@
  * what we already learned instead of burning quota.
  */
 
+import packageJson from "../../package.json";
+
 const REPO = "Mon-Knight/AI-Canvas-Studio";
 const RELEASE_URL = `https://api.github.com/repos/${REPO}/releases/latest`;
 const CACHE_KEY = "flowboard.github.latestRelease.v2";
+const DISMISSED_KEY = "flowboard.github.dismissedReleaseTag.v1";
 // 1 hour — long enough that idle tabs don't hammer the API, short
 // enough that a freshly-cut release shows up the same session.
 const CACHE_TTL_MS = 60 * 60 * 1000;
 
+export const CURRENT_APP_VERSION: string = packageJson.version;
+
 export interface LatestRelease {
-  tagName: string;     // e.g. "v1.0.3"
-  htmlUrl: string;     // GitHub release page
+  tagName: string; // e.g. "v1.4.0"
+  name?: string;
+  notes?: string;
+  htmlUrl: string; // GitHub release page
   publishedAt: string; // ISO timestamp
+  setupUrl?: string | null;
+  portableUrl?: string | null;
 }
 
 interface CachedShape {
@@ -46,9 +55,27 @@ function writeCache(shape: CachedShape): void {
   }
 }
 
-export async function getLatestRelease(): Promise<LatestRelease | null> {
-  const cached = readCache();
-  if (cached) return cached.release;
+export function getDismissedReleaseTag(): string | null {
+  try {
+    return localStorage.getItem(DISMISSED_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function dismissReleaseTag(tag: string): void {
+  try {
+    localStorage.setItem(DISMISSED_KEY, tag);
+  } catch {
+    // localStorage disabled — non-fatal.
+  }
+}
+
+export async function getLatestRelease(forceRefresh = false): Promise<LatestRelease | null> {
+  if (!forceRefresh) {
+    const cached = readCache();
+    if (cached) return cached.release;
+  }
   try {
     const res = await fetch(RELEASE_URL, {
       headers: { Accept: "application/vnd.github+json" },
@@ -60,10 +87,28 @@ export async function getLatestRelease(): Promise<LatestRelease | null> {
       return null;
     }
     const body = await res.json();
+    const assets: Array<{ name?: unknown; browser_download_url?: unknown }> = Array.isArray(body.assets)
+      ? body.assets
+      : [];
+    const setupAsset = assets.find(
+      (a) => typeof a.name === "string" && a.name.toLowerCase().endsWith("-setup.exe"),
+    );
+    const portableAsset = assets.find(
+      (a) => typeof a.name === "string" && a.name.toLowerCase().endsWith("-portable.zip"),
+    );
+    const rawNotes = typeof body.body === "string" ? body.body.trim() : "";
     const release: LatestRelease = {
       tagName: typeof body.tag_name === "string" ? body.tag_name : "",
+      name: typeof body.name === "string" ? body.name : undefined,
+      notes: rawNotes ? rawNotes.slice(0, 240) : undefined,
       htmlUrl: typeof body.html_url === "string" ? body.html_url : "",
       publishedAt: typeof body.published_at === "string" ? body.published_at : "",
+      setupUrl:
+        typeof setupAsset?.browser_download_url === "string" ? setupAsset.browser_download_url : null,
+      portableUrl:
+        typeof portableAsset?.browser_download_url === "string"
+          ? portableAsset.browser_download_url
+          : null,
     };
     writeCache({ fetchedAt: Date.now(), release });
     return release;

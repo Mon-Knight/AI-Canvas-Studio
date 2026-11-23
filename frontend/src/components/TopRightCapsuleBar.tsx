@@ -16,6 +16,14 @@ import {
 } from "../api/client";
 import { useBoardStore } from "../store/board";
 import { displayNodeTitle } from "../constants/nodeLabels";
+import {
+  CURRENT_APP_VERSION,
+  dismissReleaseTag,
+  getDismissedReleaseTag,
+  getLatestRelease,
+  isNewerVersion,
+  type LatestRelease,
+} from "../api/github";
 import { useFlowAccounts } from "../store/flowAccounts";
 import { useDesktopFlowStore } from "../store/desktopFlow";
 import { useGenerationStore } from "../store/generation";
@@ -69,12 +77,15 @@ export function TopRightCapsuleBar() {
     };
   }, [refreshAccounts]);
   const activeAccount = accounts?.accounts.find((a) => a.id === accounts.active_account_id);
+  const exportCurrentBoardHuabu = useBoardStore((s) => s.exportCurrentBoardHuabu);
+  const importHuabuFile = useBoardStore((s) => s.importHuabuFile);
 
   // ── Popover states ──
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [activityOpen, setActivityOpen] = useState(false);
   const [detailId, setDetailId] = useState<number | null>(null);
+  const [exportOpen, setExportOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
@@ -83,14 +94,50 @@ export function TopRightCapsuleBar() {
   const [aiDialogOpen, setAiDialogOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
+  // ── In-canvas new release reminder ──
+  const [latestRelease, setLatestRelease] = useState<LatestRelease | null>(null);
+  const [dismissedTag, setDismissedTag] = useState<string | null>(() => getDismissedReleaseTag());
+  const [updateOpen, setUpdateOpen] = useState(false);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updateNotice, setUpdateNotice] = useState<string | null>(null);
+
   const searchWrapRef = useRef<HTMLDivElement>(null);
   const activityWrapRef = useRef<HTMLDivElement>(null);
+  const exportWrapRef = useRef<HTMLDivElement>(null);
+  const updateWrapRef = useRef<HTMLDivElement>(null);
   const moreWrapRef = useRef<HTMLDivElement>(null);
   const accountWrapRef = useRef<HTMLDivElement>(null);
   const accountButtonRef = useRef<HTMLButtonElement>(null);
+  const huabuInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    let alive = true;
+    const pollRelease = (force = false) => {
+      void getLatestRelease(force).then((rel) => {
+        if (alive && rel) setLatestRelease(rel);
+      });
+    };
+    pollRelease(false);
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") pollRelease(false);
+    }, 60 * 60 * 1000);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  const hasNewVersion = Boolean(
+    latestRelease?.tagName && isNewerVersion(latestRelease.tagName, CURRENT_APP_VERSION),
+  );
+  const showUpdateCapsule =
+    hasNewVersion && dismissedTag !== (latestRelease?.tagName ?? null);
+
   useEffect(() => {
     const open = () => {
       setSearchOpen(false);
+      setExportOpen(false);
+      setUpdateOpen(false);
       setMoreOpen(false);
       setActivityOpen(false);
       setAccountVisited(true);
@@ -111,6 +158,8 @@ export function TopRightCapsuleBar() {
       feed.markRead();
     }
     setSearchOpen(false);
+    setExportOpen(false);
+    setUpdateOpen(false);
     setMoreOpen(false);
     setAccountOpen(false);
     setActivityOpen((v) => !v);
@@ -224,11 +273,16 @@ export function TopRightCapsuleBar() {
 
   // ── Close popovers on outside click / ESC ──
   useEffect(() => {
-    if (!moreOpen) setShortcutsOpen(false);
+    if (!moreOpen) {
+      setShortcutsOpen(false);
+      setUpdateNotice(null);
+    }
   }, [moreOpen]);
 
   useEffect(() => {
-    if (!searchOpen && !activityOpen && !moreOpen && !accountOpen) return;
+    if (!searchOpen && !activityOpen && !exportOpen && !updateOpen && !moreOpen && !accountOpen) {
+      return;
+    }
     const onDown = (e: MouseEvent) => {
       const target = e.target as Node;
       if (searchOpen && searchWrapRef.current && !searchWrapRef.current.contains(target)) {
@@ -236,6 +290,12 @@ export function TopRightCapsuleBar() {
       }
       if (activityOpen && activityWrapRef.current && !activityWrapRef.current.contains(target)) {
         setActivityOpen(false);
+      }
+      if (exportOpen && exportWrapRef.current && !exportWrapRef.current.contains(target)) {
+        setExportOpen(false);
+      }
+      if (updateOpen && updateWrapRef.current && !updateWrapRef.current.contains(target)) {
+        setUpdateOpen(false);
       }
       if (moreOpen && moreWrapRef.current && !moreWrapRef.current.contains(target)) {
         setMoreOpen(false);
@@ -248,6 +308,8 @@ export function TopRightCapsuleBar() {
       if (e.key === "Escape") {
         setSearchOpen(false);
         setActivityOpen(false);
+        setExportOpen(false);
+        setUpdateOpen(false);
         setMoreOpen(false);
         if (accountOpen) {
           setAccountOpen(false);
@@ -261,7 +323,7 @@ export function TopRightCapsuleBar() {
       document.removeEventListener("pointerdown", onDown, true);
       document.removeEventListener("keydown", onEsc);
     };
-  }, [searchOpen, activityOpen, moreOpen, accountOpen]);
+  }, [searchOpen, activityOpen, exportOpen, updateOpen, moreOpen, accountOpen]);
 
   // ── Search filtering ──
   const filteredNodes = useMemo(() => {
@@ -434,6 +496,24 @@ export function TopRightCapsuleBar() {
 
   const badgeCount = feed.unreadCount > 9 ? "9+" : String(feed.unreadCount);
 
+  async function handleManualCheckUpdate() {
+    if (checkingUpdate) return;
+    setCheckingUpdate(true);
+    setUpdateNotice(null);
+    try {
+      const rel = await getLatestRelease(true);
+      if (rel) setLatestRelease(rel);
+      if (rel?.tagName && isNewerVersion(rel.tagName, CURRENT_APP_VERSION)) {
+        setMoreOpen(false);
+        setUpdateOpen(true);
+      } else {
+        setUpdateNotice("已是最新");
+      }
+    } finally {
+      setCheckingUpdate(false);
+    }
+  }
+
   return (
     <>
       <div className="jm-topright">
@@ -444,6 +524,8 @@ export function TopRightCapsuleBar() {
             className={`jm-capsule__icon-btn${searchOpen ? " jm-capsule__icon-btn--active" : ""}`}
             onClick={() => {
               setActivityOpen(false);
+              setExportOpen(false);
+              setUpdateOpen(false);
               setMoreOpen(false);
               setAccountOpen(false);
               setSearchOpen((v) => {
@@ -541,16 +623,166 @@ export function TopRightCapsuleBar() {
           )}
         </div>
 
-        {/* 胶囊 2：批量导出成片 */}
-        <button
-          type="button"
-          className="jm-capsule jm-capsule--btn"
-          onClick={handleExportBoardMedia}
-          title="批量下载当前画布所有已生成的图片与视频"
-        >
-          <IconShareExport size={14} />
-          <span>导出</span>
-        </button>
+        {/* 新版本自动提醒胶囊（仅检测到新 Release 且未忽略时展示） */}
+        {(showUpdateCapsule || updateOpen) && latestRelease && hasNewVersion && (
+          <div ref={updateWrapRef} className="jm-more-wrap">
+            <button
+              type="button"
+              className={`jm-capsule jm-capsule--btn jm-capsule--update${
+                updateOpen ? " jm-capsule--active" : ""
+              }`}
+              onClick={() => {
+                setSearchOpen(false);
+                setActivityOpen(false);
+                setExportOpen(false);
+                setMoreOpen(false);
+                setAccountOpen(false);
+                setUpdateOpen((v) => !v);
+              }}
+              title={`发现新版本 ${latestRelease.tagName}，点击查看更新`}
+            >
+              <span className="jm-update-dot" aria-hidden="true" />
+              <span>新版 {latestRelease.tagName}</span>
+            </button>
+
+            {updateOpen && (
+              <div className="jm-update-popover" role="dialog" aria-label="发现新版本">
+                <div className="jm-update-popover__head">
+                  <span className="jm-update-popover__badge">发现新版本</span>
+                  <span className="jm-update-popover__ver">
+                    v{CURRENT_APP_VERSION} → {latestRelease.tagName}
+                  </span>
+                </div>
+                {latestRelease.notes && (
+                  <p className="jm-update-popover__notes">{latestRelease.notes}</p>
+                )}
+                <div className="jm-update-popover__actions">
+                  <a
+                    className="jm-update-popover__primary"
+                    href={latestRelease.setupUrl || latestRelease.htmlUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={() => setUpdateOpen(false)}
+                  >
+                    {latestRelease.setupUrl ? "下载安装版 (.exe)" : "前往 GitHub 下载"}
+                  </a>
+                  {latestRelease.portableUrl && (
+                    <a
+                      className="jm-update-popover__secondary"
+                      href={latestRelease.portableUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      onClick={() => setUpdateOpen(false)}
+                    >
+                      便携版 (.zip)
+                    </a>
+                  )}
+                </div>
+                <div className="jm-update-popover__foot">
+                  <a
+                    className="jm-update-popover__link"
+                    href={latestRelease.htmlUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    查看更新说明
+                  </a>
+                  <button
+                    type="button"
+                    className="jm-update-popover__dismiss"
+                    onClick={() => {
+                      dismissReleaseTag(latestRelease.tagName);
+                      setDismissedTag(latestRelease.tagName);
+                      setUpdateOpen(false);
+                    }}
+                  >
+                    忽略此版本
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 胶囊 2：分享 .huabu 创作配方 & 批量导出成片 */}
+        <div ref={exportWrapRef} className="jm-more-wrap">
+          <button
+            type="button"
+            className={`jm-capsule jm-capsule--btn${exportOpen ? " jm-capsule--active" : ""}`}
+            onClick={() => {
+              setSearchOpen(false);
+              setActivityOpen(false);
+              setUpdateOpen(false);
+              setMoreOpen(false);
+              setAccountOpen(false);
+              setExportOpen((v) => !v);
+            }}
+            title="分享 / 导出 .huabu 创作配方或批量下载成片"
+          >
+            <IconShareExport size={14} />
+            <span>分享 / 导出</span>
+          </button>
+
+          {exportOpen && (
+            <div className="jm-more-menu jm-export-menu" role="menu" aria-label="分享与导出">
+              <button
+                type="button"
+                className="jm-more-menu__item"
+                onClick={() => {
+                  setExportOpen(false);
+                  void exportCurrentBoardHuabu(true);
+                }}
+              >
+                <span>导出 .huabu 配方包（含素材）</span>
+                <span className="jm-more-menu__sub">分享推荐</span>
+              </button>
+              <button
+                type="button"
+                className="jm-more-menu__item"
+                onClick={() => {
+                  setExportOpen(false);
+                  void exportCurrentBoardHuabu(false);
+                }}
+              >
+                <span>导出轻量纯参数配方</span>
+                <span className="jm-more-menu__sub">仅连线与词</span>
+              </button>
+              <button
+                type="button"
+                className="jm-more-menu__item"
+                onClick={() => huabuInputRef.current?.click()}
+              >
+                <span>导入 .huabu 画布包…</span>
+              </button>
+              <div className="jm-more-menu__divider" />
+              <button
+                type="button"
+                className="jm-more-menu__item"
+                onClick={() => {
+                  setExportOpen(false);
+                  handleExportBoardMedia();
+                }}
+              >
+                <span>批量下载当前成片</span>
+                <span className="jm-more-menu__sub">图/视频</span>
+              </button>
+            </div>
+          )}
+
+          <input
+            ref={huabuInputRef}
+            type="file"
+            accept=".huabu,application/zip"
+            hidden
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              e.target.value = "";
+              if (!file) return;
+              setExportOpen(false);
+              void importHuabuFile(file);
+            }}
+          />
+        </div>
 
         {/* 胶囊 3：更多与 AI 配置菜单 */}
         <div ref={moreWrapRef} className="jm-more-wrap">
@@ -560,6 +792,8 @@ export function TopRightCapsuleBar() {
             onClick={() => {
               setSearchOpen(false);
               setActivityOpen(false);
+              setExportOpen(false);
+              setUpdateOpen(false);
               setAccountOpen(false);
               setMoreOpen((v) => !v);
             }}
@@ -648,6 +882,28 @@ export function TopRightCapsuleBar() {
                   </div>
                 </div>
               )}
+              <div className="jm-more-menu__divider" />
+              <button
+                type="button"
+                className="jm-more-menu__item"
+                disabled={checkingUpdate}
+                onClick={() => void handleManualCheckUpdate()}
+              >
+                <span>版本与更新（v{CURRENT_APP_VERSION}）</span>
+                <span
+                  className={
+                    hasNewVersion
+                      ? "jm-more-menu__tag jm-more-menu__tag--warn"
+                      : "jm-more-menu__sub"
+                  }
+                >
+                  {checkingUpdate
+                    ? "检查中…"
+                    : hasNewVersion && latestRelease
+                      ? `新版 ${latestRelease.tagName}`
+                      : updateNotice || "检查更新"}
+                </span>
+              </button>
               <div className="jm-more-menu__divider" />
               <button
                 type="button"

@@ -1,4 +1,8 @@
-from fastapi import APIRouter, HTTPException, Query
+import re
+from typing import Any, Optional
+from urllib.parse import quote
+
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel
 from sqlmodel import delete as sql_delete, select
 
@@ -14,6 +18,13 @@ from flowboard.db.models import (
     Plan,
     PlanRevision,
     Request,
+)
+from flowboard.routes.local_only import local_origin
+from flowboard.services.huabu_archive import (
+    HuabuArchiveError,
+    export_board_huabu,
+    import_board_huabu,
+    instantiate_board_recipe,
 )
 # Shared rather than re-implemented: `utc_iso` is the single place that
 # knows SQLite hands datetimes back naive, and that a missing `Z` makes
@@ -62,6 +73,13 @@ class BoardCreate(BaseModel):
 
 class BoardUpdate(BaseModel):
     name: str
+
+
+class RecipeImportBody(BaseModel):
+    name: str
+    nodes: list[dict[str, Any]]
+    edges: list[dict[str, Any]] = []
+    target_board_id: Optional[int] = None
 
 
 @router.get("")
@@ -250,3 +268,58 @@ def delete_board(board_id: int):
         s.delete(board)
         s.commit()
         return {"deleted": board_id}
+
+
+@router.get("/{board_id}/export.huabu", dependencies=[Depends(local_origin)])
+def export_huabu(
+    board_id: int,
+    include_media: bool = Query(True, description="Include locally cached image/video assets"),
+):
+    """Export the board as a sanitized standalone ``.huabu`` workflow package."""
+    try:
+        archive_bytes, filename = export_board_huabu(board_id, include_media=include_media)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+    ascii_fallback = re.sub(r"[^A-Za-z0-9._-]+", "_", filename).strip("_.")
+    if not ascii_fallback:
+        ascii_fallback = "workflow.huabu"
+    elif not ascii_fallback.endswith(".huabu"):
+        ascii_fallback = f"{ascii_fallback}.huabu"
+    utf8_quoted = quote(filename, safe="")
+    return Response(
+        content=archive_bytes,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{ascii_fallback}"; filename*=UTF-8\'\'{utf8_quoted}'
+            )
+        },
+    )
+
+
+@router.post("/import-huabu", dependencies=[Depends(local_origin)])
+async def import_huabu(
+    file: UploadFile = File(...),
+    target_board_id: Optional[int] = Query(None),
+):
+    """Import a ``.huabu`` workflow archive into a new or empty board."""
+    raw = await file.read()
+    try:
+        return import_board_huabu(raw, target_board_id=target_board_id)
+    except HuabuArchiveError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/import-recipe", dependencies=[Depends(local_origin)])
+def import_recipe(body: RecipeImportBody):
+    """Instantiate a built-in starter workflow recipe atomically."""
+    try:
+        return instantiate_board_recipe(
+            name=body.name,
+            nodes_spec=body.nodes,
+            edges_spec=body.edges,
+            target_board_id=body.target_board_id,
+        )
+    except HuabuArchiveError as exc:
+        raise HTTPException(400, str(exc)) from exc

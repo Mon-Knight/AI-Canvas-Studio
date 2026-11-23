@@ -287,6 +287,14 @@ async def _maybe_upscale_video_slots(
     return positional_ids, list(new_entries_map.values()), actual_res, warning
 
 
+def _is_foreign_media_error(err: object) -> bool:
+    """Return True when Flow rejects an upstream mediaId as unknown in the current project."""
+    if not err:
+        return False
+    text = str(err).lower()
+    return any(tok in text for tok in ("failed: [5]", "failed: [3]", "404", "not found"))
+
+
 async def _handle_gen_image(params: dict) -> tuple[dict, Optional[str]]:
     from flowboard.services.flow_sdk import is_valid_project_id
 
@@ -377,7 +385,8 @@ async def _handle_gen_image(params: dict) -> tuple[dict, Optional[str]]:
     image_model = _resolve_effective_image_model(params)
     raw_seed = params.get("seed")
     seed = raw_seed if isinstance(raw_seed, int) and not isinstance(raw_seed, bool) and raw_seed >= 0 else None
-    resp = await get_flow_sdk().gen_image(
+    sdk = get_flow_sdk()
+    resp = await sdk.gen_image(
         prompt=prompt.strip(),
         project_id=project_id,
         aspect_ratio=aspect,
@@ -388,6 +397,30 @@ async def _handle_gen_image(params: dict) -> tuple[dict, Optional[str]]:
         image_model=image_model,
         seed=seed,
     )
+    if (
+        resp.get("error")
+        and ref_media_ids
+        and _is_foreign_media_error(resp.get("error"))
+        and any(media_service.cached_path(mid) is not None for mid in ref_media_ids)
+    ):
+        from flowboard.services.media_project_sync import MediaSyncError, ensure_media_ids_in_project
+
+        try:
+            synced_refs, _failures = await ensure_media_ids_in_project(ref_media_ids, project_id)
+            if synced_refs:
+                resp = await sdk.gen_image(
+                    prompt=prompt.strip(),
+                    project_id=project_id,
+                    aspect_ratio=aspect,
+                    paygate_tier=tier,
+                    ref_media_ids=synced_refs,
+                    variant_count=variant_count,
+                    prompts=per_variant_prompts,
+                    image_model=image_model,
+                    seed=seed,
+                )
+        except MediaSyncError:
+            pass
     if resp.get("error"):
         return resp, str(resp["error"])[:200]
     # Flow returns signed fifeUrls directly in the response — persist them
@@ -478,12 +511,15 @@ async def _handle_gen_video(params: dict) -> tuple[dict, Optional[str]]:
     native_res = "720p"
 
     sdk = get_flow_sdk()
+    clean_start_id = (
+        start_media_id.strip()
+        if isinstance(start_media_id, str) and start_media_id.strip()
+        else None
+    )
     dispatch = await sdk.gen_video(
         prompt=prompt.strip(),
         project_id=project_id,
-        start_media_id=start_media_id.strip()
-        if isinstance(start_media_id, str) and start_media_id.strip()
-        else None,
+        start_media_id=clean_start_id,
         start_media_ids=start_media_ids,
         aspect_ratio=aspect,
         paygate_tier=tier,
@@ -491,6 +527,38 @@ async def _handle_gen_video(params: dict) -> tuple[dict, Optional[str]]:
         variant_count=variant_count,
         resolution=native_res,
     )
+    if dispatch.get("error") and _is_foreign_media_error(dispatch.get("error")):
+        check_ids = list(start_media_ids or ([clean_start_id] if clean_start_id else []))
+        if check_ids and any(media_service.cached_path(mid) is not None for mid in check_ids):
+            from flowboard.services.media_project_sync import (
+                MediaSyncError,
+                ensure_media_ids_in_project,
+                ensure_media_in_project,
+            )
+
+            try:
+                synced_single = (
+                    await ensure_media_in_project(clean_start_id, project_id)
+                    if clean_start_id and media_service.cached_path(clean_start_id) is not None
+                    else clean_start_id
+                )
+                synced_multi = start_media_ids
+                if start_media_ids:
+                    synced_multi, _ = await ensure_media_ids_in_project(start_media_ids, project_id)
+                if synced_single != clean_start_id or (synced_multi and synced_multi != start_media_ids):
+                    dispatch = await sdk.gen_video(
+                        prompt=prompt.strip(),
+                        project_id=project_id,
+                        start_media_id=synced_single,
+                        start_media_ids=synced_multi or None,
+                        aspect_ratio=aspect,
+                        paygate_tier=tier,
+                        video_quality=video_quality,
+                        variant_count=variant_count,
+                        resolution=native_res,
+                    )
+            except MediaSyncError:
+                pass
     if dispatch.get("error"):
         return dispatch, str(dispatch["error"])[:200]
 
@@ -727,16 +795,49 @@ async def _handle_edit_image(params: dict) -> tuple[dict, Optional[str]]:
     raw_seed = params.get("seed")
     seed = raw_seed if isinstance(raw_seed, int) and not isinstance(raw_seed, bool) and raw_seed >= 0 else None
 
-    resp = await get_flow_sdk().edit_image(
+    sdk = get_flow_sdk()
+    clean_source_id = source_media_id.strip()
+    resp = await sdk.edit_image(
         prompt=prompt.strip(),
         project_id=project_id,
-        source_media_id=source_media_id.strip(),
+        source_media_id=clean_source_id,
         ref_media_ids=ref_ids,
         aspect_ratio=aspect,
         paygate_tier=tier,
         image_model=image_model,
         seed=seed,
     )
+    if resp.get("error") and _is_foreign_media_error(resp.get("error")):
+        check_ids = [clean_source_id, *(ref_ids or [])]
+        if any(media_service.cached_path(mid) is not None for mid in check_ids):
+            from flowboard.services.media_project_sync import (
+                MediaSyncError,
+                ensure_media_ids_in_project,
+                ensure_media_in_project,
+            )
+
+            try:
+                synced_source = (
+                    await ensure_media_in_project(clean_source_id, project_id)
+                    if media_service.cached_path(clean_source_id) is not None
+                    else clean_source_id
+                )
+                synced_refs = ref_ids
+                if ref_ids:
+                    synced_refs, _ = await ensure_media_ids_in_project(ref_ids, project_id)
+                if synced_source != clean_source_id or synced_refs != ref_ids:
+                    resp = await sdk.edit_image(
+                        prompt=prompt.strip(),
+                        project_id=project_id,
+                        source_media_id=synced_source,
+                        ref_media_ids=synced_refs,
+                        aspect_ratio=aspect,
+                        paygate_tier=tier,
+                        image_model=image_model,
+                        seed=seed,
+                    )
+            except MediaSyncError:
+                pass
     if resp.get("error"):
         return resp, str(resp["error"])[:200]
     entries_with_urls = [

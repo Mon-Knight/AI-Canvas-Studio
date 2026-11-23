@@ -59,4 +59,5 @@ jobs:
             agent/tests/test_llm_routes.py \
             agent/tests/test_chat_agent.py \
             agent/tests/test_chat_analysis.py \
+            agent/tests/test_huabu_archive.py \
             -q

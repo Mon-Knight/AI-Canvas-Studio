@@ -5,6 +5,7 @@ import path from "node:path";
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { AgentRunner } from "./agent-runner";
 import {
+  APP_ICON_PATH,
   cleanChromeUserAgent,
   E2E_CONTROL_PORT,
   ELECTRON_USER_DATA,
@@ -354,7 +355,8 @@ async function boot(): Promise<void> {
     show: !E2E_CONTROL_PORT,
     backgroundColor: "#09090b",
     autoHideMenuBar: true,
-    title: "画布工作台 · Flowboard",
+    title: "AI Canvas Studio · 无限画布创作工作台",
+    ...(fs.existsSync(APP_ICON_PATH) ? { icon: APP_ICON_PATH } : {}),
     webPreferences: {
       preload: canvasPreloadPath,
       contextIsolation: true,

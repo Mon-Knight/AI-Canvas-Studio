@@ -18,7 +18,12 @@ import {
   estimateVideoCreditCost,
   resolveVideoSelectionId,
 } from "../constants/models";
-import { getLatestRelease, isNewerVersion, type LatestRelease } from "../api/github";
+import {
+  CURRENT_APP_VERSION as APP_VERSION,
+  getLatestRelease,
+  isNewerVersion,
+  type LatestRelease,
+} from "../api/github";
 import {
   getPinnedFlowProject,
   setPinnedFlowProject,
@@ -26,10 +31,8 @@ import {
 } from "../api/client";
 import { useFlowAccounts } from "../store/flowAccounts";
 import { FlowAccountsSection } from "./FlowAccountsSection";
-import packageJson from "../../package.json";
 import "./SettingsPanel.css";
 
-const APP_VERSION: string = packageJson.version;
 const UUID_ANYWHERE =
   /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/;
 
