@@ -248,6 +248,7 @@ def test_outbound_httpx_kwargs_normalizes_windows_registry_https_loopback_proxy(
         media_service.urllib.request,
         "getproxies_registry",
         lambda: {"http": "http://127.0.0.1:7897", "https": "https://127.0.0.1:7897"},
+        raising=False,
     )
     kwargs = media_service._outbound_httpx_kwargs()
     assert kwargs["proxy"] == "http://127.0.0.1:7897"
