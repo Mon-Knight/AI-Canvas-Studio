@@ -208,7 +208,7 @@ if ($HashLines.Count -gt 0) {
     [System.IO.File]::WriteAllLines((Join-Path $ReleaseDir "SHA256SUMS.txt"), $HashLines, [System.Text.UTF8Encoding]::new($false))
 }
 
-Write-Host "==> Packaging complete. Output files in $ReleaseDir:"
+Write-Host "==> Packaging complete. Output files in ${ReleaseDir}:"
 Get-ChildItem -Path $ReleaseDir -File | ForEach-Object {
     Write-Host ("  - {0} ({1:N2} MB)" -f $_.Name, ($_.Length / 1MB))
 }
