@@ -9,7 +9,7 @@ on:
       version:
         description: "Release version (without v prefix)"
         required: true
-        default: "0.9.0"
+        default: "0.9.1"
       publish_release:
         description: "Publish artifacts to GitHub Releases"
         type: boolean
@@ -45,7 +45,7 @@ jobs:
           } else {
             $ver = "${{ github.event.inputs.version }}"
           }
-          if (-not $ver) { $ver = "0.9.0" }
+          if (-not $ver) { $ver = "0.9.1" }
           Add-Content -Path $env:GITHUB_ENV -Value "APP_VERSION=$ver"
 
       - name: Ensure Inno Setup 6 is installed

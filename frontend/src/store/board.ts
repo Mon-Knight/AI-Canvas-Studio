@@ -29,10 +29,22 @@ export type NodeStatus = "idle" | "queued" | "running" | "done" | "error";
 //   2x2 → 4 panels (square)
 //   2x3 → 6 panels (rectangular: 2×3 on landscape, 3×2 on portrait)
 //   2x4 → 8 panels (rectangular: 2×4 on landscape, 4×2 on portrait)
+//   3x3 → 9 panels (3×3 nine-grid multi-camera / continuous storyboard)
 // The rows/cols mapping happens at prompt-build time based on the
 // node's aspectRatio — see resolveStoryboardLayout in
 // frontend/src/lib/storyboardPrompt.ts.
-export type StoryboardGrid = "2x2" | "2x3" | "2x4";
+export type StoryboardGrid = "2x2" | "2x3" | "2x4" | "3x3";
+export type StoryboardMode = "narrative" | "multicam";
+
+export interface NodeHistoryEntry {
+  mediaId: string;
+  mediaIds?: (string | null)[];
+  prompt?: string;
+  renderedAt?: string;
+  aspectRatio?: string;
+  imageModel?: string;
+  videoQuality?: string;
+}
 
 export interface FlowboardNodeData extends Record<string, unknown> {
   type: NodeType;
@@ -108,6 +120,8 @@ export interface FlowboardNodeData extends Record<string, unknown> {
   // missing (true for fresh nodes + legacy pre-1.2.15 nodes whose
   // multi-shot data is now ignored).
   storyboardGrid?: StoryboardGrid;
+  storyboardMode?: StoryboardMode;
+  history?: NodeHistoryEntry[];
   /** 视频节点提取帧缓存：key 为 `${videoMediaId}:last` / `${videoMediaId}:first`，value 为上传后的图片 media_id */
   videoFrameCache?: Record<string, string>;
 }
@@ -210,6 +224,10 @@ function nodeFromDto(n: NodeDTO): FlowNode {
       charVibe: n.data["charVibe"] as string | undefined,
       charGender: n.data["charGender"] as string | undefined,
       storyboardGrid: n.data["storyboardGrid"] as StoryboardGrid | undefined,
+      storyboardMode: n.data["storyboardMode"] as StoryboardMode | undefined,
+      history: Array.isArray(n.data["history"])
+        ? (n.data["history"] as NodeHistoryEntry[])
+        : undefined,
       error: n.data["error"] as string | undefined,
     },
   };

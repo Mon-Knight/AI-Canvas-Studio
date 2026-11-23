@@ -34,9 +34,24 @@ async def create_request(body: RequestCreate, request: HTTPRequest):
             # Reject obsolete clients instead of charging an unexpected provider.
             raise HTTPException(422, video_routing.WRONG_ENGINE)
     if video:
-        valid_fields = {"media_provider", "project_id", "prompt", "paygate_tier", "aspect_ratio",
-                        "video_quality", "start_media_id", "start_media_ids", "startMediaId",
-                        "duration_s", "ref_media_ids", "variant_count", "resolution", "omni_version"}
+        valid_fields = {
+            "media_provider",
+            "project_id",
+            "prompt",
+            "paygate_tier",
+            "aspect_ratio",
+            "video_quality",
+            "start_media_id",
+            "start_media_ids",
+            "startMediaId",
+            "end_media_id",
+            "endMediaId",
+            "duration_s",
+            "ref_media_ids",
+            "variant_count",
+            "resolution",
+            "omni_version",
+        }
         if params.keys() - valid_fields:
             raise HTTPException(422, "视频任务包含不支持的字段；请刷新画布后重试。")
         # No await between validating the active binding and committing the row:

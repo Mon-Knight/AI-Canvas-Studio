@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
 
 from flowboard.db import get_session
-from flowboard.db.models import Request
+from flowboard.db.models import Node, Request
 from flowboard.node_mirror import stage_node_patch
 from flowboard.request_types import MEDIA_PRODUCING_TYPES
 from flowboard import config
@@ -1087,12 +1087,334 @@ async def _handle_gen_video_omni(params: dict) -> tuple[dict, Optional[str]]:
     return out_result, None
 
 
+async def _poll_and_ingest_video_ops(
+    sdk,
+    *,
+    dispatch: dict[str, Any],
+    project_id: str,
+    aspect: str,
+    requested_res: str,
+    default_base_res: str,
+    rid: Optional[int],
+    extra_result: Optional[dict[str, Any]] = None,
+) -> tuple[dict, Optional[str]]:
+    """Shared poll + URL/inline ingest + post-upscale pipeline for batch video RPCs."""
+    op_names = dispatch.get("operation_names") or []
+    if not op_names:
+        return dispatch, "no_operations_returned"
+    workflows = dispatch.get("workflows") or None
+
+    poll_attempts = 0
+    last_poll: dict = {}
+    done_by_name: dict[str, bool] = {name: False for name in op_names}
+    entry_by_name: dict[str, dict] = {}
+    op_errors: dict[str, str] = {}
+
+    while (
+        poll_attempts < VIDEO_POLL_MAX_CYCLES
+        and not all(done_by_name.values())
+    ):
+        await asyncio.sleep(VIDEO_POLL_INTERVAL_S)
+        poll_attempts += 1
+        if _is_request_canceled(rid):
+            return (
+                {
+                    "raw_dispatch": dispatch,
+                    "last_poll": last_poll,
+                    "operation_names": op_names,
+                    "done": done_by_name,
+                    "canceled": True,
+                },
+                "canceled",
+            )
+        last_poll = await sdk.check_async(op_names, workflows=workflows)
+        if last_poll.get("error"):
+            continue
+        for op in last_poll.get("operations") or []:
+            if not isinstance(op, dict):
+                continue
+            name = op.get("name")
+            if not isinstance(name, str) or done_by_name.get(name, False):
+                continue
+            err = op.get("error")
+            if isinstance(err, str) and err:
+                done_by_name[name] = True
+                op_errors[name] = err
+                continue
+            if op.get("done"):
+                done_by_name[name] = True
+                for e in op.get("media_entries") or []:
+                    if isinstance(e, dict) and e.get("media_id"):
+                        entry_by_name[name] = e
+                        break
+
+    for name in op_names:
+        if not done_by_name.get(name) and name not in op_errors:
+            op_errors[name] = "timeout_waiting_video"
+
+    positional_ids: list[Optional[str]] = []
+    slot_errors: list[Optional[str]] = []
+    succeeded_entries: list[dict] = []
+    for name in op_names:
+        e = entry_by_name.get(name)
+        if isinstance(e, dict) and isinstance(e.get("media_id"), str):
+            positional_ids.append(e["media_id"])
+            succeeded_entries.append(e)
+            slot_errors.append(None)
+        else:
+            positional_ids.append(None)
+            slot_errors.append(op_errors.get(name))
+
+    if not any(positional_ids):
+        first_err = next(iter(op_errors.values()), "timeout_waiting_video")
+        return (
+            {
+                "raw_dispatch": dispatch,
+                "last_poll": last_poll,
+                "operation_names": op_names,
+                "done": done_by_name,
+                "op_errors": op_errors,
+            },
+            first_err,
+        )
+
+    entries_with_urls = [
+        e for e in succeeded_entries if isinstance(e, dict) and e.get("url")
+    ]
+    if entries_with_urls:
+        try:
+            media_service.ingest_urls(entries_with_urls)
+        except Exception:  # noqa: BLE001
+            logger.exception("auto-ingest from video response failed")
+
+    for entry in succeeded_entries:
+        if not isinstance(entry, dict):
+            continue
+        encoded = entry.get("encoded_video")
+        mid = entry.get("media_id")
+        if not isinstance(encoded, str) or not isinstance(mid, str):
+            continue
+        try:
+            import base64 as _b64
+
+            media_service.ingest_inline_bytes(
+                mid,
+                _b64.b64decode(encoded, validate=False),
+                kind="video",
+                mime="video/mp4",
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("inline ingest from video poll failed for %s", mid)
+
+    positional_ids, succeeded_entries, actual_res, upscale_warning = await _maybe_upscale_video_slots(
+        sdk,
+        positional_ids=positional_ids,
+        succeeded_entries=succeeded_entries,
+        project_id=project_id,
+        aspect_ratio=aspect,
+        requested_resolution=requested_res,
+        base_resolution=str(dispatch.get("resolution") or default_base_res),
+        rid=rid,
+    )
+
+    out_result: dict[str, Any] = {
+        "raw_dispatch": dispatch,
+        "last_poll": last_poll,
+        "operation_names": op_names,
+        "media_ids": positional_ids,
+        "media_entries": succeeded_entries,
+        "op_errors": op_errors,
+        "slot_errors": slot_errors,
+        "resolution": actual_res,
+    }
+    if extra_result:
+        out_result.update(extra_result)
+    if upscale_warning:
+        out_result["upscale_warning"] = upscale_warning
+    return out_result, None
+
+
+async def _handle_gen_video_first_last(params: dict) -> tuple[dict, Optional[str]]:
+    """Native Omni first+last frame locked video generation (RPC ``nprQif``)."""
+    from flowboard.services.flow_sdk import is_valid_project_id
+    from flowboard.services.media_project_sync import (
+        MediaSyncError,
+        ensure_media_ids_in_project,
+    )
+
+    prompt = params.get("prompt")
+    project_id = params.get("project_id")
+    start_media_id = params.get("start_media_id") or params.get("startMediaId")
+    end_media_id = params.get("end_media_id") or params.get("endMediaId")
+    if not isinstance(prompt, str) or not prompt.strip():
+        return {}, "missing_prompt"
+    if params.get("media_provider", "flow") != "flow":
+        return {}, video_routing.WRONG_ENGINE
+    if not isinstance(project_id, str) or not project_id.strip():
+        return {}, "missing_project_id"
+    project_id = project_id.strip()
+    if not is_valid_project_id(project_id):
+        return {}, "invalid_project_id"
+    if (
+        not isinstance(start_media_id, str)
+        or not start_media_id.strip()
+        or not isinstance(end_media_id, str)
+        or not end_media_id.strip()
+    ):
+        return {}, "missing_first_last_media_id"
+
+    raw_dur = params.get("duration_s")
+    dur = (
+        min((4, 6, 8, 10), key=lambda d: abs(d - raw_dur))
+        if isinstance(raw_dur, int) and not isinstance(raw_dur, bool)
+        else 8
+    )
+    raw_count = params.get("variant_count")
+    variant_count = (
+        raw_count
+        if isinstance(raw_count, int) and not isinstance(raw_count, bool) and raw_count > 0
+        else 1
+    )
+    requested_res = str(params.get("resolution") or "720p").strip()
+    native_res = "360p" if requested_res.lower() == "360p" else "720p"
+    aspect = params.get("aspect_ratio") or "VIDEO_ASPECT_RATIO_LANDSCAPE"
+    try:
+        tier = resolve_paygate_tier(
+            params.get("paygate_tier") or flow_client.paygate_tier
+        )
+    except ValueError as exc:
+        return {}, str(exc)[:200]
+
+    clean_start = start_media_id.strip()
+    clean_end = end_media_id.strip()
+    sdk = get_flow_sdk()
+    dispatch = await sdk.gen_video_first_last(
+        prompt=prompt.strip(),
+        project_id=project_id,
+        start_media_id=clean_start,
+        end_media_id=clean_end,
+        duration_s=dur,
+        aspect_ratio=aspect,
+        paygate_tier=tier,
+        resolution=native_res,
+        variant_count=variant_count,
+    )
+    if dispatch.get("error") and _is_foreign_media_error(dispatch.get("error")):
+        if any(media_service.cached_path(mid) is not None for mid in (clean_start, clean_end)):
+            from flowboard.services.media_project_sync import (
+                MediaSyncError,
+                ensure_media_in_project,
+            )
+
+            try:
+                synced_start = (
+                    await ensure_media_in_project(clean_start, project_id)
+                    if media_service.cached_path(clean_start) is not None
+                    else clean_start
+                )
+                synced_end = (
+                    await ensure_media_in_project(clean_end, project_id)
+                    if media_service.cached_path(clean_end) is not None
+                    else clean_end
+                )
+                if synced_start != clean_start or synced_end != clean_end:
+                    dispatch = await sdk.gen_video_first_last(
+                        prompt=prompt.strip(),
+                        project_id=project_id,
+                        start_media_id=synced_start,
+                        end_media_id=synced_end,
+                        duration_s=dur,
+                        aspect_ratio=aspect,
+                        paygate_tier=tier,
+                        resolution=native_res,
+                        variant_count=variant_count,
+                    )
+            except MediaSyncError:
+                pass
+    if dispatch.get("error"):
+        return dispatch, str(dispatch["error"])[:200]
+
+    return await _poll_and_ingest_video_ops(
+        sdk,
+        dispatch=dispatch,
+        project_id=project_id,
+        aspect=aspect,
+        requested_res=requested_res,
+        default_base_res=native_res,
+        rid=params.get("__request_id"),
+        extra_result={"duration_s": dispatch.get("duration_s") or dur},
+    )
+
+
+async def _handle_gen_video_text(params: dict) -> tuple[dict, Optional[str]]:
+    """Native text-to-video generation without reference images (RPC ``YhhmEf``)."""
+    from flowboard.services.flow_sdk import is_valid_project_id
+
+    prompt = params.get("prompt")
+    project_id = params.get("project_id")
+    if not isinstance(prompt, str) or not prompt.strip():
+        return {}, "missing_prompt"
+    if params.get("media_provider", "flow") != "flow":
+        return {}, video_routing.WRONG_ENGINE
+    if not isinstance(project_id, str) or not project_id.strip():
+        return {}, "missing_project_id"
+    project_id = project_id.strip()
+    if not is_valid_project_id(project_id):
+        return {}, "invalid_project_id"
+
+    raw_dur = params.get("duration_s")
+    dur = (
+        8
+        if isinstance(raw_dur, int) and not isinstance(raw_dur, bool) and raw_dur >= 7
+        else 4
+    )
+    raw_count = params.get("variant_count")
+    variant_count = (
+        raw_count
+        if isinstance(raw_count, int) and not isinstance(raw_count, bool) and raw_count > 0
+        else 1
+    )
+    requested_res = str(params.get("resolution") or "720p").strip()
+    aspect = params.get("aspect_ratio") or "VIDEO_ASPECT_RATIO_LANDSCAPE"
+    try:
+        tier = resolve_paygate_tier(
+            params.get("paygate_tier") or flow_client.paygate_tier
+        )
+    except ValueError as exc:
+        return {}, str(exc)[:200]
+
+    sdk = get_flow_sdk()
+    dispatch = await sdk.gen_video_text(
+        prompt=prompt.strip(),
+        project_id=project_id,
+        duration_s=dur,
+        aspect_ratio=aspect,
+        paygate_tier=tier,
+        variant_count=variant_count,
+    )
+    if dispatch.get("error"):
+        return dispatch, str(dispatch["error"])[:200]
+
+    return await _poll_and_ingest_video_ops(
+        sdk,
+        dispatch=dispatch,
+        project_id=project_id,
+        aspect=aspect,
+        requested_res=requested_res,
+        default_base_res="720p",
+        rid=params.get("__request_id"),
+        extra_result={"duration_s": dispatch.get("duration_s") or dur},
+    )
+
+
 _DEFAULT_HANDLERS: dict[str, Handler] = {
     "proxy": _handle_proxy,
     "create_project": _handle_create_project,
     "gen_image": _handle_gen_image,
     "gen_video": _handle_gen_video,
     "gen_video_omni": _handle_gen_video_omni,
+    "gen_video_first_last": _handle_gen_video_first_last,
+    "gen_video_text": _handle_gen_video_text,
     "edit_image": _handle_edit_image,
 }
 
@@ -1156,7 +1478,11 @@ def _has_media(result: dict) -> bool:
     return any(isinstance(m, str) and m for m in media_ids)
 
 
-def _node_completion_patch(req: Request, result: dict) -> dict:
+def _node_completion_patch(
+    req: Request,
+    result: dict,
+    existing_data: Optional[dict] = None,
+) -> dict:
     """Build the `Node.data` delta for a successfully completed request.
 
     Deliberately mirrors the payload `generation.ts` PATCHes on `done` so
@@ -1178,9 +1504,10 @@ def _node_completion_patch(req: Request, result: dict) -> dict:
         # node is currently showing, so write nothing at all.
         return {}
 
+    rendered_at = _iso_utc_now()
     patch: dict = {
         "mediaIds": media_ids,
-        "renderedAt": _iso_utc_now(),
+        "renderedAt": rendered_at,
         # A stale "✨ …" brief from a previous run would otherwise render
         # underneath a fresh image as if it described it. The frontend
         # clears it with the same `null` sentinel on every completion.
@@ -1224,7 +1551,7 @@ def _node_completion_patch(req: Request, result: dict) -> dict:
     # panel can say "Banana Pro" / "Quality" instead of guessing from the
     # user's *current* settings. Read from the dispatched params, which are
     # what the request was submitted with.
-    if req.type in ("gen_video", "gen_video_omni"):
+    if req.type in video_routing.TYPES:
         patch["mediaProvider"] = params.get("media_provider") or "flow"
         patch["durationSeconds"] = result.get("duration_s") or params.get("duration_s")
     res_label = result.get("resolution") or params.get("resolution") or params.get("image_resolution")
@@ -1248,6 +1575,43 @@ def _node_completion_patch(req: Request, result: dict) -> dict:
             patch["videoQuality"] = (
                 f"omni_1.2_{duration_s}s" if omni_ver == "1.2" else f"abra_r2v_{duration_s}s"
             )
+    elif req.type == "gen_video_first_last":
+        dur = patch.get("durationSeconds") or 8
+        patch["videoQuality"] = f"first_last_{dur}s"
+    elif req.type == "gen_video_text":
+        dur = patch.get("durationSeconds") or 4
+        patch["videoQuality"] = f"t2v_{dur}s"
+
+    # Append non-destructive per-node version history (keeps up to last 10 versions).
+    if media_id:
+        prior = existing_data if isinstance(existing_data, dict) else {}
+        history = [
+            dict(item)
+            for item in (prior.get("history") or [])
+            if isinstance(item, dict) and isinstance(item.get("mediaId"), str) and item.get("mediaId")
+        ]
+        prev_mid = prior.get("mediaId")
+        if isinstance(prev_mid, str) and prev_mid and not any(h.get("mediaId") == prev_mid for h in history):
+            history.append({
+                "mediaId": prev_mid,
+                "mediaIds": prior.get("mediaIds") if isinstance(prior.get("mediaIds"), list) else [prev_mid],
+                "prompt": prior.get("prompt"),
+                "renderedAt": prior.get("renderedAt"),
+                "aspectRatio": prior.get("aspectRatio"),
+                "imageModel": prior.get("imageModel"),
+                "videoQuality": prior.get("videoQuality"),
+            })
+        history = [h for h in history if h.get("mediaId") != media_id]
+        history.append({
+            "mediaId": media_id,
+            "mediaIds": media_ids,
+            "prompt": patch.get("prompt") or prior.get("prompt"),
+            "renderedAt": rendered_at,
+            "aspectRatio": patch.get("aspectRatio") or prior.get("aspectRatio"),
+            "imageModel": patch.get("imageModel"),
+            "videoQuality": patch.get("videoQuality"),
+        })
+        patch["history"] = history[-10:]
     return patch
 
 
@@ -1529,7 +1893,15 @@ class WorkerController:
                 node_patch: Optional[dict] = None
                 if not err:
                     try:
-                        node_patch = _node_completion_patch(req, result_dict)
+                        existing_data: Optional[dict] = None
+                        if req.node_id is not None:
+                            with s.no_autoflush:
+                                existing_node = s.get(Node, req.node_id)
+                                if existing_node is not None and isinstance(existing_node.data, dict):
+                                    existing_data = dict(existing_node.data)
+                        node_patch = _node_completion_patch(
+                            req, result_dict, existing_data=existing_data
+                        )
                     except Exception:  # noqa: BLE001
                         logger.exception(
                             "worker: node completion patch failed for rid=%s", rid
@@ -1549,7 +1921,7 @@ class WorkerController:
                 )
                 if (
                     not err
-                    and req.type in ("gen_image", "edit_image", "gen_video", "gen_video_omni")
+                    and req.type in MEDIA_PRODUCING_TYPES
                     and flow_client.connected
                 ):
                     asyncio.create_task(flow_accounts.sync_active_credits(force=True))

@@ -9,8 +9,20 @@ import { useReferencesStore } from "../store/references";
 import { pickImageFiles } from "../lib/filePicker";
 import {
   normaliseStoryboardGrid,
+  normaliseStoryboardMode,
   resolveStoryboardLayout,
 } from "../lib/storyboardPrompt";
+import { splitStoryboardToShotNodes } from "../lib/storyboardSplit";
+import {
+  CAMERA_ANGLE_PRESETS,
+  LIGHTING_PRESETS,
+  deriveCameraAngle,
+  deriveNextScene,
+  derivePrevScene,
+  relightImageNode,
+  switchNodeHistoryVersion,
+  upscaleImageNode2K,
+} from "../lib/quickDerive";
 
 import {
   IconImage, IconNote, IconStoryboard, IconSubject, IconText, IconVideo, IconVisualAsset,
@@ -1068,21 +1080,59 @@ function EditableTextBody({
 // the active layout.
 
 function StoryboardBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }) {
-  // Show the concrete rows × cols (post-orientation flip), not the
-  // user-picker key. So a node with grid="2x3" on a portrait composite
-  // shows "3×2" — matches what Flow actually rendered.
   const g = normaliseStoryboardGrid(data.storyboardGrid);
-  const { rows, cols } = resolveStoryboardLayout(g, data.aspectRatio);
+  const mode = normaliseStoryboardMode(data.storyboardMode);
+  const { rows, cols, total } = resolveStoryboardLayout(g, data.aspectRatio);
   const label = `${rows}×${cols}`;
+  const isProcessing = data.status === "queued" || data.status === "running";
+  const hasMedia =
+    Boolean(data.mediaId) ||
+    Boolean(data.mediaIds?.some((m) => typeof m === "string" && m.length > 0));
+  const [splitting, setSplitting] = useState<{ done: number; total: number } | null>(null);
+  const [splitError, setSplitError] = useState<string | null>(null);
+
+  async function handleSplit(e: React.MouseEvent) {
+    e.stopPropagation();
+    if (splitting || isProcessing || !hasMedia) return;
+    setSplitError(null);
+    setSplitting({ done: 0, total });
+    try {
+      await splitStoryboardToShotNodes(rfId, 0, (done, sum) => {
+        setSplitting({ done, total: sum });
+      });
+    } catch (err) {
+      setSplitError(err instanceof Error ? err.message : "宫格切分失败");
+    } finally {
+      setSplitting(null);
+    }
+  }
+
   return (
     <div className="storyboard-wrap">
       <span
         className="storyboard-grid-badge"
-        title={`分镜布局：${label}（${rows * cols} 格）`}
+        title={`分镜布局：${label}（${total} 格 · ${mode === "multicam" ? "同场多机位" : "剧情连贯"}）`}
       >
         {label}
+        {mode === "multicam" ? " · 多机位" : ""}
       </span>
       <ImageBody rfId={rfId} data={data} />
+      {hasMedia && !isProcessing && (
+        <div className="jm-storyboard-split-bar nodrag">
+          <button
+            type="button"
+            className="visual-asset__action jm-storyboard-split-btn"
+            onClick={(e) => void handleSplit(e)}
+            disabled={splitting !== null}
+            title={`将 ${label} 故事板无损切分为 ${total} 个独立图片节点并自动上传注册到当前 Flow 项目`}
+          >
+            {splitting
+              ? `✂️ 切分注册中 ${splitting.done}/${splitting.total}…`
+              : `✂️ 一键切分 ${total} 个独立镜头`}
+          </button>
+          {splitError && <p className="character-drop__error" role="alert">{splitError}</p>}
+        </div>
+      )}
     </div>
   );
 }
@@ -1129,6 +1179,40 @@ export function NodeCard(props: NodeProps<FlowNode>) {
   const title = displayNodeTitle(data.title, data.type);
   const llmBusy = isLLMBusy(data);
   const downloadable = !!data.mediaId && data.type !== "prompt" && data.type !== "note";
+  const historyList = Array.isArray(data.history) ? data.history : [];
+  const activeHistoryIdx = data.mediaId
+    ? Math.max(0, historyList.findIndex((h) => h.mediaId === data.mediaId))
+    : Math.max(0, historyList.length - 1);
+  const showHistoryBar = historyList.length >= 2 && !isProcessing;
+  const showQuickDerive =
+    Boolean(props.selected) &&
+    !isProcessing &&
+    !llmBusy &&
+    Boolean(data.mediaId) &&
+    (data.type === "image" || data.type === "character" || data.type === "visual_asset");
+  const [quickBusy, setQuickBusy] = useState<string | null>(null);
+  const [openQuickMenu, setOpenQuickMenu] = useState<"angle" | "light" | null>(null);
+
+  useEffect(() => {
+    if (!props.selected) {
+      setOpenQuickMenu(null);
+    }
+  }, [props.selected]);
+
+  async function runQuickAction(key: string, fn: () => Promise<void>) {
+    if (quickBusy) return;
+    setOpenQuickMenu(null);
+    setQuickBusy(key);
+    try {
+      await fn();
+    } catch (err) {
+      useGenerationStore.setState({
+        error: err instanceof Error ? err.message : "快捷衍生操作失败",
+      });
+    } finally {
+      setQuickBusy(null);
+    }
+  }
 
   function handleGenerate(e: React.MouseEvent) {
     e.stopPropagation();
@@ -1237,6 +1321,155 @@ export function NodeCard(props: NodeProps<FlowNode>) {
         <Handle type="target" position={Position.Left} className="node-handle" />
         <Handle type="source" position={Position.Right} className="node-handle" />
       </div>
+
+      {showHistoryBar && (
+        <div
+          className="jm-node-history-bar nodrag nopan"
+          onDoubleClick={(e) => e.stopPropagation()}
+        >
+          <button
+            type="button"
+            className="jm-node-history-btn"
+            disabled={activeHistoryIdx <= 0}
+            onClick={(e) => {
+              e.stopPropagation();
+              switchNodeHistoryVersion(props.id, activeHistoryIdx - 1);
+            }}
+            title="切换至上一历史版本"
+            aria-label="上一历史版本"
+          >
+            ‹
+          </button>
+          <span className="jm-node-history-label" title="单节点历史生成版本（不覆盖旧图）">
+            第 {activeHistoryIdx + 1}/{historyList.length} 版
+          </span>
+          <button
+            type="button"
+            className="jm-node-history-btn"
+            disabled={activeHistoryIdx >= historyList.length - 1}
+            onClick={(e) => {
+              e.stopPropagation();
+              switchNodeHistoryVersion(props.id, activeHistoryIdx + 1);
+            }}
+            title="切换至下一历史版本"
+            aria-label="下一历史版本"
+          >
+            ›
+          </button>
+        </div>
+      )}
+
+      {showQuickDerive && (
+        <div
+          className="jm-quick-derive-bar nodrag nopan"
+          role="toolbar"
+          aria-label="单图快捷创作"
+          onDoubleClick={(e) => e.stopPropagation()}
+        >
+          <button
+            type="button"
+            className="jm-quick-derive-btn"
+            disabled={quickBusy !== null}
+            onClick={(e) => {
+              e.stopPropagation();
+              void runQuickAction("prev", () => derivePrevScene(props.id));
+            }}
+            title="基于当前画面倒推 5 秒前镜头（Flow 0 积分）"
+          >
+            ⏮ 前一幕
+          </button>
+          <button
+            type="button"
+            className="jm-quick-derive-btn"
+            disabled={quickBusy !== null}
+            onClick={(e) => {
+              e.stopPropagation();
+              void runQuickAction("next", () => deriveNextScene(props.id));
+            }}
+            title="基于当前画面推演 3 秒后下一幕（Flow 0 积分）"
+          >
+            ⏭ 下一幕
+          </button>
+          <button
+            type="button"
+            className={`jm-quick-derive-btn${openQuickMenu === "angle" ? " jm-quick-derive-btn--active" : ""}`}
+            disabled={quickBusy !== null}
+            onClick={(e) => {
+              e.stopPropagation();
+              setOpenQuickMenu((m) => (m === "angle" ? null : "angle"));
+            }}
+            title="锁定主体并衍生其他电影机位视角"
+          >
+            🎥 换机位
+          </button>
+          <button
+            type="button"
+            className={`jm-quick-derive-btn${openQuickMenu === "light" ? " jm-quick-derive-btn--active" : ""}`}
+            disabled={quickBusy !== null}
+            onClick={(e) => {
+              e.stopPropagation();
+              setOpenQuickMenu((m) => (m === "light" ? null : "light"));
+            }}
+            title="保持构图与主体，重塑电影级环境光影"
+          >
+            💡 重打光
+          </button>
+          <button
+            type="button"
+            className="jm-quick-derive-btn jm-quick-derive-btn--cyan"
+            disabled={quickBusy !== null}
+            onClick={(e) => {
+              e.stopPropagation();
+              void runQuickAction("2k", () => upscaleImageNode2K(props.id, "2K"));
+            }}
+            title="调用 Flow SPrCad 0 积分 2K 高清重塑并记录历史版本"
+          >
+            {quickBusy === "2k" ? "2K…" : "🔍 2K超清"}
+          </button>
+
+          {openQuickMenu === "angle" && (
+            <div className="jm-quick-derive-menu" role="menu" aria-label="选择机位角度">
+              {CAMERA_ANGLE_PRESETS.map((preset) => (
+                <button
+                  key={preset.key}
+                  type="button"
+                  role="menuitem"
+                  className="jm-quick-derive-menu__item"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void runQuickAction(`angle:${preset.key}`, () =>
+                      deriveCameraAngle(props.id, preset.key),
+                    );
+                  }}
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {openQuickMenu === "light" && (
+            <div className="jm-quick-derive-menu" role="menu" aria-label="选择电影布光风格">
+              {LIGHTING_PRESETS.map((preset) => (
+                <button
+                  key={preset.key}
+                  type="button"
+                  role="menuitem"
+                  className="jm-quick-derive-menu__item"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void runQuickAction(`light:${preset.key}`, () =>
+                      relightImageNode(props.id, preset.key),
+                    );
+                  }}
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

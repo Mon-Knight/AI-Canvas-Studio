@@ -97,6 +97,17 @@ async def upscale_media_asset(media_id: str, body: UpscaleMediaBody):
         if res not in ("2K", "4K"):
             raise HTTPException(status_code=400, detail="图片仅支持重塑为 2K 或 4K")
         up = await sdk.upscale_image(clean_id, pid, res)
+        if up.get("error") and pid and media_service.cached_path(clean_id) is not None:
+            err_l = str(up["error"]).lower()
+            if any(tok in err_l for tok in ("failed: [5]", "failed: [3]", "404", "not found")):
+                from flowboard.services.media_project_sync import MediaSyncError, ensure_media_in_project
+
+                try:
+                    synced_id = await ensure_media_in_project(clean_id, pid)
+                    if synced_id != clean_id:
+                        up = await sdk.upscale_image(synced_id, pid, res)
+                except MediaSyncError:
+                    pass
         if up.get("error"):
             raise HTTPException(status_code=502, detail=str(up["error"]))
         final_mid = (
@@ -121,9 +132,36 @@ async def upscale_media_asset(media_id: str, body: UpscaleMediaBody):
                 existing.unlink(missing_ok=True)
             media_service.ingest_urls([{"media_id": final_mid, "url": url, "mediaType": "image"}])
         if body.node_id is not None:
-            patch: dict = {"resolution": res}
+            from flowboard.db import get_session
+            from flowboard.db.models import Node
+
+            patch: dict = {"resolution": res, "imageResolution": res}
             if final_mid != clean_id:
                 patch["mediaId"] = final_mid
+                patch["mediaIds"] = [final_mid]
+                with get_session() as s:
+                    n = s.get(Node, body.node_id)
+                    if n is not None:
+                        data = n.data or {}
+                        history = [h for h in (data.get("history") or []) if isinstance(h, dict) and h.get("mediaId")]
+                        if clean_id and not any(h.get("mediaId") == clean_id for h in history):
+                            history.append({
+                                "mediaId": clean_id,
+                                "mediaIds": data.get("mediaIds") or [clean_id],
+                                "prompt": data.get("prompt"),
+                                "renderedAt": data.get("renderedAt"),
+                                "aspectRatio": data.get("aspectRatio"),
+                                "imageModel": data.get("imageModel"),
+                            })
+                        history = [h for h in history if h.get("mediaId") != final_mid]
+                        history.append({
+                            "mediaId": final_mid,
+                            "mediaIds": [final_mid],
+                            "prompt": data.get("prompt"),
+                            "aspectRatio": data.get("aspectRatio"),
+                            "imageModel": data.get("imageModel"),
+                        })
+                        patch["history"] = history[-10:]
             apply_node_patch(body.node_id, data_patch=patch)
         if flow_client.connected:
             asyncio.create_task(flow_accounts.sync_active_credits(force=True))

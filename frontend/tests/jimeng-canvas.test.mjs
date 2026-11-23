@@ -767,3 +767,72 @@ test("useBoardStore.applyStarterRecipe populates blank default board in place", 
     await server.close();
   }
 });
+
+test("Stage 1: 3x3 multicam storyboard, @ref mentions, video directives, and node history switching", async () => {
+  const server = await createServer({ server: { middlewareMode: true, hmr: false, ws: false }, logLevel: "error" });
+  try {
+    const {
+      STORYBOARD_GRIDS,
+      totalPanels,
+      resolveStoryboardLayout,
+      buildStoryboardPrompt,
+    } = await server.ssrLoadModule("/src/lib/storyboardPrompt.ts");
+    const {
+      normalizePromptRefMentions,
+      composeVideoPromptWithDirectives,
+      VIDEO_CAMERA_PRESETS,
+    } = await server.ssrLoadModule("/src/lib/promptMentions.ts");
+    const { switchNodeHistoryVersion } = await server.ssrLoadModule("/src/lib/quickDerive.ts");
+    const { useBoardStore } = await server.ssrLoadModule("/src/store/board.ts");
+
+    assert.ok(STORYBOARD_GRIDS.includes("3x3"));
+    assert.equal(totalPanels("3x3"), 9);
+    assert.deepEqual(resolveStoryboardLayout("3x3", "IMAGE_ASPECT_RATIO_PORTRAIT"), { rows: 3, cols: 3, total: 9 });
+
+    const multiPrompt = buildStoryboardPrompt("咖啡馆女孩", "3x3", "IMAGE_ASPECT_RATIO_LANDSCAPE", "multicam");
+    assert.ok(multiPrompt.includes("同场多机位"));
+    assert.ok(multiPrompt.includes("3x3"));
+
+    assert.equal(
+      normalizePromptRefMentions("让 @图1 身穿 @图2 的外套在雨中回头，忽略 a@1.com 与 @99", 2),
+      "让 ref_image_1 身穿 ref_image_2 的外套在雨中回头，忽略 a@1.com 与 @99",
+    );
+    assert.ok(VIDEO_CAMERA_PRESETS.length >= 6);
+    const dirPrompt = composeVideoPromptWithDirectives({
+      prompt: "慢步走向镜头",
+      cameraKey: "dolly_in",
+      dialogue: "今晚的雨好大",
+      sfx: "雨水滴落声",
+    });
+    assert.ok(dirPrompt.includes("Slow Dolly In") && dirPrompt.includes("今晚的雨好大") && dirPrompt.includes("雨水滴落声"));
+
+    useBoardStore.setState({
+      boardId: null,
+      nodes: [
+        {
+          id: "90",
+          type: "image",
+          position: { x: 0, y: 0 },
+          data: {
+            type: "image",
+            shortId: "H90",
+            title: "图片",
+            mediaId: "m-v2",
+            mediaIds: ["m-v2"],
+            prompt: "v2 prompt",
+            history: [
+              { mediaId: "m-v1", mediaIds: ["m-v1"], prompt: "v1 prompt" },
+              { mediaId: "m-v2", mediaIds: ["m-v2"], prompt: "v2 prompt" },
+            ],
+          },
+        },
+      ],
+      edges: [],
+    });
+    switchNodeHistoryVersion("90", 0);
+    assert.equal(useBoardStore.getState().nodes[0].data.mediaId, "m-v1");
+    assert.equal(useBoardStore.getState().nodes[0].data.prompt, "v1 prompt");
+  } finally {
+    await server.close();
+  }
+});

@@ -6,15 +6,20 @@ import {
 } from "../store/generation";
 import { type VideoRefFrameMode } from "../lib/videoFrame";
 import { useFlowAccounts } from "../store/flowAccounts";
-import { useBoardStore, type FlowboardNodeData, type StoryboardGrid } from "../store/board";
+import { useBoardStore, type FlowboardNodeData, type StoryboardGrid, type StoryboardMode } from "../store/board";
 import { displayNodeTitle } from "../constants/nodeLabels";
 import {
   STORYBOARD_GRIDS,
   buildStoryboardPrompt,
   buildStoryboardVideoPrompt,
   normaliseStoryboardGrid,
+  normaliseStoryboardMode,
   totalPanels,
 } from "../lib/storyboardPrompt";
+import {
+  VIDEO_CAMERA_PRESETS,
+  composeVideoPromptWithDirectives,
+} from "../lib/promptMentions";
 import {
   useSettingsStore,
   type ImageModelKey,
@@ -85,26 +90,8 @@ const VIDEO_ASPECT_RATIOS = VIDEO_ASPECT_OPTIONS.map((a) => ({
   shortLabel: a.shortLabel,
 }));
 
-const CAMERA_MOVEMENTS = [
-  {
-    key: "static",
-    label: "固定机位",
-    instruction:
-      "机位约束：固定三脚架静止机位，严禁推拉缩放或摇移镜头。" +
-      "全程保持人物或核心主体完整居中清晰入画，背景边界与裁切构图保持恒定。",
-  },
-  {
-    key: "dynamic",
-    label: "动态运镜",
-    instruction: "",
-  },
-] as const;
-
-type CameraKey = (typeof CAMERA_MOVEMENTS)[number]["key"];
-
-function cameraInstruction(key: CameraKey): string {
-  return CAMERA_MOVEMENTS.find((c) => c.key === key)?.instruction ?? "";
-}
+const CAMERA_MOVEMENTS = VIDEO_CAMERA_PRESETS;
+type CameraKey = string;
 
 type ImageAspectKey = (typeof IMAGE_ASPECT_OPTIONS)[number]["value"];
 type VideoAspectKey = (typeof VIDEO_ASPECT_OPTIONS)[number]["value"];
@@ -220,6 +207,14 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
   // handler with a locked template prompt wrapping the user's topic
   // into a single composite NxN grid. See lib/storyboardPrompt.ts.
   const [storyboardGrid, setStoryboardGrid] = useState<StoryboardGrid>("2x2");
+  const [storyboardMode, setStoryboardMode] = useState<StoryboardMode>("narrative");
+  const [videoSubMode, setVideoSubMode] = useState<"auto" | "first_last" | "t2v">("auto");
+  const [firstFrameId, setFirstFrameId] = useState("");
+  const [lastFrameId, setLastFrameId] = useState("");
+  const [audioOpen, setAudioOpen] = useState(false);
+  const [dialogueText, setDialogueText] = useState("");
+  const [sfxText, setSfxText] = useState("");
+  const [atSuggestOpen, setAtSuggestOpen] = useState(false);
 
   // 主体（character）官方推荐模板 & 自定义模板选择器状态
   const customSubjectTemplates = useSubjectTemplatesStore((s) => s.customTemplates);
@@ -401,6 +396,30 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     ? collectUpstreamRefEntries(rfId, nodes, edges)
     : [];
 
+  const allVideoRefEntries = isVideo && rfId
+    ? collectUpstreamRefEntries(rfId, nodes, edges)
+    : [];
+
+  const videoCandidateFrames = (() => {
+    const out: Array<{ mediaId: string; label: string; isVideo: boolean }> = [];
+    const seen = new Set<string>();
+    for (const entry of allVideoRefEntries) {
+      const baseTitle = displayNodeTitle(entry.node.data.title, entry.node.data.type);
+      const isVidSrc = entry.node.data.type === "video";
+      const pool = entry.allVariants.length > 0 ? entry.allVariants : [entry.mediaId];
+      pool.forEach((mid, vIdx) => {
+        if (!mid || seen.has(mid)) return;
+        seen.add(mid);
+        out.push({
+          mediaId: mid,
+          label: pool.length > 1 ? `${baseTitle} #${entry.node.data.shortId} · v${vIdx + 1}` : `${baseTitle} #${entry.node.data.shortId}`,
+          isVideo: isVidSrc,
+        });
+      });
+    }
+    return out;
+  })();
+
   const hasVideoUpstream =
     sourceNode?.data.type === "video" ||
     refSourceNodes.some((r) => r.node.data.type === "video");
@@ -486,6 +505,12 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
         .getState()
         .nodes.find((n) => n.id === rfId)?.data;
       setStoryboardGrid(normaliseStoryboardGrid(openNodeData?.storyboardGrid));
+      setStoryboardMode(normaliseStoryboardMode(openNodeData?.storyboardMode));
+      setVideoSubMode("auto");
+      setAudioOpen(false);
+      setDialogueText("");
+      setSfxText("");
+      setAtSuggestOpen(false);
       setSeedInput(openNodeData?.seed != null ? String(openNodeData.seed) : "");
       setTemplateFormOpen(false);
       setEditingTemplateId(null);
@@ -560,6 +585,19 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
   }, [prompt, inline, rfId]);
 
   const sourceKey = JSON.stringify(sourceMediaIds);
+  const candidateKey = JSON.stringify(videoCandidateFrames.map((c) => c.mediaId));
+  useEffect(() => {
+    const ids: string[] = JSON.parse(candidateKey);
+    if (ids.length >= 2) {
+      setFirstFrameId((prev) => (prev && ids.includes(prev) ? prev : ids[0]));
+      setLastFrameId((prev) => (prev && ids.includes(prev) ? prev : ids[1]));
+    } else {
+      setFirstFrameId(ids[0] ?? "");
+      setLastFrameId("");
+      setVideoSubMode((prev) => (prev === "first_last" ? "auto" : prev));
+    }
+  }, [rfId, candidateKey]);
+
   const sourcePin = edges.find(e => e.target === rfId && e.source === sourceNode?.id)?.data?.sourceVariantIdx;
   const pinnedMedia = typeof sourcePin === "number" ? sourceNode?.data.mediaIds?.[sourcePin] : null;
   useEffect(() => {
@@ -890,17 +928,19 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
         prompt,
         storyboardGrid,
         aspectRatio,
+        storyboardMode,
       );
-      // Persist the chosen grid + topic on the node so reload shows
-      // the same settings and `StoryboardBody` can render the grid badge.
+      // Persist the chosen grid + mode + topic on the node so reload shows
+      // the same settings and `StoryboardBody` can render the badges.
       useBoardStore.getState().updateNodeData(rfId, {
         storyboardGrid,
+        storyboardMode,
         aiBrief: prompt,
       });
       const dbId = parseInt(rfId, 10);
       if (!isNaN(dbId)) {
         patchNode(dbId, {
-          data: { storyboardGrid, aiBrief: prompt },
+          data: { storyboardGrid, storyboardMode, aiBrief: prompt },
         }).catch(() => {});
       }
       const dispatch = dispatchGeneration(rfId, {
@@ -994,12 +1034,16 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     setPendingBatchPrompts(undefined);
     closeGenerationDialog();
     if (isVideo) {
-      const trimmedPrompt = finalPrompt.trim();
-      const camInstruction = cameraInstruction(camera);
-      const sep = /[。！？.!?]$/.test(trimmedPrompt) ? "" : "。";
-      const videoPrompt = camInstruction
-        ? `${trimmedPrompt}${sep}${camInstruction}`
-        : trimmedPrompt;
+      const videoPrompt = composeVideoPromptWithDirectives({
+        prompt: finalPrompt,
+        cameraKey: camera,
+        dialogue: dialogueText,
+        sfx: sfxText,
+      });
+      const isT2v = videoCandidateFrames.length === 0 || videoSubMode === "t2v";
+      const isFirstLast =
+        videoSubMode === "first_last" &&
+        Boolean(firstFrameId && lastFrameId && firstFrameId !== lastFrameId);
       const picked = sourceMediaIds.filter((_, i) => selectedSourceIdx.has(i));
       const useMulti = picked.length > 1;
       return dispatchGeneration(rfId, {
@@ -1008,9 +1052,11 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
         kind: "video",
         flowAccountId: account?.id,
         flowProjectId: account?.project_id ?? undefined,
-        sourceMediaId: useMulti ? undefined : picked[0],
-        sourceMediaIds: useMulti ? picked : undefined,
-        variantCount: useMulti ? picked.length : variants,
+        videoSubMode: isFirstLast ? "first_last" : isT2v ? "t2v" : "auto",
+        sourceMediaId: isFirstLast ? firstFrameId : useMulti ? undefined : picked[0],
+        endMediaId: isFirstLast ? lastFrameId : undefined,
+        sourceMediaIds: !isFirstLast && useMulti ? picked : undefined,
+        variantCount: !isFirstLast && !isT2v && useMulti ? picked.length : variants,
         videoModel: videoModelFamily,
         videoQuality,
         omniVersion,
@@ -1033,23 +1079,43 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     }
   }
 
-  // The dialog's local `autoBuilding` flag covers the in-flight window
-  // when THIS dialog instance is composing. But the dialog can be closed
-  // + reopened mid-flight, leaving the local flag fresh while the node-
-  // level `autoPromptStatus` / `aiBriefStatus` is still pending from the
-  // first run. Treat both signals as "busy" so the user can't double-fire.
+  function insertRefMentionTag(refIdxOneBased: number) {
+    if (isWorking || queued || hasStoryboardUpstream) return;
+    const tag = `@图${refIdxOneBased} `;
+    const ta = firstFocusRef.current;
+    let next = prompt;
+    if (ta && typeof ta.selectionStart === "number") {
+      const start = ta.selectionStart;
+      const end = ta.selectionEnd ?? start;
+      const before = prompt.slice(0, start).replace(/@(?:图\s*)?$/, "");
+      const after = prompt.slice(end);
+      next = `${before}${before && !before.endsWith(" ") && !before.endsWith("\n") ? " " : ""}${tag}${after}`;
+    } else {
+      next = prompt.replace(/@(?:图\s*)?$/, "");
+      next = next ? `${next.trimEnd()} ${tag}` : tag;
+    }
+    const clipped = next.slice(0, PROMPT_MAX_LENGTH);
+    promptManuallyEditedRef.current = true;
+    setPrompt(clipped);
+    setAtSuggestOpen(false);
+    if (inline) persistNodeDraftPatch({ prompt: clipped });
+    window.requestAnimationFrame(() => ta?.focus());
+  }
+
   const nodeLLMBusy =
     node?.data.autoPromptStatus === "pending"
     || node?.data.aiBriefStatus === "pending";
   const isWorking = autoBuilding || nodeLLMBusy;
 
-  // Both image and video allow empty prompt — we'll auto-synth on submit.
-  // Subject (character) allows generating from any prompt/template OR from upstream ref(s).
-  // Veo i2v needs at least one selected source variant; Omni Flash
-  // needs at least one ingredient (any upstream image-bearing node).
+  const isVideoTextMode = isVideo && (videoCandidateFrames.length === 0 || videoSubMode === "t2v");
+  const isVideoFirstLastMode = isVideo && videoSubMode === "first_last" && videoCandidateFrames.length >= 2;
   const queued = node.data.status === "queued" || node.data.status === "running";
   const canGenerate = !queued && !isWorking && (!isVideo || !accountIssue) && (isCharacter
     ? prompt.trim().length > 0 || refSourceNodes.length > 0 || Boolean(upstreamPromptText)
+    : isVideoFirstLastMode
+    ? Boolean(firstFrameId && lastFrameId && firstFrameId !== lastFrameId)
+    : isVideoTextMode
+    ? prompt.trim().length > 0
     : isOmniVideo
     ? refSourceNodes.length > 0 && !isWorking
     : isVideo
@@ -1287,8 +1353,12 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
         maxLength={PROMPT_MAX_LENGTH}
         value={prompt}
         onChange={(e) => {
+          const val = e.target.value;
+          const cursor = e.target.selectionStart ?? val.length;
+          const beforeCursor = val.slice(0, cursor);
+          setAtSuggestOpen(refSourceNodes.length > 0 && /@(?:图\s*)?$/.test(beforeCursor));
           promptManuallyEditedRef.current = true;
-          setPrompt(e.target.value);
+          setPrompt(val);
           if (pendingBatchPrompts) setPendingBatchPrompts(undefined);
           if (autoPromptUsed) setAutoPromptUsed(false);
         }}
@@ -1303,12 +1373,14 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
             : isCharacter
             ? "点击上方官方/自定义模板一键插入，或自由描述动漫角色、3D/游戏人物、真人定妆、萌宠与核心道具特征（也可连线参考图提纯主体）…"
             : isVideo
-            ? "输入中文运镜与动作描述，或留空生成 AI 润色草稿供确认 ✨"
+            ? videoCandidateFrames.length === 0
+              ? "当前无上游参考图，已自动启用 Flow 纯文生视频（YhhmEf）：请直接描述画面主体、动态与镜头运动…"
+              : "输入中文运镜与动作描述（支持输入 @ 引用上游图1/图2），或留空生成 AI 润色草稿 ✨"
             : isPrompt
             ? "输入中文灵感描述，连线后自动继承给下游生图/生视频节点…"
             : isStoryboard
             ? "输入中文剧情脚本（如：清晨拆箱 → 试穿展示 → 街头漫步）…"
-            : "输入中文关键词，或留空先由 AI 润色草稿并经你确认后再生成 ✨"
+            : "输入中文关键词（有参考图时可输入 @ 引用 @图1/@图2），或留空先由 AI 润色草稿 ✨"
         }
         disabled={isWorking}
         readOnly={hasStoryboardUpstream}
@@ -1318,6 +1390,57 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
             : undefined
         }
       />
+      {atSuggestOpen && refSourceNodes.length > 0 && !hasStoryboardUpstream && (
+        <div className="gen-dialog__at-bar" role="listbox" aria-label="选择要引用的上游参考图">
+          <span className="gen-dialog__at-hint">点选插入参考图标记：</span>
+          {refSourceNodes.map((r, rIdx) => (
+            <button
+              key={r.edgeId}
+              type="button"
+              className="gen-dialog__preset-chip gen-dialog__at-chip"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                insertRefMentionTag(rIdx + 1);
+              }}
+            >
+              @图{rIdx + 1} · #{r.node.data.shortId}
+            </button>
+          ))}
+        </div>
+      )}
+      {isVideo && !hasStoryboardUpstream && (
+        <div className="gen-dialog__audio-slot">
+          <button
+            type="button"
+            className={`gen-dialog__preset-chip${audioOpen || dialogueText || sfxText ? " gen-dialog__preset-chip--active" : ""}`}
+            onClick={() => setAudioOpen((v) => !v)}
+            title="展开/收起角色原生对白台词与环境音效输入槽（适配 Veo / Omni 原生声画同步）"
+          >
+            {audioOpen ? "▾ 收起台词与音效" : "🎙️ + 台词与音效预设"}
+            {(dialogueText.trim() || sfxText.trim()) ? "（已填写）" : ""}
+          </button>
+          {audioOpen && (
+            <div className="gen-dialog__audio-fields">
+              <input
+                type="text"
+                className="gen-dialog__seed-input"
+                value={dialogueText}
+                onChange={(e) => setDialogueText(e.target.value)}
+                placeholder="角色口型对白台词（如：这束光终于照进来了）…"
+                maxLength={300}
+              />
+              <input
+                type="text"
+                className="gen-dialog__seed-input"
+                value={sfxText}
+                onChange={(e) => setSfxText(e.target.value)}
+                placeholder="环境音与音效（如：细雨落瓦、轻柔钢琴弦乐、城市车流低噪）…"
+                maxLength={300}
+              />
+            </div>
+          )}
+        </div>
+      )}
       {!hasStoryboardUpstream && (
         <div className="gen-dialog__preset-row" aria-label="中文快捷提示词补充">
           {CHINESE_PROMPT_PRESETS.map((preset) => (
@@ -1351,7 +1474,84 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
   );
 
   const references = (<>
-        {isVideo && !isOmniVideo && (
+        {isVideo && videoCandidateFrames.length >= 2 && (
+          <div className="gen-dialog__field">
+            <div className="gen-dialog__label-row">
+              <span className="gen-dialog__label">视频驱动方式</span>
+              <div className="aspect-chip-row">
+                <button
+                  type="button"
+                  className={`aspect-chip${videoSubMode === "auto" ? " aspect-chip--active" : ""}`}
+                  onClick={() => setVideoSubMode("auto")}
+                >
+                  {isOmniVideo ? "多图参考驱动" : "首帧/变体生视频"}
+                </button>
+                <button
+                  type="button"
+                  className={`aspect-chip${videoSubMode === "first_last" ? " aspect-chip--active" : ""}`}
+                  onClick={() => setVideoSubMode("first_last")}
+                  title="调用 Flow 原生首尾帧锁定接口（nprQif），精准控制视频起始与结束画面"
+                >
+                  ⇄ 首尾帧锁定
+                </button>
+                <button
+                  type="button"
+                  className={`aspect-chip${videoSubMode === "t2v" ? " aspect-chip--active" : ""}`}
+                  onClick={() => setVideoSubMode("t2v")}
+                  title="忽略参考图，调用 Flow 纯文生视频（YhhmEf）"
+                >
+                  纯文生视频
+                </button>
+              </div>
+            </div>
+            {videoSubMode === "first_last" && (
+              <div className="gen-dialog__first-last-row">
+                <div className="gen-dialog__first-last-slot">
+                  <span className="gen-dialog__first-last-tag">首帧（Start）</span>
+                  <select
+                    aria-label="选择首帧参考图"
+                    value={firstFrameId}
+                    onChange={(e) => setFirstFrameId(e.target.value)}
+                  >
+                    {videoCandidateFrames.map((c) => (
+                      <option key={`start-${c.mediaId}`} value={c.mediaId}>
+                        {c.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <button
+                  type="button"
+                  className="source-select-mini"
+                  onClick={() => {
+                    const prevStart = firstFrameId;
+                    setFirstFrameId(lastFrameId);
+                    setLastFrameId(prevStart);
+                  }}
+                  title="互换首帧与尾帧"
+                >
+                  ⇄ 互换
+                </button>
+                <div className="gen-dialog__first-last-slot">
+                  <span className="gen-dialog__first-last-tag">尾帧（End）</span>
+                  <select
+                    aria-label="选择尾帧参考图"
+                    value={lastFrameId}
+                    onChange={(e) => setLastFrameId(e.target.value)}
+                  >
+                    {videoCandidateFrames.map((c) => (
+                      <option key={`end-${c.mediaId}`} value={c.mediaId}>
+                        {c.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {isVideo && !isOmniVideo && !isVideoFirstLastMode && !isVideoTextMode && (
           <div className="gen-dialog__field">
             <div className="gen-dialog__label-row">
               <span className="gen-dialog__label">
@@ -1448,7 +1648,9 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
               </>
             ) : (
               <div className="source-image-row source-image-row--empty">
-                请先在画布中连线一个已生成画面的上游图片或视频节点
+                {videoCandidateFrames.length === 0
+                  ? "当前未连线参考图 —— 可直接输入视频提示词走 Flow 原生纯文生视频（YhhmEf）"
+                  : "请先勾选至少一个用于生成的源参考"}
               </div>
             )}
           </div>
@@ -1481,7 +1683,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
                   </div>
                 );
               })}
-              {refSourceNodes.map((r) => {
+              {refSourceNodes.map((r, rIdx) => {
                 const refTitle = displayNodeTitle(r.node.data.title, r.node.data.type);
                 const isMulti = r.allVariants.length >= 2;
                 const isPickerOpen = openVariantPicker === r.edgeId;
@@ -1491,6 +1693,17 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
                   : refTitle;
                 return (
                   <div key={r.edgeId} className="ref-source-chip-wrap">
+                    <button
+                      type="button"
+                      className="ref-source-chip__at-btn"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        insertRefMentionTag(rIdx + 1);
+                      }}
+                      title={`点击在提示词中插入 @图${rIdx + 1} 引用此参考素材`}
+                    >
+                      @图{rIdx + 1}
+                    </button>
                     {isMulti ? (
                       <button
                         type="button"
@@ -1655,11 +1868,15 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
   if (inline) {
     const unavailable = isCharacter
       ? "请选择推荐/自定义模板、填写主体特征描述，或连线参考图。"
-      : isOmniVideo
-        ? "请连线至少一张参考图或视频。"
-        : isVideo
-          ? "请连线并勾选至少一个图片或视频参考。"
-          : undefined;
+      : isVideoFirstLastMode
+        ? "请选择两个不同的首帧与尾帧参考。"
+        : isVideoTextMode
+          ? "请输入视频主体、动作与镜头描述以进行纯文生视频。"
+          : isOmniVideo
+            ? "请连线至少一张参考图或视频。"
+            : isVideo
+              ? "请连线并勾选至少一个图片或视频参考，或移除参考直接文生视频。"
+              : undefined;
     const inlineHint = isVideo && accountIssue
       ? accountIssue
       : !canGenerate && !queued && !isWorking && unavailable
@@ -1786,9 +2003,25 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
             </select>
           )}
           {isStoryboard && (
-            <select aria-label="分镜宫格" value={storyboardGrid} onChange={(e) => setStoryboardGrid(e.target.value as StoryboardGrid)}>
-              {STORYBOARD_GRIDS.map((grid) => <option key={grid} value={grid}>{totalPanels(grid)} 格</option>)}
-            </select>
+            <>
+              <select aria-label="分镜宫格" value={storyboardGrid} onChange={(e) => setStoryboardGrid(e.target.value as StoryboardGrid)}>
+                {STORYBOARD_GRIDS.map((grid) => <option key={grid} value={grid}>{totalPanels(grid)} 格</option>)}
+              </select>
+              <select
+                aria-label="分镜模式"
+                value={storyboardMode}
+                onChange={(e) => setStoryboardMode(e.target.value as StoryboardMode)}
+                title="剧情连贯分镜按情节顺推，同场多机位锁定同人同景切换 9 种电影机位"
+              >
+                <option value="narrative">剧情连贯</option>
+                <option value="multicam">同场多机位</option>
+              </select>
+            </>
+          )}
+          {isVideo && (isVideoFirstLastMode || isVideoTextMode) && (
+            <span className="jm-context-generator__badge jm-context-generator__badge--cyan">
+              {isVideoFirstLastMode ? "⇄ 首尾帧锁定" : "✦ 纯文生视频"}
+            </span>
           )}
           {isVideo && (
             <select
@@ -2242,34 +2475,60 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
         )}
 
         {isStoryboard && (
-          <div className="gen-dialog__field">
-            <span className="gen-dialog__label">
-              分镜宫格布局
-              <InfoTip tip="故事板将以单张高清多宫格分镜图渲染输出，行列方向会自动适配横屏或竖屏画幅。" />
-            </span>
-            <div className="aspect-chip-row">
-              {STORYBOARD_GRIDS.map((g) => {
-                const total = totalPanels(g);
-                const isPortrait = aspectRatio.includes("PORTRAIT");
-                let dimsLabel = "2×2";
-                if (g !== "2x2") {
-                  const big = g === "2x3" ? 3 : 4;
-                  dimsLabel = isPortrait ? `${big}×2` : `2×${big}`;
-                }
-                return (
-                  <button
-                    key={g}
-                    type="button"
-                    className={`aspect-chip${storyboardGrid === g ? " aspect-chip--active" : ""}`}
-                    onClick={() => setStoryboardGrid(g)}
-                    title={`${total} 格分镜 (${dimsLabel})`}
-                  >
-                    {dimsLabel} · {total} 格
-                  </button>
-                );
-              })}
+          <>
+            <div className="gen-dialog__field">
+              <span className="gen-dialog__label">
+                分镜模式
+                <InfoTip tip="剧情连贯：按时间推进演绎前后情节；同场多机位：锁定同一人物与场景同步拍摄多机位角度，生成后可一键切分。" />
+              </span>
+              <div className="aspect-chip-row">
+                <button
+                  type="button"
+                  className={`aspect-chip${storyboardMode === "narrative" ? " aspect-chip--active" : ""}`}
+                  onClick={() => setStoryboardMode("narrative")}
+                >
+                  剧情连贯分镜
+                </button>
+                <button
+                  type="button"
+                  className={`aspect-chip${storyboardMode === "multicam" ? " aspect-chip--active" : ""}`}
+                  onClick={() => setStoryboardMode("multicam")}
+                >
+                  同场多机位（可切分重用）
+                </button>
+              </div>
             </div>
-          </div>
+            <div className="gen-dialog__field">
+              <span className="gen-dialog__label">
+                分镜宫格布局
+                <InfoTip tip="故事板将以单张高清多宫格分镜图渲染输出，3×3 为九宫格标准方阵，生成后支持一键无损切分为独立节点。" />
+              </span>
+              <div className="aspect-chip-row">
+                {STORYBOARD_GRIDS.map((g) => {
+                  const total = totalPanels(g);
+                  const isPortrait = aspectRatio.includes("PORTRAIT");
+                  let dimsLabel = "2×2";
+                  if (g === "3x3") {
+                    dimsLabel = "3×3";
+                  } else if (g !== "2x2") {
+                    const big = g === "2x3" ? 3 : 4;
+                    dimsLabel = isPortrait ? `${big}×2` : `2×${big}`;
+                  }
+                  return (
+                    <button
+                      key={g}
+                      type="button"
+                      className={`aspect-chip${storyboardGrid === g ? " aspect-chip--active" : ""}`}
+                      onClick={() => setStoryboardGrid(g)}
+                      title={`${total} 格分镜 (${dimsLabel})`}
+                    >
+                      {dimsLabel} · {total} 格
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </>
         )}
         </div>
 

@@ -212,3 +212,140 @@
 @media (hover: none) { .jm-video-preview__details { opacity: 1; } }
 .jm-video-stage { display: flex; align-items: center; gap: 6px; padding: 6px 9px; background: var(--surface-2); font-size: 11px; color: var(--text-secondary); }
 .jm-video-stage__dot { width: 6px; height: 6px; border-radius: 50%; background: var(--brand-cyan); }
+
+.jm-storyboard-split-bar {
+  padding: 6px 8px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--surface-2);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.jm-storyboard-split-btn {
+  width: 100%;
+  font-size: 11px;
+  text-align: center;
+}
+
+.jm-node-history-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(24, 24, 27, 0.88);
+  backdrop-filter: blur(12px);
+  color: #a1a1aa;
+  font-size: 10px;
+}
+
+.jm-node-history-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: #e4e4e7;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.jm-node-history-btn:hover:not(:disabled) {
+  background: #27272c;
+}
+
+.jm-node-history-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.jm-node-history-label {
+  font-variant-numeric: tabular-nums;
+}
+
+.jm-quick-derive-bar {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+  padding: 5px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(24, 24, 27, 0.92);
+  backdrop-filter: blur(14px);
+}
+
+.jm-quick-derive-btn {
+  padding: 3px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: #141417;
+  color: #d4d4d8;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.jm-quick-derive-btn:hover:not(:disabled),
+.jm-quick-derive-btn--active {
+  background: #27272c;
+  color: #f4f4f6;
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+.jm-quick-derive-btn--cyan {
+  color: #7dd3fc;
+  border-color: rgba(56, 189, 248, 0.28);
+}
+
+.jm-quick-derive-btn--cyan:hover:not(:disabled) {
+  background: rgba(56, 189, 248, 0.14);
+  border-color: rgba(56, 189, 248, 0.55);
+}
+
+.jm-quick-derive-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.jm-quick-derive-menu {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 5px);
+  z-index: 30;
+  min-width: 170px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(20, 20, 23, 0.96);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.55);
+}
+
+.jm-quick-derive-menu__item {
+  width: 100%;
+  text-align: left;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #e4e4e7;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.jm-quick-derive-menu__item:hover {
+  background: #27272c;
+  color: #f4f4f6;
+}

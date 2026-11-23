@@ -12,7 +12,9 @@ import {
   type FlowboardEdgeData,
   type FlowboardNodeData,
   type FlowNode,
+  type NodeHistoryEntry,
 } from "./board";
+import { normalizePromptRefMentions } from "../lib/promptMentions";
 import {
   useSettingsStore,
   type ImageModelKey,
@@ -106,6 +108,8 @@ interface GenerationState {
       durationSeconds?: number;
       videoResolution?: VideoResolutionKey;
       videoRefFrame?: VideoRefFrameMode;
+      videoSubMode?: "auto" | "first_last" | "t2v";
+      endMediaId?: string;
     },
   ): Promise<void>;
 
@@ -332,8 +336,43 @@ const MEDIA_PRODUCING_TYPES = new Set([
   "gen_image",
   "gen_video",
   "gen_video_omni",
+  "gen_video_first_last",
+  "gen_video_text",
   "edit_image",
 ]);
+
+function snapshotExistingHistory(rfId: string): NodeHistoryEntry[] {
+  const node = useBoardStore.getState().nodes.find((n) => n.id === rfId);
+  if (!node) return [];
+  const d = node.data;
+  const list: NodeHistoryEntry[] = Array.isArray(d.history)
+    ? d.history.filter((h): h is NodeHistoryEntry => Boolean(h && typeof h.mediaId === "string" && h.mediaId))
+    : [];
+  const curMid = typeof d.mediaId === "string" && d.mediaId ? d.mediaId : undefined;
+  if (curMid && !list.some((h) => h.mediaId === curMid)) {
+    return [
+      ...list,
+      {
+        mediaId: curMid,
+        mediaIds: Array.isArray(d.mediaIds) && d.mediaIds.length > 0 ? d.mediaIds : [curMid],
+        prompt: d.prompt,
+        renderedAt: d.renderedAt,
+        aspectRatio: d.aspectRatio,
+        imageModel: d.imageModel,
+        videoQuality: d.videoQuality,
+      },
+    ].slice(-10);
+  }
+  return list.slice(-10);
+}
+
+function appendRenderToHistory(
+  rfId: string,
+  entry: NodeHistoryEntry,
+): NodeHistoryEntry[] {
+  const base = snapshotExistingHistory(rfId).filter((h) => h.mediaId !== entry.mediaId);
+  return [...base, entry].slice(-10);
+}
 
 // ── Poll loop ────────────────────────────────────────────────────────────
 // Lifted out of `dispatchGeneration` so the reload-resume path can re-attach
@@ -462,10 +501,22 @@ function attachPoll(rfId: string, requestId: number, opts: PollOpts) {
             } else if (d === 4 || d === 6 || d === 8 || d === 10) {
               stampedVideoQuality = `abra_r2v_${d}s`;
             }
+          } else if (req.type === "gen_video_first_last") {
+            const d = (req.result["duration_s"] ?? req.params["duration_s"] ?? 8) as number;
+            stampedVideoQuality = `first_last_${d}s`;
+          } else if (req.type === "gen_video_text") {
+            const d = (req.result["duration_s"] ?? req.params["duration_s"] ?? 4) as number;
+            stampedVideoQuality = `t2v_${d}s`;
           }
-          const videoMetadata = req.type === "gen_video" || req.type === "gen_video_omni" ? {
+          const isVideoReqType = req.type.startsWith("gen_video");
+          const videoMetadata = isVideoReqType ? {
             mediaProvider: String(req.params.media_provider || "flow"),
-            durationSeconds: typeof req.params.duration_s === "number" ? req.params.duration_s : null,
+            durationSeconds:
+              typeof req.result["duration_s"] === "number"
+                ? (req.result["duration_s"] as number)
+                : typeof req.params.duration_s === "number"
+                  ? req.params.duration_s
+                  : null,
             ...(typeof req.params.resolution === "string" ? { videoResolution: req.params.resolution } : {}),
             ...(typeof req.params.omni_version === "string" ? { omniVersion: req.params.omni_version } : {}),
           } : {};
@@ -481,6 +532,19 @@ function attachPoll(rfId: string, requestId: number, opts: PollOpts) {
                   ...(typeof req.params.seed === "number" ? { seed: req.params.seed } : {}),
                 }
               : {};
+          const renderedAt = new Date().toISOString();
+          const nextHistory =
+            producesMedia && mediaId
+              ? appendRenderToHistory(rfId, {
+                  mediaId,
+                  mediaIds,
+                  prompt: opts.prompt || (typeof req.params.prompt === "string" ? req.params.prompt : undefined),
+                  renderedAt,
+                  aspectRatio: opts.aspectRatio,
+                  imageModel: stampedImageModel,
+                  videoQuality: stampedVideoQuality,
+                })
+              : undefined;
           useBoardStore.getState().updateNodeData(rfId, {
             status: "done",
             ...videoMetadata,
@@ -489,6 +553,7 @@ function attachPoll(rfId: string, requestId: number, opts: PollOpts) {
             ...(producesMedia
               ? { mediaId, mediaIds, slotErrors: slotErrors ?? undefined }
               : {}),
+            ...(nextHistory ? { history: nextHistory } : {}),
             aiBrief: undefined,
             // Same guard as `prompt` in the patch below, for the same
             // reason: a resumed poll rebuilds `opts` from the request's
@@ -497,7 +562,7 @@ function attachPoll(rfId: string, requestId: number, opts: PollOpts) {
             // value. Every gen type sends one today — this is here so the
             // next one that doesn't isn't a silent data loss.
             ...(opts.aspectRatio ? { aspectRatio: opts.aspectRatio } : {}),
-            renderedAt: new Date().toISOString(),
+            renderedAt,
             error: partialError ?? undefined,
             ...(stampedImageModel ? { imageModel: stampedImageModel } : {}),
             ...(stampedVideoQuality ? { videoQuality: stampedVideoQuality } : {}),
@@ -534,11 +599,12 @@ function attachPoll(rfId: string, requestId: number, opts: PollOpts) {
                 ...(opts.prompt ? { prompt: opts.prompt } : {}),
                 mediaId,
                 mediaIds,
+                ...(nextHistory ? { history: nextHistory } : {}),
                 slotErrors: slotErrors ?? null,
                 variantCount: req.type.startsWith("gen_video") ? mediaIds.length : d?.variantCount ?? mediaIds.length,
                 aiBrief: null,
                 ...(opts.aspectRatio ? { aspectRatio: opts.aspectRatio } : {}),
-                renderedAt: new Date().toISOString(),
+                renderedAt,
                 // `null` clears stale error from a previous attempt
                 // when this run was clean; otherwise persist the
                 // partial summary so it survives reload.
@@ -822,6 +888,8 @@ async function submitFlowVideo(rfId: string, opts: {
   durationSeconds?: number;
   videoResolution?: VideoResolutionKey;
   videoRefFrame?: VideoRefFrameMode;
+  videoSubMode?: "auto" | "first_last" | "t2v";
+  endMediaId?: string;
 }) {
   const board = useBoardStore.getState();
   const node = board.nodes.find(n => n.id === rfId);
@@ -856,14 +924,21 @@ async function submitFlowVideo(rfId: string, opts: {
     !omni && rawVideoRes === "360p" ? "720p" : rawVideoRes;
   const variantCount = Math.min(4, Math.max(1, opts.variantCount ?? settings.defaultVideoCount ?? 1));
   const rawEntries = collectUpstreamRefEntries(rfId, board.nodes, board.edges);
-  const rawReferences = omni
-    ? collectUpstreamRefMediaIds(rfId)
-    : opts.sourceMediaIds?.length
-      ? opts.sourceMediaIds
-      : opts.sourceMediaId
-        ? [opts.sourceMediaId]
-        : [];
-  if (!rawReferences.length) return reject(omni ? "请先连入至少一张参考图或视频。" : "请先连入图片或视频并选择用于生成的源参考。");
+  const subMode = opts.videoSubMode ?? "auto";
+  const rawReferences =
+    subMode === "t2v"
+      ? []
+      : subMode === "first_last" && opts.sourceMediaId && opts.endMediaId
+        ? [opts.sourceMediaId, opts.endMediaId]
+        : omni
+          ? collectUpstreamRefMediaIds(rfId)
+          : opts.sourceMediaIds?.length
+            ? opts.sourceMediaIds
+            : opts.sourceMediaId
+              ? [opts.sourceMediaId]
+              : collectUpstreamRefMediaIds(rfId);
+  const isTextToVideo = subMode === "t2v" || rawReferences.length === 0;
+  const isFirstLast = subMode === "first_last" && rawReferences.length >= 2;
   const videoNodeByMediaId = new Map<string, FlowNode>();
   for (const entry of rawEntries) {
     if (entry.node.data.type === "video") {
@@ -873,7 +948,7 @@ async function submitFlowVideo(rfId: string, opts: {
       }
     }
   }
-  const hasVideoSource = rawReferences.some((id) => videoNodeByMediaId.has(id));
+  const hasVideoSource = !isTextToVideo && rawReferences.some((id) => videoNodeByMediaId.has(id));
   const nodeId = Number(rfId);
   if (!Number.isSafeInteger(nodeId) || nodeId < 1) return reject("视频节点尚未保存。");
   const draftAtSubmit = useGenerationStore.getState().videoDraft;
@@ -902,14 +977,49 @@ async function submitFlowVideo(rfId: string, opts: {
         });
         resolvedList.push(extractedId);
       }
-      references = Array.from(new Set(resolvedList));
+      references = isFirstLast ? resolvedList : Array.from(new Set(resolvedList));
     }
-    // Do not clear the last take, change the recorded balance, or start a second poll.
-    const req = await createRequest({
-      type: omni ? "gen_video_omni" : "gen_video", node_id: nodeId, flow_account_id: account.id,
-      params: {
-        media_provider: "flow", project_id: account.project_id, prompt: opts.prompt,
-        aspect_ratio: opts.aspectRatio ?? settings.defaultVideoAspect ?? "VIDEO_ASPECT_RATIO_LANDSCAPE",
+
+    const normalizedPrompt = normalizePromptRefMentions(opts.prompt, references.length);
+    let reqType: string;
+    let reqParams: Record<string, unknown>;
+    const aspect = opts.aspectRatio ?? settings.defaultVideoAspect ?? "VIDEO_ASPECT_RATIO_LANDSCAPE";
+
+    if (isFirstLast && references.length >= 2) {
+      const firstLastDur = [4, 6, 8, 10].reduce((best, cand) =>
+        Math.abs(cand - durationS) < Math.abs(best - durationS) ? cand : best,
+      );
+      reqType = "gen_video_first_last";
+      reqParams = {
+        media_provider: "flow",
+        project_id: account.project_id,
+        prompt: normalizedPrompt,
+        aspect_ratio: aspect,
+        resolution: rawVideoRes,
+        variant_count: variantCount,
+        duration_s: firstLastDur,
+        start_media_id: references[0],
+        end_media_id: references[1],
+      };
+    } else if (isTextToVideo) {
+      const t2vDur = durationS >= 7 ? 8 : 4;
+      reqType = "gen_video_text";
+      reqParams = {
+        media_provider: "flow",
+        project_id: account.project_id,
+        prompt: normalizedPrompt,
+        aspect_ratio: aspect,
+        resolution: rawVideoRes === "360p" ? "720p" : rawVideoRes,
+        variant_count: variantCount,
+        duration_s: t2vDur,
+      };
+    } else {
+      reqType = omni ? "gen_video_omni" : "gen_video";
+      reqParams = {
+        media_provider: "flow",
+        project_id: account.project_id,
+        prompt: normalizedPrompt,
+        aspect_ratio: aspect,
         resolution: videoResolution,
         variant_count: variantCount,
         ...(omni
@@ -920,23 +1030,31 @@ async function submitFlowVideo(rfId: string, opts: {
                 ? { start_media_id: references[0] }
                 : { start_media_ids: references }),
             }),
-      },
+      };
+    }
+
+    // Do not clear the last take, change the recorded balance, or start a second poll.
+    const req = await createRequest({
+      type: reqType,
+      node_id: nodeId,
+      flow_account_id: account.id,
+      params: reqParams,
     });
     const live = useBoardStore.getState();
     if (live.boardId !== board.boardId || !live.nodes.some(n => n.id === rfId)) return;
     live.updateNodeData(rfId, {
       status: "queued",
-      prompt: opts.prompt,
+      prompt: normalizedPrompt,
       error: undefined,
-      videoResolution,
+      videoResolution: reqType === "gen_video_text" && rawVideoRes === "360p" ? "720p" : videoResolution,
       ...(omni ? { omniVersion, durationSeconds: durationS } : { videoQuality }),
       ...(!node.data.mediaId && !node.data.mediaIds?.some(Boolean)
-        ? { variantCount: omni ? variantCount : Math.max(references.length, variantCount) }
+        ? { variantCount: isTextToVideo || isFirstLast || omni ? variantCount : Math.max(references.length, variantCount) }
         : {}),
     });
     if (draftAtSubmit?.rfId === rfId && useGenerationStore.getState().videoDraft === draftAtSubmit)
       useGenerationStore.setState({ videoDraft: null });
-    attachPoll(rfId, req.id, { prompt: opts.prompt, aspectRatio: opts.aspectRatio });
+    attachPoll(rfId, req.id, { prompt: normalizedPrompt, aspectRatio: opts.aspectRatio });
   } catch (err) {
     reject(err instanceof Error ? err.message : "视频提交失败，请先查看任务记录再重试。");
   } finally {
@@ -1058,19 +1176,22 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
     // `resumeActiveRequests` from ever re-attaching to this node.
     get().cancelGeneration(rfId);
 
-    // Optimistically update node — record variantCount so the placeholder
-    // grid matches the eventual variant count even before generation finishes.
+    // Optimistically update node — record variantCount and preserve any existing
+    // render in `history` before clearing the visible tile slots.
     const variantCount = Math.max(1, Math.min(opts.variantCount ?? 1, 4));
+    const preservedHistory = snapshotExistingHistory(rfId);
     useBoardStore.getState().updateNodeData(rfId, {
       status: "queued",
       prompt: opts.prompt,
       error: undefined,
       variantCount,
+      ...(preservedHistory.length > 0 ? { history: preservedHistory } : {}),
       mediaIds: undefined, mediaId: undefined,
     });
 
     // Create request
     let reqDto;
+    let normalizedPrompt = opts.prompt;
     try {
       const nodeDbId = parseInt(rfId, 10);
       const refMediaIds = await resolveUpstreamRefImageIds(rfId, {
@@ -1078,12 +1199,13 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
         flowAccountId,
         videoRefFrame: opts.videoRefFrame,
       });
+      normalizedPrompt = normalizePromptRefMentions(opts.prompt, refMediaIds.length);
       const curSettings = useSettingsStore.getState();
       const chosenImageModel = opts.imageModel ?? curSettings.imageModel;
       const chosenImageResolution = opts.imageResolution ?? curSettings.imageResolution;
       const chosenThinking = opts.thinkingLevel ?? curSettings.imageThinkingLevel;
       const params: Record<string, unknown> = {
-        prompt: opts.prompt,
+        prompt: normalizedPrompt,
         media_provider: mediaProvider,
         project_id: projectId,
         aspect_ratio: opts.aspectRatio ?? curSettings.defaultImageAspect ?? "IMAGE_ASPECT_RATIO_LANDSCAPE",
@@ -1108,7 +1230,7 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
       // text instead of all sharing `params.prompt`. Backend falls back
       // to single prompt when missing/short.
       if (opts.prompts && opts.prompts.length > 0) {
-        params.prompts = opts.prompts;
+        params.prompts = opts.prompts.map((p) => normalizePromptRefMentions(p, refMediaIds.length));
       }
       reqDto = await createRequest({
         type: "gen_image",
@@ -1124,7 +1246,7 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
 
     // Start polling — same machinery the reload-resume path re-attaches.
     attachPoll(rfId, reqDto.id, {
-      prompt: opts.prompt,
+      prompt: normalizedPrompt,
       aspectRatio: opts.aspectRatio,
     });
   },
@@ -1234,11 +1356,13 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
 
     get().cancelGeneration(rfId);
 
+    const preservedHistory = snapshotExistingHistory(rfId);
     useBoardStore.getState().updateNodeData(rfId, {
       status: "queued",
       prompt: opts.prompt,
       error: undefined,
       variantCount: 1,
+      ...(preservedHistory.length > 0 ? { history: preservedHistory } : {}),
       mediaIds: undefined,
     });
 

@@ -508,8 +508,10 @@ async def _tool_gen_video(board_id: int, args: dict) -> dict:
         node = _get_or_create_media_node(s, board_id, args.get("node_short_id"), "video", prompt)
         if node.type != "video":
             raise ChatAgentError("请选择视频节点保存提示词。")
+        from flowboard.services import video_routing as _video_routing
+
         busy = s.exec(select(Request.id).where(
-            Request.node_id == node.id, Request.type.in_(("gen_video", "gen_video_omni")),
+            Request.node_id == node.id, Request.type.in_(_video_routing.TYPES),
             Request.status.in_(("queued", "running")),
         ).limit(1)).first()
         if busy is not None:

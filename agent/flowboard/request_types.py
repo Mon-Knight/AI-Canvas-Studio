@@ -23,7 +23,14 @@ from __future__ import annotations
 # the only rows a generation poll can act on: it reads `media_ids` off the
 # result and writes them onto the node.
 MEDIA_PRODUCING_TYPES: frozenset[str] = frozenset(
-    {"gen_image", "gen_video", "gen_video_omni", "edit_image"}
+    {
+        "gen_image",
+        "gen_video",
+        "gen_video_omni",
+        "gen_video_first_last",
+        "gen_video_text",
+        "edit_image",
+    }
 )
 
 # The synchronous LLM activities. They are NOT worker requests — each one

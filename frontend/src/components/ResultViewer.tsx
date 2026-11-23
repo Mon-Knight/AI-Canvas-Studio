@@ -11,6 +11,7 @@ import {
   type MediaStatus,
 } from "../api/client";
 import { countryLabel, vibeLabel } from "../constants/character";
+import { switchNodeHistoryVersion } from "../lib/quickDerive";
 
 const ICON: Record<string, string> = {
   character: "◎",
@@ -39,6 +40,10 @@ function formatVideoQualityLabel(key: string): string {
     lite_relaxed: "Veo 3.1 - Lite（Ultra 0 积分）",
   };
   if (staticLabels[key]) return staticLabels[key];
+  const mFL = /^first_last_(\d+)s$/.exec(key);
+  if (mFL) return `Omni 首尾帧锁定 · ${mFL[1]}秒`;
+  const mT2v = /^t2v_(\d+)s$/.exec(key);
+  if (mT2v) return `Flow 纯文生视频 · ${mT2v[1]}秒`;
   const m12 = /^(?:omni_1\.2_|abra_1_2_r2v_)(\d+)s$/.exec(key);
   if (m12) return `Omni 1.2 Flash · ${m12[1]}秒`;
   const m11 = /^abra_r2v_(\d+)s$/.exec(key);
@@ -544,7 +549,7 @@ export function ResultViewer() {
             <p className="media-placeholder__hint">{hintText}</p>
           )}
 
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             {currentMediaId && (
               <button className="media-placeholder__refresh" onClick={handleRefresh}>
                 刷新预览
@@ -565,6 +570,27 @@ export function ResultViewer() {
                       aria-pressed={idx === activeIdx}
                     >
                       {blocked ? "⚠" : idx + 1}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+            {Array.isArray(data.history) && data.history.length >= 2 && rfId && (
+              <div className="variant-switcher" role="group" aria-label="切换历史版本">
+                {data.history.map((h, hIdx) => {
+                  const isCurrent = h.mediaId === data.mediaId;
+                  return (
+                    <button
+                      key={h.mediaId}
+                      type="button"
+                      className={`variant-switcher__chip${isCurrent ? " variant-switcher__chip--active" : ""}`}
+                      onClick={() => {
+                        switchNodeHistoryVersion(rfId, hIdx);
+                        setActiveIdx(0);
+                      }}
+                      title={h.prompt ? `第 ${hIdx + 1} 版：${h.prompt.slice(0, 60)}` : `第 ${hIdx + 1} 版`}
+                    >
+                      v{hIdx + 1}
                     </button>
                   );
                 })}

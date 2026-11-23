@@ -1165,6 +1165,206 @@ class FlowSDK:
             out["omni_version"] = ver
         return out
 
+    async def gen_video_first_last(
+        self,
+        prompt: str,
+        project_id: str,
+        start_media_id: str,
+        end_media_id: str,
+        duration_s: int = 8,
+        aspect_ratio: str = "VIDEO_ASPECT_RATIO_LANDSCAPE",
+        paygate_tier: Optional[str] = None,
+        resolution: str = "720p",
+        variant_count: int = 1,
+    ) -> dict[str, Any]:
+        """Kick off native Omni First+Last frame locked video (RPC ``nprQif``)."""
+        try:
+            resolve_paygate_tier(paygate_tier)
+            pid = self._project_id(project_id)
+        except (ValueError, fb.FlowBatchError) as exc:
+            return _batch_failure(exc)
+
+        clean_start = (start_media_id or "").strip()
+        clean_end = (end_media_id or "").strip()
+        if not clean_start or not clean_end:
+            return {"raw": None, "error": "missing_first_last_media_id"}
+
+        dur = min((4, 6, 8, 10), key=lambda d: abs(d - int(duration_s or 8)))
+        res = "360p" if str(resolution or "720p").strip().lower() == "360p" else "720p"
+        count = (
+            max(1, min(int(variant_count), MAX_VARIANT_COUNT))
+            if isinstance(variant_count, int) and not isinstance(variant_count, bool)
+            else 1
+        )
+        active_res = res
+        active_rpc = fb.RPC_GEN_VIDEO_FIRST_LAST
+        active_model = f"omni_flash_i2v_{dur}s_first_last" + ("_360p" if res == "360p" else "")
+        operation_ids: list[str] = []
+        failures: list[tuple[str, Exception]] = []
+
+        for idx in range(count):
+            try:
+                try:
+                    freq = fb.omni_first_last_request(
+                        prompt,
+                        pid,
+                        clean_start,
+                        clean_end,
+                        duration_s=dur,
+                        resolution=active_res,
+                        aspect=aspect_ratio,
+                    )
+                    payload = await self._payload(
+                        fb.RPC_GEN_VIDEO_FIRST_LAST,
+                        freq,
+                        fb.CAPTCHA_VIDEO,
+                        timeout=120.0,
+                    )
+                except fb.RpcError as exc:
+                    if not _is_rpc_invalid_or_not_found(exc):
+                        raise
+                    payload = None
+                    if active_res == "360p":
+                        try:
+                            freq720 = fb.omni_first_last_request(
+                                prompt,
+                                pid,
+                                clean_start,
+                                clean_end,
+                                duration_s=dur,
+                                resolution="720p",
+                                aspect=aspect_ratio,
+                            )
+                            payload = await self._payload(
+                                fb.RPC_GEN_VIDEO_FIRST_LAST,
+                                freq720,
+                                fb.CAPTCHA_VIDEO,
+                                timeout=120.0,
+                            )
+                            active_res = "720p"
+                            active_model = f"omni_flash_i2v_{dur}s_first_last"
+                        except fb.RpcError as retry_exc:
+                            if not _is_rpc_invalid_or_not_found(retry_exc):
+                                raise
+                    if payload is None:
+                        logger.warning(
+                            "nprQif rejected (%r); falling back to MZZa6b first+last refs",
+                            exc.detail,
+                        )
+                        freq_r2v = fb.omni_reference_video_request(
+                            prompt,
+                            pid,
+                            [clean_start, clean_end],
+                            duration_s=dur,
+                            resolution="720p",
+                            aspect=aspect_ratio,
+                        )
+                        payload = await self._payload(
+                            fb.RPC_GEN_VIDEO_REFERENCES,
+                            freq_r2v,
+                            fb.CAPTCHA_VIDEO,
+                            timeout=120.0,
+                        )
+                        active_res = "720p"
+                        active_rpc = fb.RPC_GEN_VIDEO_REFERENCES
+                        active_model = f"abra_r2v_{dur}s"
+                operation = fb.read_operation(payload)
+            except Exception as exc:  # broad by design: surfaced cleanly
+                failures.append((f"variant-{idx + 1}", exc))
+                continue
+            self._remember_operation(operation.operation_id, pid)
+            operation_ids.append(operation.operation_id)
+
+        out = self._video_submit_result(
+            operation_ids, failures, model=active_model, sources=count
+        )
+        if not out.get("error"):
+            out["duration_s"] = dur
+            out["resolution"] = active_res
+            out["rpc"] = active_rpc
+        return out
+
+    async def gen_video_text(
+        self,
+        prompt: str,
+        project_id: str,
+        duration_s: int = 4,
+        aspect_ratio: str = "VIDEO_ASPECT_RATIO_LANDSCAPE",
+        paygate_tier: Optional[str] = None,
+        variant_count: int = 1,
+    ) -> dict[str, Any]:
+        """Kick off pure text-to-video generation without reference images (RPC ``YhhmEf``)."""
+        try:
+            resolve_paygate_tier(paygate_tier)
+            pid = self._project_id(project_id)
+        except (ValueError, fb.FlowBatchError) as exc:
+            return _batch_failure(exc)
+
+        clean_prompt = (prompt or "").strip()
+        if not clean_prompt:
+            return {"raw": None, "error": "missing_prompt"}
+
+        want_8s = isinstance(duration_s, int) and not isinstance(duration_s, bool) and duration_s >= 7
+        candidates = ("abra_t2v_8s", "abra_t2v_4s") if want_8s else ("abra_t2v_4s",)
+        count = (
+            max(1, min(int(variant_count), MAX_VARIANT_COUNT))
+            if isinstance(variant_count, int) and not isinstance(variant_count, bool)
+            else 1
+        )
+        active_model = candidates[0]
+        operation_ids: list[str] = []
+        failures: list[tuple[str, Exception]] = []
+
+        for idx in range(count):
+            try:
+                payload = None
+                last_exc: Optional[Exception] = None
+                for cand_model in candidates:
+                    try:
+                        freq = fb.text_video_request(
+                            clean_prompt,
+                            pid,
+                            aspect=aspect_ratio,
+                            model=cand_model,
+                        )
+                        payload = await self._payload(
+                            fb.RPC_GEN_VIDEO_TEXT,
+                            freq,
+                            fb.CAPTCHA_VIDEO,
+                            timeout=120.0,
+                        )
+                        active_model = cand_model
+                        break
+                    except fb.RpcError as exc:
+                        last_exc = exc
+                        if not _is_rpc_invalid_or_not_found(exc):
+                            raise
+                if payload is None:
+                    raise last_exc or fb.FlowBatchError("text video submit returned no payload")
+
+                try:
+                    info = fb.read_text_video_submit(payload)
+                    op_id = info.get("workflow_id") or f"t2v:{info['media_id']}"
+                    target_pid = info.get("project_id") or pid
+                    self._remember_operation(op_id, target_pid)
+                    self._operation_media[op_id] = info["media_id"]
+                except (fb.FlowBatchError, ValueError, KeyError, IndexError, TypeError):
+                    operation = fb.read_operation(payload)
+                    op_id = operation.operation_id
+                    self._remember_operation(op_id, pid)
+            except Exception as exc:  # broad by design: surfaced cleanly
+                failures.append((f"variant-{idx + 1}", exc))
+                continue
+            operation_ids.append(op_id)
+
+        out = self._video_submit_result(
+            operation_ids, failures, model=active_model, sources=count
+        )
+        if not out.get("error"):
+            out["resolution"] = "720p"
+            out["duration_s"] = 8 if active_model.endswith("8s") else 4
+        return out
+
     async def upscale_video(
         self,
         media_id: str,

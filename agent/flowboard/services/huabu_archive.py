@@ -69,8 +69,13 @@ _SAFE_DATA_KEYS = {
     "charVibe",
     "charGender",
     "storyboardGrid",
+    "storyboardMode",
+    "cameraPreset",
+    "audioPrompt",
+    "endMediaId",
     "mediaId",
     "mediaIds",
+    "history",
     "renderedAt",
 }
 

@@ -1216,3 +1216,81 @@ async def test_discover_omni_1_2_macaron_cookie_keys_from_htrjv_catalog():
     sent_item = rec.payload(fb.RPC_GEN_VIDEO_REFERENCES, 0)[0][0]
     assert sent_item[2] == "macaron_cookie_r2v_5s"
     assert RPC_MODEL_CONFIG == "HTrJv"
+
+
+@pytest.mark.asyncio
+async def test_gen_video_first_last_submits_nprqif_and_falls_back_on_5():
+    end_media = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+    rec = BatchRecorder(responses={
+        fb.RPC_GEN_VIDEO_FIRST_LAST: [
+            batch_envelope(fb.RPC_GEN_VIDEO_FIRST_LAST, operation_payload("op-fl-1")),
+        ],
+    })
+    sdk = FlowSDK(client=rec)  # type: ignore[arg-type]
+    out = await sdk.gen_video_first_last(
+        prompt="平滑渐变过渡",
+        project_id=PID,
+        start_media_id=MEDIA,
+        end_media_id=end_media,
+        duration_s=6,
+        aspect_ratio="VIDEO_ASPECT_RATIO_PORTRAIT",
+        paygate_tier=TIER,
+    )
+    assert out.get("error") is None
+    assert out["operation_names"] == ["op-fl-1"]
+    assert out["duration_s"] == 6
+    sent = rec.payload(fb.RPC_GEN_VIDEO_FIRST_LAST, 0)[0][0]
+    assert sent[1] == "omni_flash_i2v_6s_first_last"
+    assert sent[4][1] == MEDIA
+    assert sent[5][1] == end_media
+
+    # When nprQif returns [5] NOT_FOUND, automatically falls back to MZZa6b refs [start, end]
+    fb_rec = BatchRecorder(responses={
+        fb.RPC_GEN_VIDEO_FIRST_LAST: [batch_error_envelope(fb.RPC_GEN_VIDEO_FIRST_LAST, [5])],
+        fb.RPC_GEN_VIDEO_REFERENCES: [
+            batch_envelope(fb.RPC_GEN_VIDEO_REFERENCES, operation_payload("op-fl-r2v")),
+        ],
+    })
+    out_fb = await FlowSDK(client=fb_rec).gen_video_first_last(  # type: ignore[arg-type]
+        prompt="fallback first last",
+        project_id=PID,
+        start_media_id=MEDIA,
+        end_media_id=end_media,
+        duration_s=8,
+        paygate_tier=TIER,
+    )
+    assert out_fb.get("error") is None
+    assert out_fb["operation_names"] == ["op-fl-r2v"]
+    fb_item = fb_rec.payload(fb.RPC_GEN_VIDEO_REFERENCES, 0)[0][0]
+    assert fb_item[OMNI_REFS] == [[None, MEDIA], [None, end_media]]
+
+
+@pytest.mark.asyncio
+async def test_gen_video_text_submits_yhhmef_and_polls_as29s():
+    t2v_mid = "12121212-3434-5656-7878-909090909090"
+    t2v_wf = "wf-t2v-1"
+    rec = BatchRecorder(responses={
+        fb.RPC_GEN_VIDEO_TEXT: [
+            batch_envelope(fb.RPC_GEN_VIDEO_TEXT, [None, None, None, [[t2v_mid, PID, t2v_wf, "PENDING"]]]),
+        ],
+        fb.RPC_MEDIA: [
+            batch_envelope(fb.RPC_MEDIA, media_urls_payload(t2v_mid, video=True, image=True)),
+        ],
+    })
+    sdk = FlowSDK(client=rec)  # type: ignore[arg-type]
+    out = await sdk.gen_video_text(
+        prompt="雨夜霓虹街景航拍长镜头",
+        project_id=PID,
+        duration_s=4,
+        aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE",
+        paygate_tier=TIER,
+    )
+    assert out.get("error") is None
+    assert out["operation_names"] == [t2v_wf]
+    assert sdk._operation_media[t2v_wf] == t2v_mid
+    sent = rec.payload(fb.RPC_GEN_VIDEO_TEXT, 0)[0][0]
+    assert sent[1] == "abra_t2v_4s"
+
+    poll = await sdk.check_async([t2v_wf])
+    assert poll["operations"][0]["done"] is True
+    assert poll["operations"][0]["media_entries"][0]["media_id"] == t2v_mid

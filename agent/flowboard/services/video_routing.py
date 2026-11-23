@@ -3,7 +3,14 @@ from flowboard.services import flow_accounts
 from flowboard.services.flow_sdk import resolve_paygate_tier
 from flowboard.services.ws_server import selected_tab_connected
 
-TYPES = frozenset({"gen_video", "gen_video_omni"})
+TYPES = frozenset(
+    {
+        "gen_video",
+        "gen_video_omni",
+        "gen_video_first_last",
+        "gen_video_text",
+    }
+)
 WRONG_ENGINE = "视频仅使用当前 Flow 账号，请在节点上重新确认生成。"
 
 

@@ -9903,3 +9903,111 @@ video.source-image-row__thumb {
 .jm-update-popover__dismiss:hover {
   color: var(--text-primary);
 }
+
+/* @图N 参考标签、原生台词/音效输入槽与首尾帧锁定选择栏 */
+.gen-dialog__at-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 9px;
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  background: rgba(20, 20, 23, 0.96);
+}
+
+.gen-dialog__at-hint {
+  font-size: 11px;
+  color: #a1a1aa;
+}
+
+.gen-dialog__at-chip {
+  color: #7dd3fc;
+  border-color: rgba(56, 189, 248, 0.32);
+}
+
+.ref-source-chip-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.ref-source-chip__at-btn {
+  padding: 2px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  background: rgba(56, 189, 248, 0.12);
+  color: #7dd3fc;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ref-source-chip__at-btn:hover {
+  background: rgba(56, 189, 248, 0.22);
+  color: #e0f2fe;
+}
+
+.gen-dialog__audio-slot {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.gen-dialog__audio-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.gen-dialog__preset-chip--active {
+  background: rgba(56, 189, 248, 0.14);
+  border-color: rgba(56, 189, 248, 0.42);
+  color: #bae6fd;
+}
+
+.gen-dialog__first-last-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: #141417;
+}
+
+.gen-dialog__first-last-slot {
+  display: flex;
+  flex: 1 1 160px;
+  align-items: center;
+  gap: 6px;
+}
+
+.gen-dialog__first-last-slot select {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #1c1c20;
+  color: #f4f4f6;
+  font-size: 11px;
+}
+
+.gen-dialog__first-last-tag {
+  font-size: 11px;
+  color: #a1a1aa;
+  white-space: nowrap;
+}
+
+.jm-context-generator__badge--cyan {
+  border-color: rgba(56, 189, 248, 0.34);
+  background: rgba(56, 189, 248, 0.12);
+  color: #7dd3fc;
+}
