@@ -6,7 +6,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Version = "1.4.0",
+    [string]$Version = "0.9.0",
     [string]$PythonExe = "",
     [switch]$SkipNpmCi
 )
@@ -140,9 +140,14 @@ $IconIco = Join-Path $RepoRoot "desktop\assets\icon.ico"
 $IconPng = Join-Path $RepoRoot "desktop\assets\icon.png"
 if (Test-Path $IconIco) {
     Write-Host "==> Embedding custom icon into AI-Canvas-Studio.exe..."
-    npx --yes rcedit@3.1.0 (Join-Path $AppOutDir "AI-Canvas-Studio.exe") --set-icon $IconIco
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "rcedit failed (exit code $LASTEXITCODE) — continuing without executable resource icon patch."
+    $peVer = if ($Version -match '^\d+\.\d+$') { "$Version.0" } else { $Version }
+    $targetExe = Join-Path $AppOutDir "AI-Canvas-Studio.exe"
+    Push-Location $DesktopDir
+    try {
+        node --input-type=module -e "import { rcedit } from 'rcedit'; await rcedit(process.argv[1], { icon: process.argv[2], 'file-version': process.argv[3], 'product-version': process.argv[3], 'version-string': { ProductName: 'AI Canvas Studio', FileDescription: 'AI Canvas Studio', CompanyName: 'Mon-Knight' } });" $targetExe $IconIco $peVer
+        Assert-LastExit "rcedit icon embedding"
+    } finally {
+        Pop-Location
     }
 }
 

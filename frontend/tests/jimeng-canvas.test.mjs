@@ -667,6 +667,9 @@ test("github release helper parses Setup/Portable assets, handles dismissal, and
     } = await server.ssrLoadModule("/src/api/github.ts");
 
     assert.ok(/^\d+\.\d+\.\d+/.test(CURRENT_APP_VERSION));
+    assert.equal(isNewerVersion("v0.9.1", "0.9"), true);
+    assert.equal(isNewerVersion("v1.0", "0.9.0"), true);
+    assert.equal(isNewerVersion("v0.9", "0.9.0"), false);
     assert.equal(isNewerVersion("v1.5.0", "1.4.0"), true);
     assert.equal(isNewerVersion("v1.4.1", "1.4.0"), true);
     assert.equal(isNewerVersion("v1.4.0", "1.4.0"), false);

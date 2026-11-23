@@ -124,9 +124,9 @@ export async function getLatestRelease(forceRefresh = false): Promise<LatestRele
  *  show a false-positive "New version" badge. */
 export function isNewerVersion(latest: string, current: string): boolean {
   const parse = (v: string): number[] | null => {
-    const m = v.replace(/^v/i, "").trim().match(/^(\d+)\.(\d+)\.(\d+)/);
+    const m = v.replace(/^v/i, "").trim().match(/^(\d+)\.(\d+)(?:\.(\d+))?/);
     if (!m) return null;
-    return [Number(m[1]), Number(m[2]), Number(m[3])];
+    return [Number(m[1]), Number(m[2]), Number(m[3] ?? 0)];
   };
   const a = parse(latest);
   const b = parse(current);

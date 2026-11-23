@@ -9,7 +9,7 @@ on:
       version:
         description: "Release version (without v prefix)"
         required: true
-        default: "1.4.0"
+        default: "0.9.0"
       publish_release:
         description: "Publish artifacts to GitHub Releases"
         type: boolean
@@ -45,7 +45,7 @@ jobs:
           } else {
             $ver = "${{ github.event.inputs.version }}"
           }
-          if (-not $ver) { $ver = "1.4.0" }
+          if (-not $ver) { $ver = "0.9.0" }
           Add-Content -Path $env:GITHUB_ENV -Value "APP_VERSION=$ver"
 
       - name: Ensure Inno Setup 6 is installed
@@ -80,6 +80,7 @@ jobs:
           tag_name: v${{ env.APP_VERSION }}
           name: AI Canvas Studio v${{ env.APP_VERSION }}
           generate_release_notes: true
+          make_latest: "true"
           files: |
             release/AI-Canvas-Studio-v*.exe
             release/AI-Canvas-Studio-v*.zip

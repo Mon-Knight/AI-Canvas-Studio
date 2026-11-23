@@ -17,12 +17,12 @@
   </p>
 
   <p>
-    <a href="https://github.com/Mon-Knight/AI-Canvas-Studio/releases/download/v1.4.0/AI-Canvas-Studio-v1.4.0-win64-setup.exe">
-      <strong>📥 下载 Windows 安装版 Setup.exe (v1.4.0)</strong>
+    <a href="https://github.com/Mon-Knight/AI-Canvas-Studio/releases/download/v0.9.0/AI-Canvas-Studio-v0.9.0-win64-setup.exe">
+      <strong>📥 下载 Windows 安装版 Setup.exe (v0.9.0)</strong>
     </a>
     &nbsp;&nbsp;|&nbsp;&nbsp;
-    <a href="https://github.com/Mon-Knight/AI-Canvas-Studio/releases/download/v1.4.0/AI-Canvas-Studio-v1.4.0-win64-portable.zip">
-      <strong>📦 下载免安装绿色便携版 Portable.zip (v1.4.0)</strong>
+    <a href="https://github.com/Mon-Knight/AI-Canvas-Studio/releases/download/v0.9.0/AI-Canvas-Studio-v0.9.0-win64-portable.zip">
+      <strong>📦 下载免安装绿色便携版 Portable.zip (v0.9.0)</strong>
     </a>
     &nbsp;&nbsp;|&nbsp;&nbsp;
     <a href="https://github.com/Mon-Knight/AI-Canvas-Studio/releases/latest">
@@ -103,13 +103,13 @@ cd ..
 安装 PyInstaller 后，运行一体化打包脚本即可生成 `release/AI-Canvas-Studio-v*-win64-portable.zip`（若本机装有 Inno Setup 6 将同步生成 `setup.exe`）：
 ```powershell
 agent\.venv\Scripts\python.exe -m pip install pyinstaller
-pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\package-windows.ps1 -Version "1.4.0" -SkipNpmCi
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\package-windows.ps1 -Version "0.9.0" -SkipNpmCi
 ```
 
 ### 4. GitHub Actions 自动发版
 本仓库已配置两套工作流：
 - `.github/workflows/ci.yml`：每次向 `main` 分支 `push` 或提交 PR 时，自动校验前端 `tsc` + `vite build` + `node --test`、桌面端 TypeScript 构建以及后端 `pytest`。
-- `.github/workflows/release.yml`：打版本标签（如 `git tag -a v1.5.0 -m "AI Canvas Studio v1.5.0" && git push origin v1.5.0`）或在 GitHub 网页 **Actions → Build & Release Windows Studio → Run workflow** 一键触发，云端自动编译 `Setup.exe` 与 `Portable.zip` 并发布至 Releases。
+- `.github/workflows/release.yml`：打版本标签（如 `git tag -a v0.9.0 -m "AI Canvas Studio v0.9.0" && git push origin v0.9.0`）或在 GitHub 网页 **Actions → Build & Release Windows Studio → Run workflow** 一键触发，云端自动编译 `Setup.exe` 与 `Portable.zip` 并发布至 Releases。
 
 ---
 
