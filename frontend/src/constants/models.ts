@@ -43,11 +43,11 @@ export const VIDEO_MODEL_CATALOG: readonly VideoModelCatalogEntry[] = [
     videoModel: "omni_flash",
     omniVersion: "1.2",
     officialBadge: "新一代 · 多参考图",
-    creditTag: "9–45 积分/条（随秒数）",
+    creditTag: "360p 3–20 / 720p 9–60 积分/条（11–15秒加倍）",
     speedTier: "极快（3–15秒连续时长）",
     qualityTier: "高（角色一致性与多图融合最佳）",
     bestFor:
-      "人物/主体锁定、多张参考图叙事串联、带台词/音效的动态短片（3–10秒 全会员可用；11–15秒 需 Plus/Ultra；若当前账号暂未开放 1.2 将自动平滑回退 1.1）",
+      "人物/主体锁定、多张参考图叙事串联、带台词/音效的动态短片（3–10秒 全会员可用；11–15秒 需 Plus/Pro/Ultra；若当前账号暂未开放 1.2 将自动平滑回退 1.1）",
     durationHint: "3–15秒可选",
   },
   {
@@ -56,11 +56,11 @@ export const VIDEO_MODEL_CATALOG: readonly VideoModelCatalogEntry[] = [
     videoModel: "omni_flash",
     omniVersion: "1.1",
     officialBadge: "旧版多参考",
-    creditTag: "15–30 积分/条（随秒数）",
+    creditTag: "360p 4–7 / 720p 15–30 积分/条（随秒数）",
     deprecationNote: "将于 12月5日停用",
     deprecated: true,
     speedTier: "极快（4/6/8/10秒）",
-    qualityTier: "中高（15–30 积分随秒数递增）",
+    qualityTier: "中高（按分辨率与秒数计费）",
     bestFor: "旧版参考生视频工作流兼容；新项目建议优先使用 Omni 1.2 Flash",
     durationHint: "4 / 6 / 8 / 10秒",
   },
@@ -97,7 +97,7 @@ export const VIDEO_MODEL_CATALOG: readonly VideoModelCatalogEntry[] = [
     videoModel: "veo",
     videoQuality: "quality",
     officialBadge: "最高精修",
-    creditTag: "Ultra 50 / Pro 100 积分/条",
+    creditTag: "全档位 100 积分/条",
     deprecationNote: "将于 12月5日停用",
     deprecated: true,
     speedTier: "较慢（高负载排队）",
@@ -228,13 +228,28 @@ export const VIDEO_RESOLUTION_OPTIONS: readonly ResolutionOption<VideoResolution
   {
     value: "360p",
     label: "360p",
-    badge: "Omni 草稿",
-    hint: "Omni 专属快速草稿分辨率（Veo 3.1 原生固定 720p 起）",
+    badge: "Omni 低分草稿",
+    hint: "Omni 专属低成本草稿（1–10秒 1积分/秒，11–15秒超出部分 2积分/秒，约为 720p 的 1/3）",
     omniOnly: true,
   },
-  { value: "720p", label: "720p", badge: "标准原生", hint: "Flow 默认原生输出清晰度，速度与画质最稳" },
-  { value: "1080p", label: "1080p", badge: "Plus/Ultra 重塑", hint: "720p 成片后自动调用官方 1080p 超分（不支持则保留 720p）" },
-  { value: "4k", label: "4K", badge: "Ultra 重塑", hint: "720p 成片后自动调用官方 4K 超分（需 Ultra）" },
+  {
+    value: "720p",
+    label: "720p",
+    badge: "标准原生",
+    hint: "Flow 默认原生输出清晰度（Omni 1–10秒 3积分/秒，11–15秒超出部分 6积分/秒）",
+  },
+  {
+    value: "1080p",
+    label: "1080p",
+    badge: "Plus/Pro/Ultra 超分",
+    hint: "720p 成片后自动调用官方 1080p 超分（1–10秒 0 附加分；11–15秒超出10秒部分 +1积分/秒）",
+  },
+  {
+    value: "4k",
+    label: "4K",
+    badge: "Ultra 专属 +50分起",
+    hint: "720p 成片后自动调用官方 4K 超分（需 Ultra：1–10秒 +50积分/条，超过10秒每多1秒 +5积分）",
+  },
 ];
 
 export const OUTPUT_COUNT_OPTIONS = [1, 2, 3, 4] as const;
@@ -292,7 +307,8 @@ export function findImageModelEntry(
   );
 }
 
-// ── Flow 官方积分消耗表（同步 Flow web HTrJv / nwb 计费表）────────────────────
+// ── Flow 官方积分消耗表（严格同步 Google Flow 官方积分帮助文档）────────────────
+// Omni 1.2 Flash 720p：1–10秒 3积分/秒；11–15秒超出10秒部分 6积分/秒
 export const OMNI_1_2_CREDIT_COST: Readonly<Record<number, number>> = {
   3: 9,
   4: 12,
@@ -302,11 +318,28 @@ export const OMNI_1_2_CREDIT_COST: Readonly<Record<number, number>> = {
   8: 24,
   9: 27,
   10: 30,
-  11: 33,
-  12: 36,
-  13: 39,
-  14: 42,
-  15: 45,
+  11: 36,
+  12: 42,
+  13: 48,
+  14: 54,
+  15: 60,
+};
+
+// Omni 1.2 Flash 360p：1–10秒 1积分/秒；11–15秒超出10秒部分 2积分/秒（约为 720p 的 1/3）
+export const OMNI_1_2_CREDIT_COST_360P: Readonly<Record<number, number>> = {
+  3: 3,
+  4: 4,
+  5: 5,
+  6: 6,
+  7: 7,
+  8: 8,
+  9: 9,
+  10: 10,
+  11: 12,
+  12: 14,
+  13: 16,
+  14: 18,
+  15: 20,
 };
 
 export const OMNI_1_1_CREDIT_COST: Readonly<Record<number, number>> = {
@@ -315,6 +348,58 @@ export const OMNI_1_1_CREDIT_COST: Readonly<Record<number, number>> = {
   8: 25,
   10: 30,
 };
+
+export const OMNI_1_1_CREDIT_COST_360P: Readonly<Record<number, number>> = {
+  4: 4,
+  6: 5,
+  8: 6,
+  10: 7,
+};
+
+/** 计算 Omni Flash 基础生成单条积分（1080p/4K 先出 720p 底片，故基础档按 720p 计费）。 */
+export function estimateOmniBaseCreditCost(
+  version: OmniFlashVersion,
+  durationSeconds: number,
+  resolution: VideoResolutionKey = "720p",
+): number {
+  const dur = Math.max(3, Math.min(15, Math.round(durationSeconds || 8)));
+  const is360p = resolution === "360p";
+  if (version === "1.2") {
+    if (is360p) {
+      return (
+        OMNI_1_2_CREDIT_COST_360P[dur] ??
+        (dur <= 10 ? dur : 10 + (dur - 10) * 2)
+      );
+    }
+    return (
+      OMNI_1_2_CREDIT_COST[dur] ??
+      (dur <= 10 ? dur * 3 : 30 + (dur - 10) * 6)
+    );
+  }
+  if (is360p) {
+    return OMNI_1_1_CREDIT_COST_360P[dur] ?? 6;
+  }
+  return OMNI_1_1_CREDIT_COST[dur] ?? 25;
+}
+
+/** 计算视频超分重塑（UPSAMPLE_VIDEO）单条附加积分，严格匹配 Google Flow 官方规则：
+ * - 1080p（Plus/Pro/Ultra）：1–10 秒 0 积分；超出 10 秒部分 +1 积分/秒
+ * - 4K（仅 Ultra）：1–10 秒固定 +50 积分；超出 10 秒部分 +5 积分/秒 */
+export function estimateVideoUpscaleCreditCost(
+  resolution: VideoResolutionKey | "1080p" | "4K" | "4k",
+  durationSeconds = 8,
+): number {
+  const norm = String(resolution || "720p").trim().toLowerCase();
+  const dur = Math.max(1, Math.round(durationSeconds || 8));
+  const extraOver10 = Math.max(0, dur - 10);
+  if (norm === "1080p") {
+    return extraOver10;
+  }
+  if (norm === "4k") {
+    return 50 + extraOver10 * 5;
+  }
+  return 0;
+}
 
 export interface CreditEstimate {
   perUnit: number;
@@ -338,9 +423,9 @@ export function estimateImageCreditCost(params: {
   const modelEntry = findImageModelEntry(params.imageModel);
   const resNote =
     params.imageResolution === "4K"
-      ? "4K 超清重塑（需 Ultra · 0 额外积分）"
+      ? "4K 超清重塑（需 Ultra 订阅额度 · 0 额外积分）"
       : params.imageResolution === "2K"
-        ? "2K 高清重塑（Free 可用 · 0 额外积分）"
+        ? "2K 高清重塑（0 额外积分）"
         : "1K 原生直出";
   return {
     perUnit: 0,
@@ -365,55 +450,72 @@ export function estimateVideoCreditCost(params: {
   const rawRes = params.videoResolution ?? "720p";
   const res: VideoResolutionKey =
     params.videoModel !== "omni_flash" && rawRes === "360p" ? "720p" : rawRes;
+  const effectiveDur =
+    params.videoModel === "omni_flash" ? (params.durationSeconds ?? 8) : 8;
+  const upscalePerUnit = estimateVideoUpscaleCreditCost(res, effectiveDur);
   const resNote =
     res === "4k"
-      ? "4K 超分（需 Ultra · 0 额外积分）"
+      ? `4K 超分（需 Ultra · +${upscalePerUnit} 积分/条）`
       : res === "1080p"
-        ? "1080p 超分（Plus/Ultra · 0 额外积分）"
+        ? upscalePerUnit > 0
+          ? `1080p 超分（Plus/Pro/Ultra · +${upscalePerUnit} 积分/条）`
+          : "1080p 超分（Plus/Pro/Ultra · 1–10秒 0 附加分）"
         : res === "360p"
-          ? "360p 草稿"
+          ? "360p 草稿（约为 720p 的 1/3）"
           : "720p 原生";
 
   if (params.videoModel === "omni_flash") {
     const ver = params.omniVersion ?? "1.2";
-    const dur = params.durationSeconds ?? 8;
-    const perUnit =
-      ver === "1.2"
-        ? (OMNI_1_2_CREDIT_COST[dur] ?? Math.max(12, Math.min(45, dur * 3)))
-        : (OMNI_1_1_CREDIT_COST[dur] ?? 25);
+    const dur = effectiveDur;
+    const basePerUnit = estimateOmniBaseCreditCost(ver, dur, res);
+    const perUnit = basePerUnit + upscalePerUnit;
     const total = perUnit * safeCount;
+    const baseLabel = res === "360p" ? "360p" : "720p";
+    const detailFormula =
+      upscalePerUnit > 0
+        ? `${baseLabel} ${basePerUnit} + ${res.toUpperCase()}超分 ${upscalePerUnit} = ${perUnit} 积分/条`
+        : `${baseLabel} ${perUnit} 积分/条`;
     return {
       perUnit,
       count: safeCount,
       total,
-      isZero: false,
+      isZero: total === 0,
       displayText: `消耗 ${total} 积分`,
-      breakdown: `Omni ${ver} Flash · ${dur}秒 (${perUnit} 积分/条) × ${safeCount} 条 · ${resNote}`,
+      breakdown: `Omni ${ver} Flash · ${dur}秒 (${detailFormula}) × ${safeCount} 条 · ${resNote}`,
     };
   }
 
   const q = params.videoQuality ?? "lite";
   if (q === "lite_relaxed") {
+    const perUnit = upscalePerUnit;
+    const total = perUnit * safeCount;
     const tierWarn =
       params.paygateTier === "PAYGATE_TIER_ONE"
         ? "（当前账号为 Pro 档，此通道仅限 Ultra 账号使用）"
         : "（Ultra 专属零积分低优队列）";
+    const costPart =
+      upscalePerUnit > 0
+        ? `底片 0 + ${res.toUpperCase()}超分 ${upscalePerUnit} = ${perUnit} 积分/条`
+        : "0 积分/条";
     return {
-      perUnit: 0,
+      perUnit,
       count: safeCount,
-      total: 0,
-      isZero: true,
-      displayText: "消耗 0 积分",
-      breakdown: `Veo 3.1 - Lite [Lower Priority] · 8秒 × ${safeCount} 条 · ${resNote} ${tierWarn}`,
+      total,
+      isZero: total === 0,
+      displayText: `消耗 ${total} 积分`,
+      breakdown: `Veo 3.1 - Lite [Lower Priority] · 8秒 (${costPart}) × ${safeCount} 条 · ${resNote} ${tierWarn}`,
     };
   }
 
+  // 官方标准费率（Veo 3.1 Quality 对所有会员均为 100 积分/条；Lite 为 Ultra 5 / 其他 10；Fast 为 Ultra 10 / 其他 20）
   const rates: Record<"lite" | "fast" | "quality", [number, number]> = {
     lite: [5, 10],
     fast: [10, 20],
-    quality: [50, 100],
+    quality: [100, 100],
   };
-  const [ultraRate, proRate] = rates[q === "quality" ? "quality" : q === "fast" ? "fast" : "lite"];
+  const [ultraBase, proBase] = rates[q === "quality" ? "quality" : q === "fast" ? "fast" : "lite"];
+  const ultraRate = ultraBase + upscalePerUnit;
+  const proRate = proBase + upscalePerUnit;
   const modelLabel =
     q === "quality"
       ? "Veo 3.1 - Quality"
@@ -423,30 +525,48 @@ export function estimateVideoCreditCost(params: {
 
   if (params.paygateTier === "PAYGATE_TIER_TWO") {
     const total = ultraRate * safeCount;
+    const detail =
+      upscalePerUnit > 0
+        ? `Ultra 档 底片 ${ultraBase} + ${res.toUpperCase()}超分 ${upscalePerUnit} = ${ultraRate} 积分/条`
+        : `Ultra 档 ${ultraRate} 积分/条`;
     return {
       perUnit: ultraRate,
       count: safeCount,
       total,
       isZero: false,
       displayText: `消耗 ${total} 积分`,
-      breakdown: `${modelLabel} · Ultra 档 ${ultraRate} 积分/条 × ${safeCount} 条 · 8秒 · ${resNote}`,
+      breakdown: `${modelLabel} · ${detail} × ${safeCount} 条 · 8秒 · ${resNote}`,
     };
   }
 
   if (params.paygateTier === "PAYGATE_TIER_ONE") {
     const total = proRate * safeCount;
+    const detail =
+      upscalePerUnit > 0
+        ? `Pro 档 底片 ${proBase} + ${res.toUpperCase()}超分 ${upscalePerUnit} = ${proRate} 积分/条`
+        : `Pro 档 ${proRate} 积分/条`;
     return {
       perUnit: proRate,
       count: safeCount,
       total,
       isZero: false,
       displayText: `消耗 ${total} 积分`,
-      breakdown: `${modelLabel} · Pro 档 ${proRate} 积分/条 × ${safeCount} 条 · 8秒 · ${resNote}`,
+      breakdown: `${modelLabel} · ${detail} × ${safeCount} 条 · 8秒 · ${resNote}`,
     };
   }
 
   const totalMin = ultraRate * safeCount;
   const totalMax = proRate * safeCount;
+  if (totalMin === totalMax) {
+    return {
+      perUnit: ultraRate,
+      count: safeCount,
+      total: totalMin,
+      isZero: false,
+      displayText: `消耗 ${totalMin} 积分`,
+      breakdown: `${modelLabel} · 全档位 ${ultraRate} 积分/条 × ${safeCount} 条 · 8秒 · ${resNote}`,
+    };
+  }
   return {
     perUnit: ultraRate,
     perUnitMax: proRate,

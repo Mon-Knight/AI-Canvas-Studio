@@ -404,10 +404,12 @@ test("estimateImageCreditCost & estimateVideoCreditCost compute model/resolution
       VIDEO_RESOLUTION_OPTIONS,
       estimateImageCreditCost,
       estimateVideoCreditCost,
+      estimateVideoUpscaleCreditCost,
     } = await server.ssrLoadModule("/src/constants/models.ts");
 
     assert.equal(VIDEO_RESOLUTION_OPTIONS.find((r) => r.value === "360p")?.omniOnly, true);
 
+    // Veo 3.1 clamps 360p -> 720p
     const veo360Clamped = estimateVideoCreditCost({
       videoModel: "veo",
       videoQuality: "lite",
@@ -429,15 +431,27 @@ test("estimateImageCreditCost & estimateVideoCreditCost compute model/resolution
     assert.equal(img4k.displayText, "消耗 0 积分");
     assert.ok(img4k.breakdown.includes("Ultra"));
 
-    const veoLiteUltra = estimateVideoCreditCost({
+    // Veo 3.1 Lite (8s) + 1080p: 1-10s upscale is 0 extra credits
+    const veoLiteUltra1080 = estimateVideoCreditCost({
       videoModel: "veo",
       videoQuality: "lite",
       videoResolution: "1080p",
       count: 1,
       paygateTier: "PAYGATE_TIER_TWO",
     });
-    assert.equal(veoLiteUltra.total, 5);
-    assert.equal(veoLiteUltra.displayText, "消耗 5 积分");
+    assert.equal(veoLiteUltra1080.total, 5);
+    assert.equal(veoLiteUltra1080.displayText, "消耗 5 积分");
+
+    // Veo 3.1 Lite (8s) + 4K: 5 base + 50 4K upscale = 55 credits
+    const veoLiteUltra4k = estimateVideoCreditCost({
+      videoModel: "veo",
+      videoQuality: "lite",
+      videoResolution: "4k",
+      count: 2,
+      paygateTier: "PAYGATE_TIER_TWO",
+    });
+    assert.equal(veoLiteUltra4k.perUnit, 55);
+    assert.equal(veoLiteUltra4k.total, 110);
 
     const veoLitePro = estimateVideoCreditCost({
       videoModel: "veo",
@@ -455,6 +469,7 @@ test("estimateImageCreditCost & estimateVideoCreditCost compute model/resolution
     });
     assert.equal(veoLiteUnknown.displayText, "消耗 5~10 积分");
 
+    // Veo 3.1 Quality is 100 credits across ALL tiers (including Ultra)
     const veoQualityPro = estimateVideoCreditCost({
       videoModel: "veo",
       videoQuality: "quality",
@@ -462,33 +477,130 @@ test("estimateImageCreditCost & estimateVideoCreditCost compute model/resolution
       paygateTier: "PAYGATE_TIER_ONE",
     });
     assert.equal(veoQualityPro.total, 200);
+    const veoQualityUltra = estimateVideoCreditCost({
+      videoModel: "veo",
+      videoQuality: "quality",
+      count: 1,
+      paygateTier: "PAYGATE_TIER_TWO",
+    });
+    assert.equal(veoQualityUltra.total, 100);
+    const veoQualityUnknown = estimateVideoCreditCost({
+      videoModel: "veo",
+      videoQuality: "quality",
+      count: 1,
+    });
+    assert.equal(veoQualityUnknown.displayText, "消耗 100 积分");
 
+    // Veo 3.1 Lite Relaxed (720p = 0 credits, 4K = +50 credits/clip!)
     const veoRelaxed = estimateVideoCreditCost({
       videoModel: "veo",
       videoQuality: "lite_relaxed",
+      videoResolution: "720p",
       count: 4,
       paygateTier: "PAYGATE_TIER_TWO",
     });
     assert.equal(veoRelaxed.total, 0);
     assert.equal(veoRelaxed.isZero, true);
 
+    const veoRelaxed4k = estimateVideoCreditCost({
+      videoModel: "veo",
+      videoQuality: "lite_relaxed",
+      videoResolution: "4k",
+      count: 4,
+      paygateTier: "PAYGATE_TIER_TWO",
+    });
+    assert.equal(veoRelaxed4k.total, 200);
+    assert.equal(veoRelaxed4k.isZero, false);
+    assert.equal(veoRelaxed4k.displayText, "消耗 200 积分");
+
+    // Omni 1.2 Flash 360p (1 credit/s up to 10s, +2 credits/s for 11-15s)
+    const omni12_360_8s = estimateVideoCreditCost({
+      videoModel: "omni_flash",
+      omniVersion: "1.2",
+      durationSeconds: 8,
+      videoResolution: "360p",
+      count: 2,
+      paygateTier: "PAYGATE_TIER_ONE",
+    });
+    assert.equal(omni12_360_8s.perUnit, 8);
+    assert.equal(omni12_360_8s.total, 16);
+
+    const omni12_360_15s = estimateVideoCreditCost({
+      videoModel: "omni_flash",
+      omniVersion: "1.2",
+      durationSeconds: 15,
+      videoResolution: "360p",
+      count: 1,
+      paygateTier: "PAYGATE_TIER_TWO",
+    });
+    assert.equal(omni12_360_15s.total, 20);
+
+    // Omni 1.2 Flash 720p (3 credits/s up to 10s, +6 credits/s for 11-15s)
     const omni12 = estimateVideoCreditCost({
       videoModel: "omni_flash",
       omniVersion: "1.2",
       durationSeconds: 8,
+      videoResolution: "720p",
       count: 2,
       paygateTier: "PAYGATE_TIER_ONE",
     });
     assert.equal(omni12.total, 48);
 
+    const omni15s720 = estimateVideoCreditCost({
+      videoModel: "omni_flash",
+      omniVersion: "1.2",
+      durationSeconds: 15,
+      videoResolution: "720p",
+      count: 1,
+      paygateTier: "PAYGATE_TIER_TWO",
+    });
+    assert.equal(omni15s720.total, 60);
+
+    // Omni 1.2 Flash 15s + 1080p: 60 base + 5 (1 credit/s over 10s) = 65
+    const omni15s1080 = estimateVideoCreditCost({
+      videoModel: "omni_flash",
+      omniVersion: "1.2",
+      durationSeconds: 15,
+      videoResolution: "1080p",
+      count: 1,
+      paygateTier: "PAYGATE_TIER_TWO",
+    });
+    assert.equal(omni15s1080.total, 65);
+
+    // Omni 1.2 Flash 15s + 4K: 60 base + 75 (50 + 5*5) = 135
+    const omni15s4k = estimateVideoCreditCost({
+      videoModel: "omni_flash",
+      omniVersion: "1.2",
+      durationSeconds: 15,
+      videoResolution: "4k",
+      count: 1,
+      paygateTier: "PAYGATE_TIER_TWO",
+    });
+    assert.equal(omni15s4k.total, 135);
+    assert.equal(estimateVideoUpscaleCreditCost("1080p", 10), 0);
+    assert.equal(estimateVideoUpscaleCreditCost("1080p", 12), 2);
+    assert.equal(estimateVideoUpscaleCreditCost("4k", 8), 50);
+    assert.equal(estimateVideoUpscaleCreditCost("4k", 15), 75);
+
+    // Omni 1.1 Flash 720p vs 360p
     const omni11 = estimateVideoCreditCost({
       videoModel: "omni_flash",
       omniVersion: "1.1",
       durationSeconds: 6,
+      videoResolution: "720p",
       count: 1,
       paygateTier: "PAYGATE_TIER_TWO",
     });
     assert.equal(omni11.total, 20);
+    const omni11_360 = estimateVideoCreditCost({
+      videoModel: "omni_flash",
+      omniVersion: "1.1",
+      durationSeconds: 6,
+      videoResolution: "360p",
+      count: 1,
+      paygateTier: "PAYGATE_TIER_TWO",
+    });
+    assert.equal(omni11_360.total, 5);
 
     const { OMNI_1_2_DURATIONS } = await server.ssrLoadModule("/src/constants/models.ts");
     assert.equal(OMNI_1_2_DURATIONS[0], 3);
@@ -504,14 +616,22 @@ test("estimateImageCreditCost & estimateVideoCreditCost compute model/resolution
     });
     assert.equal(omni3s.total, 9);
 
-    const omni15s = estimateVideoCreditCost({
-      videoModel: "omni_flash",
-      omniVersion: "1.2",
-      durationSeconds: 15,
-      count: 1,
-      paygateTier: "PAYGATE_TIER_TWO",
-    });
-    assert.equal(omni15s.total, 45);
+    // Verify api() extracts FastAPI JSON detail on 409 instead of raw "409 Conflict"
+    const { api } = await server.ssrLoadModule("/src/api/client.ts");
+    const origFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = async () =>
+        new Response(JSON.stringify({ detail: "请先在 Flow 账号设置中绑定项目。" }), {
+          status: 409,
+          statusText: "Conflict",
+          headers: { "Content-Type": "application/json" },
+        });
+      await assert.rejects(() => api("/api/boards/1/project", { method: "POST" }), {
+        message: "请先在 Flow 账号设置中绑定项目。",
+      });
+    } finally {
+      globalThis.fetch = origFetch;
+    }
   } finally {
     await server.close();
   }

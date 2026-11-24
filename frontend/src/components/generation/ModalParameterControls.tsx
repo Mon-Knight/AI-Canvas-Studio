@@ -8,11 +8,11 @@ import type {
   VideoResolutionKey,
 } from "../../store/settings";
 import {
+  estimateOmniBaseCreditCost,
+  estimateVideoUpscaleCreditCost,
   IMAGE_MODEL_CATALOG,
   IMAGE_RESOLUTION_OPTIONS,
   IMAGE_THINKING_OPTIONS,
-  OMNI_1_1_CREDIT_COST,
-  OMNI_1_2_CREDIT_COST,
   OMNI_1_2_DURATIONS,
   OUTPUT_COUNT_OPTIONS,
   VIDEO_MODEL_CATALOG,
@@ -283,7 +283,7 @@ export function ModalParameterControls({
         <div className="gen-dialog__field">
           <span className="gen-dialog__label">
             视频分辨率
-            <InfoTip tip="360p/720p 为原生输出；1080p/4K 先出 720p 成片后再自动调用官方超分（需对应会员权限）。" />
+            <InfoTip tip="360p（Omni 专属，约 720p 的 1/3 积分）/ 720p 为原生输出；1080p（Plus/Pro/Ultra：1–10秒 0 附加分，超10秒 +1分/秒）；4K（仅 Ultra：1–10秒 +50分/条，超10秒 +5分/秒）。" />
           </span>
           <div className="aspect-chip-row">
             {VIDEO_RESOLUTION_OPTIONS.map((r) => {
@@ -341,11 +341,17 @@ export function ModalParameterControls({
               />
               <span className="gen-dialog__duration-readout">
                 {activeVideoDuration} 秒
-                {isOmniVideo &&
-                (omniVersion === "1.2"
-                  ? OMNI_1_2_CREDIT_COST[activeVideoDuration]
-                  : OMNI_1_1_CREDIT_COST[activeVideoDuration]) != null
-                  ? ` · ${omniVersion === "1.2" ? OMNI_1_2_CREDIT_COST[activeVideoDuration] : OMNI_1_1_CREDIT_COST[activeVideoDuration]}积分/条`
+                {isOmniVideo
+                  ? (() => {
+                      const effectiveVer =
+                        omniVersion === "1.1" && ![4, 6, 8, 10].includes(activeVideoDuration)
+                          ? "1.2"
+                          : omniVersion;
+                      const unit =
+                        estimateOmniBaseCreditCost(effectiveVer, activeVideoDuration, videoResolution) +
+                        estimateVideoUpscaleCreditCost(videoResolution, activeVideoDuration);
+                      return ` · ${unit}积分/条`;
+                    })()
                   : ""}
               </span>
             </div>
@@ -353,9 +359,16 @@ export function ModalParameterControls({
               {OMNI_1_2_DURATIONS.map((d) => {
                 const active = activeVideoDuration === d;
                 const perClipCost = isOmniVideo
-                  ? omniVersion === "1.2"
-                    ? OMNI_1_2_CREDIT_COST[d]
-                    : OMNI_1_1_CREDIT_COST[d]
+                  ? (() => {
+                      const effectiveVer =
+                        omniVersion === "1.1" && ![4, 6, 8, 10].includes(d)
+                          ? "1.2"
+                          : omniVersion;
+                      return (
+                        estimateOmniBaseCreditCost(effectiveVer, d, videoResolution) +
+                        estimateVideoUpscaleCreditCost(videoResolution, d)
+                      );
+                    })()
                   : undefined;
                 const creditSuffix =
                   perClipCost != null ? ` · ${perClipCost}积分` : "";

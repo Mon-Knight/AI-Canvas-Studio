@@ -1375,9 +1375,14 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
               >
                 {VIDEO_RESOLUTION_OPTIONS.map((r) => {
                   const unsupported = !!r.omniOnly && !isOmniVideo;
+                  const resLabel = unsupported
+                    ? `${r.label}（仅 Omni）`
+                    : r.value === "4k"
+                      ? `${r.label} (+50分起)`
+                      : r.label;
                   return (
                     <option key={r.value} value={r.value} disabled={unsupported}>
-                      {unsupported ? `${r.label}（仅 Omni）` : r.label}
+                      {resLabel}
                     </option>
                   );
                 })}

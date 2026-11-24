@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useGenerationStore } from "../store/generation";
+import { estimateVideoUpscaleCreditCost } from "../constants/models";
 import { useBoardStore } from "../store/board";
 import { displayNodeTitle } from "../constants/nodeLabels";
 import { useSettingsStore } from "../store/settings";
@@ -745,26 +746,46 @@ export function ResultViewer() {
             )}
             {currentMediaId &&
               (isVideo ? (
-                <div className="result-viewer__upscale-row">
-                  <button
-                    type="button"
-                    className="result-viewer__btn result-viewer__btn--upscale"
-                    onClick={() => void handleUpscale("1080p")}
-                    disabled={upscalingRes !== null}
-                    title="将当前视频超分重塑为 1080p 高清版（需 Plus / Ultra）"
-                  >
-                    {upscalingRes === "1080p" ? "1080p 处理中…" : "✨ 1080p 高清"}
-                  </button>
-                  <button
-                    type="button"
-                    className="result-viewer__btn result-viewer__btn--upscale"
-                    onClick={() => void handleUpscale("4K")}
-                    disabled={upscalingRes !== null}
-                    title="将当前视频超分重塑为 4K 超清版（需 Ultra）"
-                  >
-                    {upscalingRes === "4K" ? "4K 处理中…" : "✨ 4K 超清重塑"}
-                  </button>
-                </div>
+                (() => {
+                  const durSec =
+                    typeof data?.durationSeconds === "number" && data.durationSeconds > 0
+                      ? data.durationSeconds
+                      : 8;
+                  const cost1080 = estimateVideoUpscaleCreditCost("1080p", durSec);
+                  const cost4k = estimateVideoUpscaleCreditCost("4k", durSec);
+                  return (
+                    <div className="result-viewer__upscale-row">
+                      <button
+                        type="button"
+                        className="result-viewer__btn result-viewer__btn--upscale"
+                        onClick={() => void handleUpscale("1080p")}
+                        disabled={upscalingRes !== null}
+                        title={
+                          cost1080 > 0
+                            ? `将当前 ${durSec} 秒视频超分重塑为 1080p（需 Plus/Pro/Ultra · 消耗 ${cost1080} 积分）`
+                            : "将当前视频超分重塑为 1080p 高清版（需 Plus / Pro / Ultra · 1–10秒 0 积分）"
+                        }
+                      >
+                        {upscalingRes === "1080p"
+                          ? "1080p 处理中…"
+                          : cost1080 > 0
+                            ? `✨ 1080p 高清 (+${cost1080}积分)`
+                            : "✨ 1080p 高清 (0积分)"}
+                      </button>
+                      <button
+                        type="button"
+                        className="result-viewer__btn result-viewer__btn--upscale"
+                        onClick={() => void handleUpscale("4K")}
+                        disabled={upscalingRes !== null}
+                        title={`将当前 ${durSec} 秒视频超分重塑为 4K 超清版（仅 Ultra · 消耗 ${cost4k} 积分）`}
+                      >
+                        {upscalingRes === "4K"
+                          ? "4K 处理中…"
+                          : `✨ 4K 超清 (+${cost4k}积分)`}
+                      </button>
+                    </div>
+                  );
+                })()
               ) : (
                 ["image", "character", "visual_asset", "Storyboard"].includes(data.type) && (
                   <div className="result-viewer__upscale-row">
