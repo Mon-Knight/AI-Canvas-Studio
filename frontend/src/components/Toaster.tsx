@@ -31,10 +31,11 @@ export function Toaster() {
     if (!error) return;
 
     if (timerRef.current !== null) clearTimeout(timerRef.current);
+    const autoDismissMs = error.length > 60 ? 12000 : 5000;
     timerRef.current = setTimeout(() => {
       clearError();
       timerRef.current = null;
-    }, 5000);
+    }, autoDismissMs);
 
     return () => {
       if (timerRef.current !== null) {

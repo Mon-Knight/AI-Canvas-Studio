@@ -15,7 +15,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
 // Map cryptic Flow / pipeline error tokens to a sentence the user can act on.
 // Returns null when the token is unrecognised, so the caller falls through to
 // the raw message.
-function humanizeBackendError(token: string): string | null {
+export function humanizeBackendError(token: string): string | null {
   const t = token.toLowerCase();
   const isDesktop =
     typeof window !== "undefined" &&
@@ -57,8 +57,31 @@ function humanizeBackendError(token: string): string | null {
   if (t.startsWith("captcha_failed:")) {
     return `验证码校验失败：${token}`;
   }
-  if (t.startsWith("public_error_")) {
-    return token.replace(/^PUBLIC_ERROR_/i, "Flow 内容拦截：").replace(/_/g, " ");
+  if (t.includes("public_error_unusual_activity")) {
+    const refreshStep = isDesktop
+      ? "① 点击「右上角头像 → Flow 账号与积分 → 登录并绑定项目」，刷新内层 Flow 页面并完成可能出现的安全验证；"
+      : "① 切换到已登录的 Chrome 浏览器，手动刷新 flow.google.com 页面并完成可能出现的安全验证；";
+    if (t.includes("sprcad")) {
+      return [
+        "Google Flow 对 2K/4K 高清重塑触发了安全风控（PUBLIC_ERROR_UNUSUAL_ACTIVITY）。",
+        "解决方法：",
+        refreshStep,
+        "② 更换干净稳定的网络节点，避免中途切换 IP 或短时间连续点击重塑；",
+        "③ 建议先用「1K 标准」生成，间隔几秒再点击「2K 重塑」，或前往 Flow 网页端导出高清图。",
+      ].join("\n");
+    }
+    return [
+      "Google Flow 触发了安全风控拦截（PUBLIC_ERROR_UNUSUAL_ACTIVITY）。",
+      "解决方法：",
+      refreshStep,
+      "② 更换干净稳定的网络节点，避免短时间高频连点或中途切换 IP；",
+      "③ 稍等片刻后重试。",
+    ].join("\n");
+  }
+  const publicErrMatch = token.match(/PUBLIC_ERROR_[A-Z0-9_]+/i);
+  if (publicErrMatch) {
+    const code = publicErrMatch[0].toUpperCase();
+    return code.replace(/^PUBLIC_ERROR_/, "Flow 内容或安全拦截：").replace(/_/g, " ");
   }
   if (t.includes("rpcerror:") && t.includes("failed: [3]")) {
     return "Flow 接口拒绝了当前生成参数组合（错误码 [3]：例如 Veo 3.1 不支持 360p 草稿分辨率，仅支持 720p 起），请切换为 720p 标准清晰度后重试。";

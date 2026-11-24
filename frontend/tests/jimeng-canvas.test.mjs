@@ -617,7 +617,7 @@ test("estimateImageCreditCost & estimateVideoCreditCost compute model/resolution
     assert.equal(omni3s.total, 9);
 
     // Verify api() extracts FastAPI JSON detail on 409 instead of raw "409 Conflict"
-    const { api } = await server.ssrLoadModule("/src/api/client.ts");
+    const { api, extractErrorMessage, humanizeBackendError } = await server.ssrLoadModule("/src/api/client.ts");
     const origFetch = globalThis.fetch;
     try {
       globalThis.fetch = async () =>
@@ -632,6 +632,35 @@ test("estimateImageCreditCost & estimateVideoCreditCost compute model/resolution
     } finally {
       globalThis.fetch = origFetch;
     }
+
+    // Verify SPrCad / PUBLIC_ERROR_UNUSUAL_ACTIVITY maps to actionable Chinese troubleshooting
+    const sprcadRaw =
+      "RpcError: SPrCad failed: [7, None, [['type.googleapis.com/google.rpc.ErrorInfo', ['PUBLIC_ERROR_UNUSUAL_ACTIVITY']]]]";
+    const sprcadHuman = humanizeBackendError(sprcadRaw);
+    assert.ok(sprcadHuman && sprcadHuman.includes("2K/4K"));
+    assert.ok(sprcadHuman.includes("PUBLIC_ERROR_UNUSUAL_ACTIVITY"));
+    assert.ok(sprcadHuman.includes("解决方法"));
+    assert.ok(sprcadHuman.includes("flow.google.com"));
+    assert.ok(sprcadHuman.includes("1K 标准"));
+
+    const sprcadFromHttp = await extractErrorMessage(
+      new Response(JSON.stringify({ detail: sprcadRaw }), {
+        status: 502,
+        statusText: "Bad Gateway",
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    assert.equal(sprcadFromHttp, sprcadHuman);
+
+    const genericUnusual = humanizeBackendError(
+      "RpcError: L7aB1c failed: [7, None, [['type.googleapis.com/google.rpc.ErrorInfo', ['PUBLIC_ERROR_UNUSUAL_ACTIVITY']]]]",
+    );
+    assert.ok(genericUnusual && genericUnusual.includes("安全风控拦截") && genericUnusual.includes("解决方法"));
+
+    const embeddedPublic = humanizeBackendError(
+      "RpcError: SPrCad failed: [3, None, [['type.googleapis.com/google.rpc.ErrorInfo', ['PUBLIC_ERROR_PROMINENT_PEOPLE_FILTER_FAILED']]]]",
+    );
+    assert.ok(embeddedPublic && embeddedPublic.startsWith("Flow 内容或安全拦截："));
   } finally {
     await server.close();
   }

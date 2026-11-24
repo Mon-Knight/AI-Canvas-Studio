@@ -104,7 +104,7 @@ async def _maybe_upscale_image_resp(
             continue
         up = await sdk.upscale_image(mid, project_id, res)
         if up.get("error"):
-            warnings.append(str(up["error"])[:120])
+            warnings.append(str(up["error"])[:240])
             continue
         encoded = up.get("encoded_image")
         new_mid = up.get("media_id") if isinstance(up.get("media_id"), str) and up.get("media_id") else mid
@@ -132,7 +132,7 @@ async def _maybe_upscale_image_resp(
     resp["media_entries"] = entries
     resp["resolution"] = res if upscaled_any and not warnings else ("1K" if not upscaled_any else res)
     if warnings:
-        resp["upscale_warning"] = "; ".join(warnings)[:200]
+        resp["upscale_warning"] = "; ".join(warnings)[:360]
 
 
 def _is_foreign_media_error(err: object) -> bool:

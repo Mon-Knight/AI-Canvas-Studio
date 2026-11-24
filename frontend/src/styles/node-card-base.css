@@ -703,7 +703,9 @@
 .node-error {
   margin: 4px 0 0 0;
   font-size: 11px;
+  line-height: 1.45;
   color: #ef4444;
+  white-space: pre-line;
   word-break: break-word;
 }
 /* Partial-batch warning (e.g. 1/4 video variants got blocked while the

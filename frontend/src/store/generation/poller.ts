@@ -1,4 +1,4 @@
-import { getRequest, patchNode } from "../../api/client";
+import { getRequest, humanizeBackendError, patchNode } from "../../api/client";
 import { useBoardStore, type FlowboardNodeData } from "../board";
 import { appendRenderToHistory } from "./upstreamRefs";
 
@@ -107,6 +107,12 @@ export function createGenerationPollers<S extends PollerStoreSlice>(
             const producesMedia = MEDIA_PRODUCING_TYPES.has(req.type);
             const partialError =
               (req.result["partial_error"] as string | undefined) ?? null;
+            const upscaleWarning =
+              (req.result["upscale_warning"] as string | undefined) ?? null;
+            const rawNotice = partialError ?? upscaleWarning;
+            const noticeError = rawNotice
+              ? (humanizeBackendError(rawNotice) ?? rawNotice)
+              : null;
             const slotErrors =
               (req.result["slot_errors"] as (string | null)[] | undefined) ??
               null;
@@ -211,7 +217,7 @@ export function createGenerationPollers<S extends PollerStoreSlice>(
               aiBrief: undefined,
               ...(opts.aspectRatio ? { aspectRatio: opts.aspectRatio } : {}),
               renderedAt,
-              error: partialError ?? undefined,
+              error: noticeError ?? undefined,
               ...(stampedImageModel ? { imageModel: stampedImageModel } : {}),
               ...(stampedVideoQuality
                 ? { videoQuality: stampedVideoQuality }
@@ -238,7 +244,7 @@ export function createGenerationPollers<S extends PollerStoreSlice>(
                   aiBrief: null,
                   ...(opts.aspectRatio ? { aspectRatio: opts.aspectRatio } : {}),
                   renderedAt,
-                  error: partialError ?? null,
+                  error: noticeError ?? null,
                   ...(stampedImageModel ? { imageModel: stampedImageModel } : {}),
                   ...(stampedVideoQuality
                     ? { videoQuality: stampedVideoQuality }
@@ -250,7 +256,11 @@ export function createGenerationPollers<S extends PollerStoreSlice>(
             setState((s) => {
               const next = { ...s.active };
               delete next[rfId];
-              return { active: next } as Partial<S>;
+              return (
+                upscaleWarning && noticeError
+                  ? { active: next, error: noticeError }
+                  : { active: next }
+              ) as Partial<S>;
             });
             if (
               typeof window !== "undefined" &&
@@ -259,10 +269,13 @@ export function createGenerationPollers<S extends PollerStoreSlice>(
               window.dispatchEvent(new Event("flowboard:credits-stale"));
             }
           } else if (req.status === "failed" || req.status === "timeout") {
+            const humanizedErr = req.error
+              ? (humanizeBackendError(req.error) ?? req.error)
+              : null;
             const errMsg =
               req.status === "timeout"
-                ? `视频任务等待超时（${req.error ?? "video_timeout"}），请先核对生成记录再重试。`
-                : (req.error ?? "生成失败");
+                ? `视频任务等待超时（${humanizedErr ?? "video_timeout"}），请先核对生成记录再重试。`
+                : (humanizedErr ?? "生成失败");
             useBoardStore
               .getState()
               .updateNodeData(rfId, { status: "error", error: errMsg });

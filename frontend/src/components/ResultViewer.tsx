@@ -740,7 +740,7 @@ export function ResultViewer() {
               </div>
             )}
             {upscaleError && (
-              <div className="gen-dialog__model-deprecation" role="alert">
+              <div className="result-viewer__upscale-error" role="alert">
                 {upscaleError}
               </div>
             )}

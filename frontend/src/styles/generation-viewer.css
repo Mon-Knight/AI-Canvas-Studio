@@ -5,7 +5,7 @@
   top: 58px;
   right: 16px;
   z-index: 100;
-  max-width: 320px;
+  max-width: min(460px, calc(100vw - 28px));
   min-width: 280px;
   background: var(--panel-higher);
   border-radius: 8px;
@@ -29,12 +29,12 @@
 
 .toaster__msg {
   font-size: 13px;
-  line-height: 1.5;
+  line-height: 1.55;
   flex: 1;
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  max-height: 220px;
+  overflow-y: auto;
+  white-space: pre-line;
+  word-break: break-word;
   color: var(--text);
 }
 

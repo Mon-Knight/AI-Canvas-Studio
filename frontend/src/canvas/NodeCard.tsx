@@ -629,6 +629,14 @@ function ImageBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }) {
         </div>
       )}
       {error && <p className="character-drop__error" role="alert">{error}</p>}
+      {(data.status === "error" || (data.status === "done" && Boolean(data.error))) && data.error && (
+        <p
+          className={`node-error${data.status === "done" ? " node-error--partial" : ""}`}
+          role={data.status === "done" ? "status" : "alert"}
+        >
+          {data.error}
+        </p>
+      )}
     </div>
   );
 }
