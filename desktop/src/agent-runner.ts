@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import { app } from "electron";
 import {
   ACTIVE_PORTS_FILE,
   FRONTEND_DIST_DIR,
@@ -11,6 +12,7 @@ import {
   HAS_EXPLICIT_HTTP_PORT,
   HAS_EXPLICIT_WS_PORT,
   HTTP_PORT_CANDIDATES,
+  IS_DEV_MODE,
   IS_PACKAGED,
   PACKAGED_AGENT_EXE,
   PYTHON_EXE,
@@ -123,6 +125,29 @@ function writePersistedPorts(httpPort: number, wsPort: number, pid: number | nul
 const PORT_BIND_ERROR_RE =
   /10013|10048|EACCES|EADDRINUSE|error while attempting to bind|address already in use/i;
 
+interface AgentHealthProbe {
+  ok: boolean;
+  version: string | null;
+  frontendDist: string | null;
+}
+
+function resolveExpectedAppVersion(): string | null {
+  try {
+    const v = app?.getVersion?.();
+    if (typeof v === "string" && /^\d+\.\d+\.\d+/.test(v.trim())) {
+      return v.trim();
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function normalizeFsPath(p: string): string {
+  const resolved = path.resolve(p);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
 export class AgentRunner {
   private proc: ChildProcess | null = null;
   private owned = false;
@@ -135,7 +160,7 @@ export class AgentRunner {
     return this.owned;
   }
 
-  private async isHealthyAtPort(port: number): Promise<boolean> {
+  private async probeHealthAtPort(port: number): Promise<AgentHealthProbe> {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 1500);
@@ -144,16 +169,73 @@ export class AgentRunner {
         headers: { Host: `127.0.0.1:${port}` },
       });
       clearTimeout(timer);
-      if (!res.ok) return false;
-      const body = (await res.json()) as { ok?: boolean; ws_stats?: unknown };
-      return body?.ok === true && typeof body.ws_stats === "object" && body.ws_stats !== null;
+      if (!res.ok) return { ok: false, version: null, frontendDist: null };
+      const body = (await res.json()) as {
+        ok?: boolean;
+        version?: unknown;
+        frontend_dist?: unknown;
+        ws_stats?: unknown;
+      };
+      const ok = body?.ok === true && typeof body.ws_stats === "object" && body.ws_stats !== null;
+      return {
+        ok,
+        version: typeof body.version === "string" && body.version.trim() ? body.version.trim() : null,
+        frontendDist:
+          typeof body.frontend_dist === "string" && body.frontend_dist.trim()
+            ? body.frontend_dist.trim()
+            : null,
+      };
     } catch {
-      return false;
+      return { ok: false, version: null, frontendDist: null };
     }
+  }
+
+  private async isHealthyAtPort(port: number): Promise<boolean> {
+    return (await this.probeHealthAtPort(port)).ok;
   }
 
   public async isHealthy(): Promise<boolean> {
     return this.isHealthyAtPort(getAgentHttpPort());
+  }
+
+  private isAgentCompatible(probe: AgentHealthProbe): boolean {
+    if (!probe.ok) return false;
+    const expectedVersion = resolveExpectedAppVersion();
+    if (expectedVersion && probe.version !== expectedVersion) {
+      return false;
+    }
+    if (!IS_DEV_MODE && probe.frontendDist) {
+      if (normalizeFsPath(probe.frontendDist) !== normalizeFsPath(FRONTEND_DIST_DIR)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private async shutdownStaleAgent(port: number): Promise<void> {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 1500);
+      await fetch(`http://127.0.0.1:${port}/api/system/shutdown`, {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          "Content-Type": "application/json",
+          Host: `127.0.0.1:${port}`,
+        },
+        body: JSON.stringify({ stop_frontend: false }),
+      });
+      clearTimeout(timer);
+    } catch {
+      // Best-effort: older agent might already be exiting
+    }
+    const deadline = Date.now() + 3500;
+    while (Date.now() < deadline) {
+      if (await canBindLoopbackPort(port)) {
+        return;
+      }
+      await sleep(150);
+    }
   }
 
   private async findExistingHealthyAgent(): Promise<{ httpPort: number; wsPort: number } | null> {
@@ -173,14 +255,23 @@ export class AgentRunner {
       }
     }
 
+    const expectedVersion = resolveExpectedAppVersion();
     for (const candidateHttp of probeOrder) {
-      if (await this.isHealthyAtPort(candidateHttp)) {
+      const probe = await this.probeHealthAtPort(candidateHttp);
+      if (!probe.ok) continue;
+      if (this.isAgentCompatible(probe)) {
         const wsPort =
           !HAS_EXPLICIT_WS_PORT && persisted.httpPort === candidateHttp && persisted.wsPort
             ? persisted.wsPort
             : getAgentWsPort();
         return { httpPort: candidateHttp, wsPort };
       }
+      console.warn(
+        `[Desktop] Detected stale agent on 127.0.0.1:${candidateHttp} ` +
+          `(version=${probe.version ?? "legacy"}, expected=${expectedVersion ?? "any"}, ` +
+          `frontend=${probe.frontendDist ?? "unknown"}); shutting it down before launching fresh runtime.`,
+      );
+      await this.shutdownStaleAgent(candidateHttp);
     }
     return null;
   }

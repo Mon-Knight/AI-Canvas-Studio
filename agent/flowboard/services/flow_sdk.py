@@ -432,6 +432,17 @@ def _pending_operation(
     return entry
 
 
+def _failed_operation(operation_id: str, message: str) -> dict:
+    """A terminal per-operation failure reported by Flow (e.g. policy block)."""
+    return {
+        "operation": {
+            "name": operation_id,
+            "error": {"code": 3, "message": message[:300]},
+        },
+        "status": "MEDIA_GENERATION_STATUS_FAILED",
+    }
+
+
 def _as_operation_envelope(operation_ids: list[str]) -> dict:
     return {
         "status": 200,
@@ -457,10 +468,12 @@ class FlowSDK(FlowSDKVideoMixin):
         self._client = client or flow_client
         #: operation id -> Flow project id, noted at submit time
         self._operation_projects: dict[str, str] = {}
-        #: operation id -> media id, once the project listing has revealed it
+        #: operation id -> media id, once as29s or jwpduf has confirmed it
         self._operation_media: dict[str, str] = {}
         #: operation id -> how many rounds we have polled it
         self._operation_polls: dict[str, int] = {}
+        #: operation id -> consecutive policy/safety complaint count on jwpduf
+        self._operation_policy_strikes: dict[str, int] = {}
         #: cached Omni 1.2 wire keys discovered from live Flow HTrJv config
         self._omni_1_2_r2v_keys: dict[tuple[int, str], str] = {}
 
@@ -519,6 +532,7 @@ class FlowSDK(FlowSDKVideoMixin):
             self._operation_projects.clear()
             self._operation_media.clear()
             self._operation_polls.clear()
+            self._operation_policy_strikes.clear()
         self._operation_projects[operation_id] = project_id
 
     # ── project listing / creation (both unported) ─────────────────────────

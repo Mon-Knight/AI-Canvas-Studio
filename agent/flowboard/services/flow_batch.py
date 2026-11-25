@@ -653,18 +653,42 @@ def read_operation_error(record: list) -> Optional[str]:
 
     It hides in the detail block's status slot as
     ``[4, [null, "Media not found."], ["Media not found."]]``. Measured
-    behaviour: an operation can report exactly that and still deliver a
-    finished 8-second clip, so this is a diagnostic string and nothing more.
+    behaviour: an operation can report ``"Media not found."`` and still deliver
+    a finished 8-second clip, while ``PUBLIC_ERROR_*`` codes indicate explicit
+    policy/safety rejections.
     """
     detail = record[5] if len(record) > 5 else None
     if not isinstance(detail, list) or len(detail) <= 8:
         return None
     block = detail[8]
-    if not isinstance(block, list) or not block or block[0] != OUTCOME_COMPLAINT:
+    if not isinstance(block, list) or not block:
         return None
-    for text in _walk_strings(block):
-        return text
+    if block[0] != OUTCOME_COMPLAINT:
+        # Also surface explicit PUBLIC_ERROR_* codes if Flow reports them
+        # under another non-OK outcome code.
+        if block[0] != OUTCOME_OK:
+            for text in _walk_strings(block):
+                if "PUBLIC_ERROR_" in text.upper():
+                    return text
+        return None
+    texts = [t for t in _walk_strings(block) if t]
+    for text in texts:
+        if "PUBLIC_ERROR_" in text.upper():
+            return text
+    if texts:
+        return texts[0]
     return "operation failed without a message"
+
+
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+_ENTRY_HEAD_RE = re.compile(
+    r'\[\\?"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\\?",\s*null,\s*null,\s*\[',
+    re.IGNORECASE,
+)
 
 
 def find_media_id(payload: Any, operation_id: str) -> Optional[str]:
@@ -672,35 +696,211 @@ def find_media_id(payload: Any, operation_id: str) -> Optional[str]:
 
     Entries look like
     ``[opId, null, null, [title, created, null, null, mediaId, clientUuid, done], projectId]``.
+    Also tolerates the reversed layout
+    ``[mediaId, null, null, [title, created, null, null, opId, clientUuid, done], projectId]``
+    observed on migrated text-video records when the forward lookup finds nothing.
     """
     for node in _walk_lists(payload):
         if len(node) < 4 or node[0] != operation_id:
             continue
         detail = node[3]
-        if isinstance(detail, list) and len(detail) > 4 and isinstance(detail[4], str):
+        if (
+            isinstance(detail, list)
+            and len(detail) > 4
+            and isinstance(detail[4], str)
+            and detail[4]
+            and detail[4] != operation_id
+        ):
             return detail[4]
+    for node in _walk_lists(payload):
+        if (
+            len(node) < 4
+            or not isinstance(node[0], str)
+            or node[0] == operation_id
+            or not _UUID_RE.fullmatch(node[0])
+            or node[1] is not None
+            or node[2] is not None
+        ):
+            continue
+        detail = node[3]
+        if isinstance(detail, list) and len(detail) > 4 and detail[4] == operation_id:
+            return node[0]
     return None
 
 
-#: The media slot in a listing entry, matched straight off the wire: a title,
-#: a timestamp pair, two nulls, then the media id. Escaped or not, both forms
-#: appear depending on whether the text has been through a JSON decode.
-_MEDIA_SLOT = re.compile(r'null,null,\\?"([0-9a-fA-F-]{36})\\?"')
+def _unescape_wrb_fragment(fragment: str) -> str:
+    """Unescape the interior of a JSON-encoded ``wrb.fr`` payload string slice.
+
+    Stops cleanly at an unescaped closing quote or incomplete trailing escape
+    so truncated listing windows never raise.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(fragment)
+    simple = {
+        '"': '"',
+        "\\": "\\",
+        "/": "/",
+        "b": "\b",
+        "f": "\f",
+        "n": "\n",
+        "r": "\r",
+        "t": "\t",
+    }
+    while i < n:
+        ch = fragment[i]
+        if ch == '"':
+            break
+        if ch == "\\":
+            if i + 1 >= n:
+                break
+            nxt = fragment[i + 1]
+            if nxt in simple:
+                out.append(simple[nxt])
+                i += 2
+                continue
+            if nxt == "u" and i + 6 <= n:
+                try:
+                    code = int(fragment[i + 2 : i + 6], 16)
+                except ValueError:
+                    break
+                if (
+                    0xD800 <= code <= 0xDBFF
+                    and i + 12 <= n
+                    and fragment[i + 6 : i + 8] == "\\u"
+                ):
+                    try:
+                        low = int(fragment[i + 8 : i + 12], 16)
+                    except ValueError:
+                        low = 0
+                    if 0xDC00 <= low <= 0xDFFF:
+                        out.append(
+                            chr(0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00))
+                        )
+                        i += 12
+                        continue
+                out.append(chr(code))
+                i += 6
+                continue
+            break
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _parse_entry_detail_slot4(after_id: str) -> Optional[str]:
+    """Decode ``, elem1, elem2, [d0, d1, d2, d3, d4, ...]`` and return ``d4``.
+
+    Strict slot parsing prevents two bugs that the old ``null,null,"UUID"``
+    regex hit in production:
+    1. When an operation is still generating or failed, ``d4`` is ``null`` and
+       ``d5`` is the uppercase ``clientUuid`` (``null,null,null,"<clientUuid>"``);
+       the regex slipped onto ``d5`` and made ``as29s`` fail with ``[5]`` forever.
+    2. When an entry had no media id, scanning forward bled across ``]`` into
+       an adjacent listing entry and stole its UUID.
+    """
+    decoder = json.JSONDecoder()
+    n = len(after_id)
+    pos = 0
+
+    def _skip_ws(idx: int) -> int:
+        while idx < n and after_id[idx] in " \t\r\n":
+            idx += 1
+        return idx
+
+    for _ in range(2):
+        pos = _skip_ws(pos)
+        if pos >= n or after_id[pos] != ",":
+            return None
+        pos = _skip_ws(pos + 1)
+        if pos >= n:
+            return None
+        try:
+            _, pos = decoder.raw_decode(after_id, pos)
+        except json.JSONDecodeError:
+            return None
+
+    pos = _skip_ws(pos)
+    if pos >= n or after_id[pos] != ",":
+        return None
+    pos = _skip_ws(pos + 1)
+    if pos >= n or after_id[pos] != "[":
+        return None
+    pos += 1
+
+    for slot in range(5):
+        pos = _skip_ws(pos)
+        if pos >= n or after_id[pos] == "]":
+            return None
+        if slot > 0:
+            if after_id[pos] != ",":
+                return None
+            pos = _skip_ws(pos + 1)
+            if pos >= n or after_id[pos] == "]":
+                return None
+        try:
+            value, pos = decoder.raw_decode(after_id, pos)
+        except json.JSONDecodeError:
+            return None
+        if slot == 4:
+            return value if isinstance(value, str) and value else None
+    return None
+
+
+def _extract_entry_slot4(text: str, id_end: int) -> Optional[str]:
+    """Read ``detail[4]`` starting right after the closing characters of ``node[0]``."""
+    after = text[id_end : id_end + 8192]
+    if after.startswith('\\"'):
+        body = _unescape_wrb_fragment(after[2:])
+    elif after.startswith('"'):
+        body = after[1:]
+    else:
+        return None
+    return _parse_entry_detail_slot4(body)
 
 
 def find_media_id_in_text(text: str, operation_id: str) -> Optional[str]:
-    """Same lookup as :func:`find_media_id`, but on an unparsed listing.
+    """Same lookup as :func:`find_media_id`, but on an unparsed listing window.
 
     The project listing has no page size that shrinks it and grows with every
     generation, so it will outrun whatever response cap is in place — and a
     truncated tail cannot be JSON-decoded even though the entry we want is
-    sitting in it intact. Scanning the text finds it anyway.
+    sitting in it intact. Decoding ``detail[0..4]`` structurally right after
+    ``operation_id`` finds ``mediaId`` reliably even on a truncated window,
+    without ever misreading ``clientUuid`` (``detail[5]``) or bleeding into
+    an adjacent listing entry.
     """
-    start = text.find(operation_id)
-    if start == -1:
+    if not text or not operation_id:
         return None
-    match = _MEDIA_SLOT.search(text, start, start + 800)
-    return match.group(1) if match else None
+
+    occurrences: list[int] = []
+    search_from = 0
+    while search_from < len(text):
+        start = text.find(operation_id, search_from)
+        if start == -1:
+            break
+        search_from = start + len(operation_id)
+        if start > 0 and text[start - 1] != '"':
+            continue
+        occurrences.append(start)
+        slot4 = _extract_entry_slot4(text, start + len(operation_id))
+        if slot4 and slot4 != operation_id and _UUID_RE.fullmatch(slot4):
+            return slot4
+
+    # Fallback: reversed layout `[mediaId, null, null, [title, ts, null, null, opId, ...]]`
+    for start in occurrences:
+        prefix_offset = max(0, start - 2048)
+        prefix = text[prefix_offset:start]
+        matches = list(_ENTRY_HEAD_RE.finditer(prefix))
+        for m in reversed(matches):
+            cand = m.group(1)
+            if cand == operation_id:
+                continue
+            cand_end = prefix_offset + m.end(1)
+            slot4 = _extract_entry_slot4(text, cand_end)
+            if slot4 == operation_id:
+                return cand
+    return None
 
 
 def read_media_urls(payload: Any, media_id: str) -> MediaUrls:

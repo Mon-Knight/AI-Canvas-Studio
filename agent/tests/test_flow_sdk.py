@@ -1294,3 +1294,244 @@ async def test_gen_video_text_submits_yhhmef_and_polls_as29s():
     poll = await sdk.check_async([t2v_wf])
     assert poll["operations"][0]["done"] is True
     assert poll["operations"][0]["media_entries"][0]["media_id"] == t2v_mid
+
+
+# ── video polling regressions (as29s [5] / timeout_waiting_video) ─────────
+
+
+def test_find_media_id_in_text_ignores_null_slot4_client_uuid_and_adjacent_entries():
+    """Regression for the `as29s failed: [5]` + `timeout_waiting_video` bug.
+
+    While an operation is still generating (or failed), slot 4 (`mediaId`) is
+    `null` and slot 5 is the uppercase `clientUuid`, producing
+    `null,null,null,"<CLIENT_UUID>"`. The old `null,null,"UUID"` regex slipped
+    onto `clientUuid` (or bled into the next entry), poisoned `_operation_media`,
+    and hammered `as29s` with `[5]` NOT_FOUND for 5 minutes until timeout.
+    """
+    import json
+
+    op_id = "29382a9f-0b12-488f-a24b-e9a84cb6e1ae"
+    client_uuid = "A1B2C3D4-E5F6-4789-ABCD-0123456789AB"
+    neighbor_op = "99999999-8888-7777-6666-555555555555"
+    neighbor_media = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+    real_media = "cccccccc-dddd-eeee-ffff-111111111111"
+
+    # 1. In-progress entry (slot 4 is null, slot 5 is clientUuid) + neighbor entry
+    in_progress_payload = [
+        [op_id, None, None, ["天台夜景", [1763994033, 0], None, None, None, client_uuid, False], PID],
+        [neighbor_op, None, None, ["前一个视频", [1763994000, 0], None, None, neighbor_media, client_uuid, True], PID],
+    ]
+    raw_wrb = batch_envelope(fb.RPC_PROJECT_MEDIA, in_progress_payload)
+    # Simulate old extension slicing straight from `op_id`
+    old_slice = raw_wrb[raw_wrb.index(op_id) : raw_wrb.index(op_id) + 800]
+    assert fb.find_media_id_in_text(old_slice, op_id) is None
+    assert fb.find_media_id_in_text(raw_wrb, op_id) is None
+
+    # 2. Long 301-char Chinese prompt with quotes (both raw UTF-8 and \uXXXX-escaped > 1800 chars)
+    long_prompt = (
+        '固定机位。0-3秒，ref_image_1中的动漫少女立于天台边缘，她说："我一定会让你们付出代价的"，'
+        + "强风呼啸长发与红色裙摆剧烈翻飞" * 16
+    )
+    completed_entry = [
+        [op_id, None, None, [long_prompt, [1763994033, 0], None, None, real_media, client_uuid, True], PID],
+    ]
+    # ASCII-escaped JSON (each Chinese char becomes \uXXXX -> ~1800+ chars)
+    inner_ascii = json.dumps(completed_entry, ensure_ascii=True, separators=(",", ":"))
+    wrb_ascii = json.dumps([["wrb.fr", fb.RPC_PROJECT_MEDIA, inner_ascii, None, None, None, "generic"]])
+    idx_ascii = wrb_ascii.index(op_id)
+    assert fb.find_media_id_in_text(wrb_ascii[idx_ascii : idx_ascii + 4096], op_id) == real_media
+
+    # 3. Trailer mention `["<op_id>"]` before the actual listing entry
+    with_trailer = [
+        [[op_id]],
+        [op_id, None, None, ["title", 1234, None, None, real_media, client_uuid, True], PID],
+    ]
+    wrb_trailer = batch_envelope(fb.RPC_PROJECT_MEDIA, with_trailer)
+    assert fb.find_media_id_in_text(wrb_trailer, op_id) == real_media
+
+    # 4. Truncated slice cutting off right after slot 4 (before closing `]`)
+    cut_at = wrb_ascii.index(real_media) + len(real_media) + 5
+    assert fb.find_media_id_in_text(wrb_ascii[idx_ascii:cut_at], op_id) == real_media
+
+    # 5. Reversed layout `[mediaId, null, null, [title, ts, null, null, opId, ...]]`
+    reversed_payload = [
+        [real_media, None, None, ["title", [1763994033, 0], None, None, op_id, client_uuid, True], PID],
+    ]
+    wrb_rev = batch_envelope(fb.RPC_PROJECT_MEDIA, reversed_payload)
+    rev_idx = wrb_rev.index(op_id)
+    rev_slice = wrb_rev[max(0, rev_idx - 1024) : rev_idx + 4096]
+    assert fb.find_media_id_in_text(rev_slice, op_id) == real_media
+    assert fb.find_media_id(reversed_payload, op_id) == real_media
+
+
+@pytest.mark.asyncio
+async def test_check_async_does_not_poison_cache_on_as29s_not_found_and_recovers():
+    """An as29s [5] NOT_FOUND must NOT be cached; next poll re-queries jwpduf+Zzl0ze."""
+    op_id = "29382a9f-0b12-488f-a24b-e9a84cb6e1ae"
+    bad_mid = "11111111-2222-3333-4444-555555555555"
+    good_mid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    rec = BatchRecorder(responses={
+        fb.RPC_OPERATION: [
+            batch_envelope(fb.RPC_OPERATION, operation_payload(op_id, project_id=PID, status="CAE")),
+            batch_envelope(fb.RPC_OPERATION, operation_payload(op_id, project_id=PID, status="CAE")),
+        ],
+        fb.RPC_PROJECT_MEDIA: [
+            listing_payload_text(op_id, bad_mid),
+            listing_payload_text(op_id, good_mid),
+        ],
+        fb.RPC_MEDIA: [
+            batch_error_envelope(fb.RPC_MEDIA, code=[5]),
+            batch_envelope(fb.RPC_MEDIA, media_urls_payload(good_mid, video=True)),
+        ],
+    })
+    sdk = FlowSDK(client=rec)  # type: ignore[arg-type]
+
+    poll1 = await sdk.check_async([op_id])
+    assert poll1["operations"][0]["done"] is False
+    assert "as29s failed: [5]" in poll1["raw"]["data"]["operations"][0]["complaint"]
+    assert op_id not in sdk._operation_media, "NOT_FOUND media_id must never poison cache"
+
+    poll2 = await sdk.check_async([op_id])
+    assert poll2["operations"][0]["done"] is True
+    assert poll2["operations"][0]["media_entries"][0]["media_id"] == good_mid
+    assert sdk._operation_media[op_id] == good_mid
+    assert len(rec.rpcs(fb.RPC_PROJECT_MEDIA)) == 2
+
+
+@pytest.mark.asyncio
+async def test_check_async_evicts_cached_media_id_on_as29s_not_found_and_reprobes():
+    """If a previously cached media_id returns as29s [5], evict and re-probe immediately."""
+    op_id = "op-stale-cache"
+    stale_mid = "11111111-2222-3333-4444-555555555555"
+    fresh_mid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+    rec = BatchRecorder(responses={
+        fb.RPC_OPERATION: [
+            batch_envelope(fb.RPC_OPERATION, operation_payload(op_id, project_id=PID, status="CAE")),
+        ],
+        fb.RPC_PROJECT_MEDIA: [
+            listing_payload_text(op_id, fresh_mid),
+        ],
+        fb.RPC_MEDIA: [
+            batch_error_envelope(fb.RPC_MEDIA, code=[5]),
+            batch_envelope(fb.RPC_MEDIA, media_urls_payload(fresh_mid, video=True)),
+        ],
+    })
+    sdk = FlowSDK(client=rec)  # type: ignore[arg-type]
+    sdk._remember_operation(op_id, PID)
+    sdk._operation_media[op_id] = stale_mid
+
+    poll = await sdk.check_async([op_id])
+    assert poll["operations"][0]["done"] is True
+    assert poll["operations"][0]["media_entries"][0]["media_id"] == fresh_mid
+    assert sdk._operation_media[op_id] == fresh_mid
+
+
+@pytest.mark.asyncio
+async def test_check_async_uses_direct_video_url_from_jwpduf_without_zzl0ze_or_as29s():
+    """When jwpduf already carries a signed /video/ CDN URL, resolve immediately."""
+    op_id = "op-direct-url"
+    direct_payload = [
+        None,
+        50,
+        [[
+            op_id,
+            PID,
+            "11111111-2222-3333-4444-555555555555",
+            "CAE",
+            None,
+            [[1763994033], "prompt", None, None, None, None, None, None, [3]],
+            None,
+            [[None, 1, None, None, None, None, None, "prompt", f"https://flow-content.google/video/{MEDIA}?sig=direct"]],
+        ]],
+    ]
+    rec = BatchRecorder(responses={
+        fb.RPC_OPERATION: [batch_envelope(fb.RPC_OPERATION, direct_payload)],
+    })
+    sdk = FlowSDK(client=rec)  # type: ignore[arg-type]
+    poll = await sdk.check_async([op_id])
+    assert poll["operations"][0]["done"] is True
+    assert poll["operations"][0]["media_entries"][0]["media_id"] == MEDIA
+    assert "/video/" in poll["operations"][0]["media_entries"][0]["url"]
+    assert rec.rpcs(fb.RPC_PROJECT_MEDIA) == []
+    assert rec.rpcs(fb.RPC_MEDIA) == []
+
+
+@pytest.mark.asyncio
+async def test_check_async_fails_fast_on_public_error_and_repeated_policy_rejection():
+    """Explicit PUBLIC_ERROR_* fails fast when listing has no media; policy prose fails on 2 strikes."""
+    op_pub = "op-public-err"
+    rec_pub = BatchRecorder(responses={
+        fb.RPC_OPERATION: [
+            batch_envelope(
+                fb.RPC_OPERATION,
+                operation_payload(
+                    op_pub,
+                    project_id=PID,
+                    status="CAE",
+                    detail=complaint_detail("PUBLIC_ERROR_UNSAFE_GENERATION"),
+                ),
+            ),
+        ],
+        fb.RPC_PROJECT_MEDIA: [""],
+    })
+    out_pub = await FlowSDK(client=rec_pub).check_async([op_pub])  # type: ignore[arg-type]
+    assert out_pub["operations"][0]["done"] is True
+    assert out_pub["operations"][0]["status"] == "MEDIA_GENERATION_STATUS_FAILED"
+    assert out_pub["operations"][0]["error"] == "PUBLIC_ERROR_UNSAFE_GENERATION"
+
+    op_prose = "op-policy-prose"
+    rec_prose = BatchRecorder(responses={
+        fb.RPC_OPERATION: [
+            batch_envelope(
+                fb.RPC_OPERATION,
+                operation_payload(
+                    op_prose,
+                    project_id=PID,
+                    status="CAE",
+                    detail=complaint_detail("Your prompt may violate our content policy."),
+                ),
+            ),
+            batch_envelope(
+                fb.RPC_OPERATION,
+                operation_payload(
+                    op_prose,
+                    project_id=PID,
+                    status="CAE",
+                    detail=complaint_detail("Your prompt may violate our content policy."),
+                ),
+            ),
+        ],
+        fb.RPC_PROJECT_MEDIA: ["", ""],
+    })
+    sdk_prose = FlowSDK(client=rec_prose)  # type: ignore[arg-type]
+    p1 = await sdk_prose.check_async([op_prose])
+    assert p1["operations"][0]["done"] is False
+    p2 = await sdk_prose.check_async([op_prose])
+    assert p2["operations"][0]["done"] is True
+    assert p2["operations"][0]["status"] == "MEDIA_GENERATION_STATUS_FAILED"
+    assert "content policy" in p2["operations"][0]["error"]
+
+
+@pytest.mark.asyncio
+async def test_check_async_keeps_synthetic_t2v_media_id_across_transient_as29s_not_found():
+    """Synthetic t2v:<media_id> handles survive transient as29s [5] until the clip lands."""
+    op_id = f"t2v:{MEDIA}"
+    rec = BatchRecorder(responses={
+        fb.RPC_MEDIA: [
+            batch_error_envelope(fb.RPC_MEDIA, code=[5]),
+            batch_envelope(fb.RPC_MEDIA, media_urls_payload(MEDIA, video=True)),
+        ],
+    })
+    sdk = FlowSDK(client=rec)  # type: ignore[arg-type]
+    sdk._operation_media[op_id] = MEDIA
+
+    p1 = await sdk.check_async([op_id])
+    assert p1["operations"][0]["done"] is False
+    assert sdk._operation_media[op_id] == MEDIA
+
+    p2 = await sdk.check_async([op_id])
+    assert p2["operations"][0]["done"] is True
+    assert p2["operations"][0]["media_entries"][0]["media_id"] == MEDIA
+

@@ -1,5 +1,6 @@
 import asyncio
 import hmac
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -148,7 +149,27 @@ async def lifespan(app: FastAPI):
         logger.info("flowboard agent stopped")
 
 
-app = FastAPI(title="AI Canvas Studio Agent", version="1.1.3", lifespan=lifespan)
+def _resolve_agent_version() -> str:
+    """Resolve runtime version, preferring packaged resources/app/package.json."""
+    app_root = os.getenv("FLOWBOARD_APP_ROOT", "").strip()
+    if app_root:
+        pkg_file = Path(app_root) / "app" / "package.json"
+        if pkg_file.is_file():
+            try:
+                ver = json.loads(pkg_file.read_text(encoding="utf-8")).get("version")
+                if isinstance(ver, str) and ver.strip():
+                    return ver.strip()
+            except Exception:  # noqa: BLE001
+                pass
+    return "1.1.4"
+
+
+APP_VERSION = _resolve_agent_version()
+_FRONTEND_DIST = Path(
+    os.getenv("FLOWBOARD_FRONTEND_DIST", str(ROOT / "frontend" / "dist"))
+)
+
+app = FastAPI(title="AI Canvas Studio Agent", version=APP_VERSION, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -187,6 +208,8 @@ app.include_router(system.router, dependencies=_LOCAL_DEPS)
 def health() -> dict:
     return {
         "ok": True,
+        "version": app.version,
+        "frontend_dist": str(_FRONTEND_DIST.resolve()),
         "extension_connected": flow_client.connected,
         "ws_stats": flow_client.ws_stats,
     }
@@ -215,9 +238,6 @@ async def ext_callback(
     return {"ok": matched}
 
 
-_FRONTEND_DIST = Path(
-    os.getenv("FLOWBOARD_FRONTEND_DIST", str(ROOT / "frontend" / "dist"))
-)
 if (_FRONTEND_DIST / "assets").is_dir():
     app.mount("/assets", StaticFiles(directory=_FRONTEND_DIST / "assets"), name="frontend-assets")
 
@@ -227,4 +247,11 @@ def serve_frontend_index():
     index_file = _FRONTEND_DIST / "index.html"
     if not index_file.is_file():
         raise HTTPException(status_code=404, detail="frontend dist not built")
-    return FileResponse(index_file)
+    return FileResponse(
+        index_file,
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )

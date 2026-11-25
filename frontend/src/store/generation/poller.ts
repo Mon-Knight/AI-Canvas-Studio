@@ -62,6 +62,23 @@ function sidecarDonePatch(
   };
 }
 
+function extractLastPollComplaint(
+  result: Record<string, unknown> | undefined,
+): string | null {
+  const lastPoll = result?.last_poll as Record<string, unknown> | undefined;
+  const raw = lastPoll?.raw as Record<string, unknown> | undefined;
+  const data = raw?.data as Record<string, unknown> | undefined;
+  const ops = data?.operations;
+  if (!Array.isArray(ops)) return null;
+  for (const op of ops) {
+    if (op && typeof op === "object") {
+      const c = (op as Record<string, unknown>).complaint;
+      if (typeof c === "string" && c.trim()) return c.trim();
+    }
+  }
+  return null;
+}
+
 export interface PollerStoreSlice {
   active: Record<string, PollEntry>;
   sidecar: Record<string, PollEntry>;
@@ -269,12 +286,21 @@ export function createGenerationPollers<S extends PollerStoreSlice>(
               window.dispatchEvent(new Event("flowboard:credits-stale"));
             }
           } else if (req.status === "failed" || req.status === "timeout") {
+            const rawComplaint =
+              req.status === "timeout"
+                ? extractLastPollComplaint(req.result)
+                : null;
+            const humanizedComplaint = rawComplaint
+              ? (humanizeBackendError(rawComplaint) ?? rawComplaint)
+              : null;
             const humanizedErr = req.error
               ? (humanizeBackendError(req.error) ?? req.error)
               : null;
             const errMsg =
               req.status === "timeout"
-                ? `视频任务等待超时（${humanizedErr ?? "video_timeout"}），请先核对生成记录再重试。`
+                ? humanizedComplaint
+                  ? `${humanizedErr ?? "视频任务等待超时"}：${humanizedComplaint}`
+                  : `${humanizedErr ?? "视频任务等待超时"}，请先在 Flow 页面核对是否已出片再重试。`
                 : (humanizedErr ?? "生成失败");
             useBoardStore
               .getState()

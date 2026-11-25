@@ -635,12 +635,37 @@ async function runBatchRpc(cmd) {
       // is one entry. Cutting it down in the page keeps that payload out of
       // the bridge on every poll — shipping it whole gets it truncated, which
       // loses roughly half of all lookups depending on where the id sorts.
+      // Prefer the real listing entry (`["<id>",null,null,[`) over earlier
+      // trailer mentions and keep a [-1024, +4096] window so long CJK/escaped
+      // titles never truncate before slot 4 (mediaId).
       if (match) {
-        const found = text.indexOf(match);   // not `at` — that is the CSRF token above
+        const beforeWindow = 1024;
+        const afterWindow = 4096;
+        let entryHit = -1;
+        let commaHit = -1;
+        let firstHit = -1;
+        let searchFrom = 0;
+        while (searchFrom < text.length) {
+          const idx = text.indexOf(match, searchFrom);
+          if (idx === -1) break;
+          if (firstHit === -1) firstHit = idx;
+          const after = text.slice(idx + match.length, idx + match.length + 24);
+          if (entryHit === -1 && /^\\?",null,null,\[/.test(after)) {
+            entryHit = idx;
+            break;
+          }
+          if (commaHit === -1 && /^\\?",/.test(after)) {
+            commaHit = idx;
+          }
+          searchFrom = idx + match.length;
+        }
+        const found = entryHit !== -1 ? entryHit : (commaHit !== -1 ? commaHit : firstHit);
         return {
           status: resp.status,
           matched: found !== -1,
-          text: found === -1 ? '' : text.slice(found, found + 800),
+          text: found === -1
+            ? ''
+            : text.slice(Math.max(0, found - beforeWindow), found + afterWindow),
         };
       }
       return { status: resp.status, text: text.slice(0, maxText) };

@@ -418,6 +418,12 @@ async function boot(): Promise<void> {
   });
   flowEngine.start();
 
+  try {
+    await mainWindow.webContents.session.clearCache();
+  } catch {
+    // Non-fatal: clearing HTTP cache only drops static asset cache, never user data or Flow cookies
+  }
+
   await mainWindow.loadURL(getUiUrl());
 
   if (E2E_CONTROL_PORT) {

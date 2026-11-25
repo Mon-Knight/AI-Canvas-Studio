@@ -671,32 +671,153 @@ class FlowSDKVideoMixin:
             ),
         }
 
+    @staticmethod
+    def _is_terminal_public_error(complaint: Optional[str]) -> bool:
+        """True for explicit Flow ``PUBLIC_ERROR_*`` safety/policy rejections."""
+        if not isinstance(complaint, str) or not complaint.strip():
+            return False
+        return bool(re.search(r"PUBLIC_ERROR_[A-Z0-9_]+", complaint, re.IGNORECASE))
+
+    @staticmethod
+    def _is_policy_rejection_text(complaint: Optional[str]) -> bool:
+        """True for explicit safety/policy refusal text (never ``Media not found.``)."""
+        if not isinstance(complaint, str) or not complaint.strip():
+            return False
+        low = complaint.lower()
+        if "media not found" in low:
+            return False
+        return any(
+            kw in low
+            for kw in (
+                "violat",
+                "content policy",
+                "safety",
+                "unsafe",
+                "prohibited",
+                "policy",
+                "harmful",
+                "self-harm",
+                "audio_filtered",
+                "prominent_people",
+            )
+        )
+
+    def _maybe_terminal_failure(
+        self, operation_id: str, complaint: Optional[str]
+    ) -> Optional[dict]:
+        """Turn an explicit policy/safety rejection with no media into FAILED."""
+        if not complaint:
+            self._operation_policy_strikes.pop(operation_id, None)
+            return None
+        if self._is_terminal_public_error(complaint):
+            self._operation_policy_strikes.pop(operation_id, None)
+            return _sdk()._failed_operation(operation_id, complaint)
+        if self._is_policy_rejection_text(complaint):
+            strikes = self._operation_policy_strikes.get(operation_id, 0) + 1
+            self._operation_policy_strikes[operation_id] = strikes
+            if strikes >= 2:
+                self._operation_policy_strikes.pop(operation_id, None)
+                return _sdk()._failed_operation(operation_id, complaint)
+            return None
+        self._operation_policy_strikes.pop(operation_id, None)
+        return None
+
     async def _poll_operation(self, operation_id: str) -> dict:
         """One poll round for one operation, as a REST operation envelope.
 
         Three signals have to agree before a clip can be downloaded, and they
         arrive out of order:
 
-        * the operation poll says how the job is going — but it can sit at no
-          status at all on a job that finished, and a ``"Media not found."``
-          complaint on it is survivable rather than fatal;
-        * the project listing is what actually gains a media id;
+        * the operation poll says how the job is going — it may carry the
+          signed ``/video/`` url directly, sit at no status on a job that
+          finished, carry a survivable ``"Media not found."`` complaint, or
+          report an explicit ``PUBLIC_ERROR_*`` safety/policy rejection;
+        * the project listing is what actually gains a media id when ``jwpduf``
+          omits the url;
         * the media record serves the poster image first and grows the
           ``/video/`` url in later.
 
-        So an operation reports SUCCESSFUL only once a video url exists.
-        Everything short of that is PENDING, and the worker owns the timeout.
+        A ``media_id`` is cached ONLY after ``as29s`` confirms it exists (no
+        gRPC ``[5]`` NOT_FOUND), so an uncommitted or mis-parsed id can never
+        trap the worker in a 5-minute ``as29s failed: [5]`` loop.
         """
         media_id = self._operation_media.get(operation_id)
+        from_cache = bool(media_id)
         complaint: Optional[str] = None
 
         if not media_id:
-            media_id, complaint = await self._find_operation_media(operation_id)
+            media_id, complaint, direct_result = await self._find_operation_media(
+                operation_id
+            )
+            if direct_result is not None:
+                return direct_result
             if not media_id:
+                terminal = self._maybe_terminal_failure(operation_id, complaint)
+                if terminal is not None:
+                    return terminal
                 return _sdk()._pending_operation(operation_id, complaint=complaint)
-            self._operation_media[operation_id] = media_id
 
-        urls = await self._media_urls(media_id)
+        try:
+            urls = await self._media_urls(media_id)
+        except fb.RpcError as exc:
+            if not _sdk()._is_rpc_not_found(exc):
+                raise
+            logger.warning(
+                "operation %s as29s NOT_FOUND [5] for media_id=%s (cached=%s)",
+                operation_id[:20], media_id[:20], from_cache,
+            )
+            if operation_id.startswith("t2v:"):
+                return _sdk()._pending_operation(
+                    operation_id, complaint=complaint or str(exc)[:200]
+                )
+            # Evict unverified/stale media_id so the next round re-checks
+            # jwpduf and Zzl0ze instead of looping on [5] until timeout.
+            self._operation_media.pop(operation_id, None)
+            if from_cache:
+                fresh_mid, fresh_complaint, direct_result = (
+                    await self._find_operation_media(operation_id)
+                )
+                if direct_result is not None:
+                    return direct_result
+                if fresh_mid and fresh_mid != media_id:
+                    try:
+                        urls = await self._media_urls(fresh_mid)
+                        media_id = fresh_mid
+                        complaint = fresh_complaint
+                    except fb.RpcError as retry_exc:
+                        if not _sdk()._is_rpc_not_found(retry_exc):
+                            raise
+                        terminal = self._maybe_terminal_failure(
+                            operation_id, fresh_complaint
+                        )
+                        if terminal is not None:
+                            return terminal
+                        return _sdk()._pending_operation(
+                            operation_id,
+                            complaint=fresh_complaint or str(retry_exc)[:200],
+                        )
+                else:
+                    terminal = self._maybe_terminal_failure(
+                        operation_id, fresh_complaint
+                    )
+                    if terminal is not None:
+                        return terminal
+                    return _sdk()._pending_operation(
+                        operation_id,
+                        complaint=fresh_complaint or str(exc)[:200],
+                    )
+            else:
+                terminal = self._maybe_terminal_failure(operation_id, complaint)
+                if terminal is not None:
+                    return terminal
+                return _sdk()._pending_operation(
+                    operation_id, complaint=complaint or str(exc)[:200]
+                )
+
+        # Cache only once as29s has actually recognised the media record.
+        self._operation_media[operation_id] = media_id
+        self._operation_policy_strikes.pop(operation_id, None)
+
         if not urls.video:
             # The id landed but the clip is still being written. Downloading on
             # the id alone here saves the poster still, not the video.
@@ -719,13 +840,15 @@ class FlowSDKVideoMixin:
 
     async def _find_operation_media(
         self, operation_id: str
-    ) -> tuple[Optional[str], Optional[str]]:
+    ) -> tuple[Optional[str], Optional[str], Optional[dict]]:
         """Ask the operation how it is doing, then the listing where its media is.
 
         The listing is the authority — a poll has been observed never to report
         a finished job the listing already knew about — but it is also the
         expensive call, so it is consulted only when the poll says something
         happened, when the poll is unreadable, or every third round regardless.
+        If ``jwpduf`` already carries a signed ``/video/`` CDN url, return it
+        immediately without waiting on ``Zzl0ze`` or ``as29s``.
         """
         rounds = self._operation_polls.get(operation_id, 0) + 1
         self._operation_polls[operation_id] = rounds
@@ -736,13 +859,34 @@ class FlowSDKVideoMixin:
         complaint: Optional[str] = None
         worth_looking = rounds % 3 == 0
         try:
-            operation = fb.read_operation(
-                await self._payload(
-                    fb.RPC_OPERATION,
-                    fb.operation_request(operation_id),
-                    timeout=60.0,
-                )
+            op_payload = await self._payload(
+                fb.RPC_OPERATION,
+                fb.operation_request(operation_id),
+                timeout=60.0,
             )
+            direct_urls = fb.read_media_urls(op_payload, "")
+            if direct_urls.video:
+                direct_mid = _sdk()._media_id_from_url(direct_urls.video)
+                if direct_mid:
+                    self._operation_media[operation_id] = direct_mid
+                    self._operation_policy_strikes.pop(operation_id, None)
+                    return (
+                        direct_mid,
+                        None,
+                        {
+                            "operation": {
+                                "name": operation_id,
+                                "metadata": {
+                                    "video": {
+                                        "mediaId": direct_mid,
+                                        "fifeUrl": direct_urls.video,
+                                    },
+                                },
+                            },
+                            "status": "MEDIA_GENERATION_STATUS_SUCCESSFUL",
+                        },
+                    )
+            operation = fb.read_operation(op_payload)
             complaint = operation.error
             project_id = operation.project_id or project_id
             if project_id:
@@ -760,17 +904,17 @@ class FlowSDKVideoMixin:
             worth_looking = True
 
         if not worth_looking:
-            return None, complaint
+            return None, complaint, None
         if not project_id:
-            return None, "no project id for the listing lookup"
-        return await self._media_id_for(operation_id, project_id), complaint
+            return None, "no project id for the listing lookup", None
+        return await self._media_id_for(operation_id, project_id), complaint, None
 
     async def _media_id_for(
         self, operation_id: str, project_id: str
     ) -> Optional[str]:
         """Find an operation's media id in the project listing.
 
-        Asks the extension for an 800-byte window around the operation id
+        Asks the extension for a compact window around the operation id
         rather than the whole listing: that payload is past 17 MB and grows
         with every generation, so anything shipping it whole gets truncated and
         loses roughly half of all lookups depending on where the id sorts.

@@ -6,7 +6,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Version = "1.1.3",
+    [string]$Version = "1.1.4",
     [string]$PythonExe = "",
     [switch]$SkipNpmCi
 )
@@ -41,16 +41,23 @@ if (-not (Test-Path $PythonExe)) {
     throw "Python executable not found: $PythonExe"
 }
 
-Write-Host "==> [1/6] Building Frontend..."
+Write-Host "==> [1/6] Building Frontend (v$Version)..."
 Push-Location $FrontendDir
+$prevViteAppVersion = $env:VITE_APP_VERSION
 try {
     if (-not $SkipNpmCi) {
         npm ci
         Assert-LastExit "frontend npm ci"
     }
+    $env:VITE_APP_VERSION = $Version
     npx vite build
     Assert-LastExit "frontend vite build"
 } finally {
+    if ($null -eq $prevViteAppVersion) {
+        Remove-Item Env:VITE_APP_VERSION -ErrorAction SilentlyContinue
+    } else {
+        $env:VITE_APP_VERSION = $prevViteAppVersion
+    }
     Pop-Location
 }
 

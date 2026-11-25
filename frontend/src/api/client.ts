@@ -83,6 +83,12 @@ export function humanizeBackendError(token: string): string | null {
     const code = publicErrMatch[0].toUpperCase();
     return code.replace(/^PUBLIC_ERROR_/, "Flow 内容或安全拦截：").replace(/_/g, " ");
   }
+  if (t === "timeout_waiting_video") {
+    return "视频生成等待超时（超过 5 分钟未返回成片，可能因 Flow 排队较久或提示词触发安全审核）";
+  }
+  if (t.includes("as29s") && t.includes("[5]")) {
+    return "Flow 暂未找到对应视频媒体记录（as29s [5]），可能是任务仍在后台渲染或因安全策略拦截未生成成片。";
+  }
   if (t.includes("rpcerror:") && t.includes("failed: [3]")) {
     return "Flow 接口拒绝了当前生成参数组合（错误码 [3]：例如 Veo 3.1 不支持 360p 草稿分辨率，仅支持 720p 起），请切换为 720p 标准清晰度后重试。";
   }
@@ -134,6 +140,8 @@ export interface WsStats {
 
 export interface HealthResponse {
   ok: boolean;
+  version?: string;
+  frontend_dist?: string;
   extension_connected: boolean;
   ws_stats?: WsStats;
 }

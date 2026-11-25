@@ -56,7 +56,38 @@ def test_local_origin_accepts_same_loopback_fallback_port():
     client = TestClient(app, base_url="http://127.0.0.1:18434")
     resp = client.get("/api/health", headers={"Origin": "http://127.0.0.1:18434"})
     assert resp.status_code == 200
-    assert resp.json()["ok"] is True
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["version"] == app.version
+    assert isinstance(body["frontend_dist"], str) and body["frontend_dist"]
 
     blocked = client.get("/api/health", headers={"Origin": "http://127.0.0.1:9999"})
     assert blocked.status_code == 403
+
+
+def test_serve_frontend_index_disables_http_caching(tmp_path: Path, monkeypatch):
+    from flowboard import main as main_mod
+
+    dist_dir = tmp_path / "frontend-dist"
+    dist_dir.mkdir()
+    (dist_dir / "index.html").write_text("<!doctype html><html><body>v-fresh</body></html>", encoding="utf-8")
+    monkeypatch.setattr(main_mod, "_FRONTEND_DIST", dist_dir)
+
+    client = TestClient(app, base_url="http://127.0.0.1:8434")
+    resp = client.get("/")
+    assert resp.status_code == 200
+    cache_ctl = resp.headers.get("cache-control", "").lower()
+    assert "no-store" in cache_ctl
+    assert "no-cache" in cache_ctl
+    assert resp.headers.get("pragma", "").lower() == "no-cache"
+
+
+def test_resolve_agent_version_prefers_packaged_app_package_json(tmp_path: Path, monkeypatch):
+    from flowboard import main as main_mod
+
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    (app_dir / "package.json").write_text('{"name":"ai-canvas-studio","version":"1.2.9"}', encoding="utf-8")
+    monkeypatch.setenv("FLOWBOARD_APP_ROOT", str(tmp_path))
+    assert main_mod._resolve_agent_version() == "1.2.9"
+

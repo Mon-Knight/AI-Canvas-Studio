@@ -17,7 +17,8 @@ const DISMISSED_KEY = "flowboard.github.dismissedReleaseTag.v1";
 // enough that a freshly-cut release shows up the same session.
 const CACHE_TTL_MS = 60 * 60 * 1000;
 
-export const CURRENT_APP_VERSION: string = packageJson.version;
+export const CURRENT_APP_VERSION: string =
+  import.meta.env?.VITE_APP_VERSION?.trim() || packageJson.version;
 
 export interface LatestRelease {
   tagName: string; // e.g. "v1.4.0"

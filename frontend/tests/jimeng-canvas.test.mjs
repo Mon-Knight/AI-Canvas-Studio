@@ -661,6 +661,12 @@ test("estimateImageCreditCost & estimateVideoCreditCost compute model/resolution
       "RpcError: SPrCad failed: [3, None, [['type.googleapis.com/google.rpc.ErrorInfo', ['PUBLIC_ERROR_PROMINENT_PEOPLE_FILTER_FAILED']]]]",
     );
     assert.ok(embeddedPublic && embeddedPublic.startsWith("Flow 内容或安全拦截："));
+
+    const timeoutHuman = humanizeBackendError("timeout_waiting_video");
+    assert.ok(timeoutHuman && timeoutHuman.includes("视频生成等待超时"));
+
+    const as29sHuman = humanizeBackendError("as29s failed: [5]");
+    assert.ok(as29sHuman && as29sHuman.includes("as29s [5]"));
   } finally {
     await server.close();
   }
