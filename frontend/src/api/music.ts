@@ -31,6 +31,7 @@ export interface FlowMusicLyricsResult {
   title: string;
   lyrics: string;
   lyrics_id: string;
+  source?: "llm" | "flowmusic";
 }
 
 export interface FlowMusicAnalyzeResult {
@@ -45,6 +46,7 @@ export interface ComposeMusicPromptResult {
   suggested_bpm: number;
   suggested_title: string;
   used_llm: boolean;
+  used_vision?: boolean;
 }
 
 export interface AudioUploadResult {
@@ -74,13 +76,26 @@ export function syncMusicCredits(): Promise<FlowMusicStatus> {
 
 export function generateMusicLyrics(
   prompt: string,
-  lyricsId?: string,
+  opts?:
+    | string
+    | {
+        lyricsId?: string;
+        existingLyrics?: string;
+        contextTexts?: string[];
+        targetDurationSec?: number;
+        titleHint?: string;
+      },
 ): Promise<FlowMusicLyricsResult> {
+  const options = typeof opts === "string" ? { lyricsId: opts } : opts ?? {};
   return api<FlowMusicLyricsResult>("/api/music/lyrics", {
     method: "POST",
     body: JSON.stringify({
       prompt,
-      ...(lyricsId ? { lyrics_id: lyricsId } : {}),
+      ...(options.lyricsId ? { lyrics_id: options.lyricsId } : {}),
+      ...(options.existingLyrics ? { existing_lyrics: options.existingLyrics } : {}),
+      ...(options.contextTexts?.length ? { context_texts: options.contextTexts } : {}),
+      ...(options.targetDurationSec ? { target_duration_s: options.targetDurationSec } : {}),
+      ...(options.titleHint ? { title_hint: options.titleHint } : {}),
     }),
   });
 }
@@ -102,7 +117,9 @@ export function analyzeCachedAudio(opts: {
 
 export function composeMusicPrompt(opts: {
   contextTexts: string[];
+  mediaIds?: string[];
   userHint?: string;
+  lyrics?: string;
   instrumental: boolean;
   targetDurationSec?: number;
 }): Promise<ComposeMusicPromptResult> {
@@ -110,7 +127,9 @@ export function composeMusicPrompt(opts: {
     method: "POST",
     body: JSON.stringify({
       context_texts: opts.contextTexts,
+      ...(opts.mediaIds?.length ? { media_ids: opts.mediaIds } : {}),
       user_hint: opts.userHint ?? "",
+      ...(opts.lyrics ? { lyrics: opts.lyrics } : {}),
       instrumental: opts.instrumental,
       ...(opts.targetDurationSec ? { target_duration_s: opts.targetDurationSec } : {}),
     }),

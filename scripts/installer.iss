@@ -1,7 +1,7 @@
 ; Inno Setup script for AI Canvas Studio (zero-admin user install)
 
 #ifndef MyAppVersion
-  #define MyAppVersion "1.1.8"
+  #define MyAppVersion "1.1.9"
 #endif
 
 #define MyAppName "AI Canvas Studio"

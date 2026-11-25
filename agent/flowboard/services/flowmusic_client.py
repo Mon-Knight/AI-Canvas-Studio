@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import codecs
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -77,8 +79,32 @@ def format_duration_tag(duration_s: int) -> str:
     return f"[End - {mins}:{secs:02d}]"
 
 
-def compose_sound_prompt(sound_prompt: str, bpm: Optional[int] = None) -> str:
-    base = (sound_prompt or "").strip()
+_INVISIBLE_UNICODE_RE = re.compile(r"[\ufffc\ufffd\u200b-\u200f\u202a-\u202e\u2060\ufeff\x00-\x08\x0b\x0c\x0e-\x1f]")
+_PROMPT_DECOR_RE = re.compile(r"[•●▪▫▶◆◇🎵🎶🎹🎸🥁🎤💬✨🔥🌟⭐]+")
+
+
+def _sanitize_music_text(text: Optional[str], *, single_line: bool = False) -> str:
+    """Strip invisible/paste-artifact chars (e.g. U+FFFC ￼ from WeChat/web) safely."""
+    raw = _INVISIBLE_UNICODE_RE.sub("", text or "")
+    raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+    if single_line:
+        raw = _PROMPT_DECOR_RE.sub(" ", raw)
+        lines = [ln.strip(" \t-–—|") for ln in raw.splitlines() if ln.strip(" \t-–—|")]
+        raw = "，".join(lines)
+        raw = re.sub(r"\s{2,}", " ", raw)
+        raw = re.sub(r"[，,]{2,}", "，", raw)
+        return raw.strip(" ，,")
+    # Preserve lyric line structure while trimming trailing spaces & excess blank lines
+    cleaned_lines = [ln.strip() for ln in raw.splitlines()]
+    out = "\n".join(cleaned_lines)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
+
+def compose_sound_prompt(sound_prompt: str, bpm: Optional[int] = None, *, max_chars: int = 420) -> str:
+    base = _sanitize_music_text(sound_prompt, single_line=True)
+    if max_chars > 0 and len(base) > max_chars:
+        base = base[:max_chars].rstrip(" ，,;；:：")
     if bpm is not None:
         safe_bpm = max(40, min(240, int(bpm)))
         if f"{safe_bpm} bpm" not in base.lower() and "bpm" not in base.lower():
@@ -96,7 +122,7 @@ def compose_lyrics_payload(
     if instrumental:
         text = "[Instrumental]"
     else:
-        text = (lyrics or "").strip()
+        text = _sanitize_music_text(lyrics, single_line=False)
 
     if duration_s is not None and duration_s > 0:
         tag = format_duration_tag(duration_s)
@@ -123,49 +149,69 @@ def build_edit_recipe(
     seed: Optional[int] = None,
     title: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Build the 3-node recipe graph expected by `POST /__api/recipes/create`."""
+    """Build the 3-node recipe graph expected by `POST /__api/recipes/create`.
+
+    Matches Flow Music backend Pydantic union discriminator `node_type` plus
+    explicit `input_ids` / `output_ids` wiring.
+    """
     act = (action or "").strip().lower()
-    input_node: dict[str, Any] = {"type": "Input", "clip_id": clip_id}
+    clean_instr = _sanitize_music_text(instruction, single_line=True)
+    if len(clean_instr) > 420:
+        clean_instr = clean_instr[:420].rstrip(" ，,;；:：")
+
+    input_node: dict[str, Any] = {
+        "node_type": "Input",
+        "clip_id": clip_id,
+        "input_ids": [],
+        "output_ids": ["input"],
+    }
 
     if act == "extend":
         op_node: dict[str, Any] = {
-            "type": "ExtendSection",
+            "node_type": "ExtendSection",
+            "input_ids": ["input"],
+            "output_ids": ["processing"],
             "extend_s": max(10.0, min(120.0, float(extend_s or 30.0))),
-            "instruction": instruction or "Naturally continue and develop the musical piece",
+            "extend_from_s": float(extend_from_s) if extend_from_s is not None and extend_from_s >= 0 else None,
+            "instruction": clean_instr or "Naturally continue and develop the musical piece",
+            "seed": int(seed) if seed is not None else None,
         }
-        if extend_from_s is not None and extend_from_s >= 0:
-            op_node["extend_from_s"] = float(extend_from_s)
     elif act == "replace":
         start_s = max(0.0, float(replace_start_s or 0.0))
         end_s = max(start_s + 2.0, float(replace_end_s or (start_s + 15.0)))
         op_node = {
-            "type": "ReplaceSection",
+            "node_type": "ReplaceSection",
+            "input_ids": ["input"],
+            "output_ids": ["processing"],
             "masks": [{"start_s": start_s, "end_s": end_s}],
-            "instruction": instruction or "Rewrite this section with stronger musical energy",
+            "instruction": clean_instr or "Rewrite this section with stronger musical energy",
+            "seed": int(seed) if seed is not None else None,
         }
     elif act == "cover":
         op_node = {
-            "type": "CoverSong",
+            "node_type": "CoverSong",
+            "input_ids": ["input"],
+            "output_ids": ["processing"],
             "strength": max(0.1, min(1.0, float(cover_strength))),
-            "instruction": instruction or "Re-arrange in a fresh genre while keeping the melody",
+            "instruction": clean_instr or "Re-arrange in a fresh genre while keeping the melody",
+            "seed": int(seed) if seed is not None else None,
         }
     else:
         raise FlowMusicError("invalid_edit_action", f"不支持的音频编辑类型：{action}")
 
-    if seed is not None:
-        op_node["seed"] = int(seed)
-
+    out_title = (title.strip()[:120] if title and title.strip() else f"Flow Music ({act.capitalize()})")
     output_node: dict[str, Any] = {
-        "type": "Output",
+        "node_type": "Output",
+        "input_ids": ["processing"],
+        "output_ids": ["output"],
+        "title": out_title,
         "generate_image": True,
     }
-    if title:
-        output_node["title"] = title.strip()[:120]
 
     return {
         "recipe": {
             "nodes": [input_node, op_node, output_node],
-            "instruction": instruction or act,
+            "instruction": clean_instr or None,
         }
     }
 
@@ -179,20 +225,36 @@ def build_effect_graph(
     speed: Optional[float] = None,
     semitones: Optional[int] = None,
 ) -> list[dict[str, Any]]:
+    """Build the 3-node effect graph expected by `audio__apply_effect`."""
     eff = (effect or "").strip().lower()
+    input_node: dict[str, Any] = {
+        "node_type": "Input",
+        "node_id": "input",
+        "track_id": clip_id,
+    }
     if eff == "trim":
         st = max(0.0, float(start_s or 0.0))
         ed = max(st + 1.0, float(end_s or (st + 30.0)))
-        op_node: dict[str, Any] = {"type": "Trim", "start_s": st, "end_s": ed}
+        op_id = "trim"
+        op_node: dict[str, Any] = {
+            "node_type": "Trim",
+            "node_id": op_id,
+            "input_ids": ["input"],
+            "start_s": st,
+            "end_s": ed,
+        }
     elif eff in ("tempo", "speed", "tempo_shift"):
+        op_id = "fx"
         op_node = {
-            "type": "TempoShift",
+            "node_type": "TempoShift",
+            "node_id": op_id,
+            "input_ids": ["input"],
             "speed": max(0.5, min(2.0, float(speed if speed is not None else 1.0))),
             "semitones": max(-12, min(12, int(semitones if semitones is not None else 0))),
         }
     else:
         raise FlowMusicError("invalid_effect", f"不支持的音频效果类型：{effect}")
-    return [{"type": "Input", "clip_id": clip_id}, op_node, {"type": "Output"}]
+    return [input_node, op_node, {"node_type": "Output", "input_ids": [op_id]}]
 
 
 @dataclass
@@ -257,6 +319,8 @@ class ProducerJobOutcome:
     tool_returns: list[dict[str, Any]] = field(default_factory=list)
     completed: bool = False
     error: Optional[str] = None
+    error_type: Optional[str] = None
+    raw_error: Optional[str] = None
 
     @property
     def clip_refs(self) -> list[dict[str, Any]]:
@@ -313,8 +377,133 @@ class ProducerJobOutcome:
         return out
 
 
+_UI_HIDDEN_RE = re.compile(r"<ui-hidden>[\s\S]*?</ui-hidden>", re.IGNORECASE)
+_CODE_FENCE_RE = re.compile(r"^```(?:[a-zA-Z0-9_-]+)?\s*\n([\s\S]*?)\n```\s*$")
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+_LONG_ASCII_BLOB_RE = re.compile(r"[A-Za-z0-9+/=_-]{48,}")
+_MOJIBAKE_RE = re.compile(r"(?:Ã.|å.|ç.|é.|æ.|ï¿|â€|Ð.|Ñ.){2,}")
+_EXPLICIT_NON_ZH_RE = re.compile(
+    r"(英文|英语|全英|english|日文|日语|japanese|韩文|韩语|korean|法语|french|西班牙语|spanish)",
+    re.IGNORECASE,
+)
+
+
+def _clean_sse_text(raw: str) -> str:
+    cleaned = _UI_HIDDEN_RE.sub("", raw or "")
+    return cleaned.strip()
+
+
+def _parse_tool_return_content(content: Any) -> Any:
+    if isinstance(content, str):
+        stripped = content.strip()
+        if (stripped.startswith("{") and stripped.endswith("}")) or (
+            stripped.startswith("[") and stripped.endswith("]")
+        ):
+            try:
+                return json.loads(stripped)
+            except ValueError:
+                return content
+    return content
+
+
+def _looks_chinese_prompt(text: str) -> bool:
+    if not text:
+        return False
+    if _EXPLICIT_NON_ZH_RE.search(text):
+        return False
+    return len(_CJK_RE.findall(text)) >= 2
+
+
+def _clean_and_validate_lyrics(raw_text: str, *, prefer_chinese: bool = False) -> Optional[str]:
+    """Sanitize generated lyrics and reject gibberish, mojibake, JSON blobs, or Base64 signatures."""
+    if not isinstance(raw_text, str):
+        return None
+    text = _clean_sse_text(raw_text)
+    if not text:
+        return None
+
+    m_fence = _CODE_FENCE_RE.match(text)
+    if m_fence:
+        text = m_fence.group(1).strip()
+
+    # Unwrap accidental JSON wrapper if a model/tool returned stringified JSON
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            obj = json.loads(text)
+            if isinstance(obj, dict):
+                extracted = obj.get("lyrics") or (
+                    obj.get("data", {}).get("lyrics") if isinstance(obj.get("data"), dict) else None
+                )
+                if isinstance(extracted, str) and extracted.strip():
+                    text = extracted.strip()
+                else:
+                    return None
+        except ValueError:
+            pass
+
+    if "\\n" in text and "\n" not in text:
+        text = text.replace("\\n", "\n")
+
+    text = re.sub(r"\r\n?", "\n", text).strip()
+    if len(text) < 16:
+        return None
+
+    # Reject UTF-8 replacement chars, control bytes, or obvious Latin-1 mojibake
+    if "\ufffd" in text or re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", text):
+        return None
+    if _MOJIBAKE_RE.search(text):
+        return None
+
+    # Reject technical JSON/SSE leaks or base64 thought_signature blobs
+    low = text.lower()
+    if any(
+        tok in low
+        for tok in (
+            '"part_kind"',
+            '"tool_call_id"',
+            '"thought_signature"',
+            '"reasoning_traces"',
+            '"raw_track"',
+            '"session_snapshot"',
+        )
+    ):
+        return None
+    if _LONG_ASCII_BLOB_RE.search(text):
+        return None
+
+    # Reject single-line non-lyric chatter / gibberish
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return None
+
+    if prefer_chinese:
+        cjk_count = len(_CJK_RE.findall(text))
+        if cjk_count < 8:
+            return None
+
+    return text
+
+
+def _default_client_context(
+    model: Optional[str] = None,
+    lyrics_map: Optional[dict[str, str]] = None,
+) -> dict[str, Any]:
+    ctx: dict[str, Any] = {
+        "current_song_id": None,
+        "song_queue": [],
+        "project_id": None,
+        "selected_model": (model or DEFAULT_MUSIC_MODEL).strip() or DEFAULT_MUSIC_MODEL,
+        "lyrics_id_map": lyrics_map or {},
+        "ghostwriter_version": "standard",
+        "onboarding_variant": None,
+        "client_platform": "web",
+    }
+    return ctx
+
+
 def extract_job_outcome(job_id: str, events: Iterable[SSEEvent]) -> ProducerJobOutcome:
     out = ProducerJobOutcome(job_id=job_id)
+    text_parts: dict[int, str] = {}
     for ev in events:
         d = ev.data if isinstance(ev.data, dict) else {}
         if ev.event == "conversation_id" and isinstance(d.get("id"), str):
@@ -327,33 +516,103 @@ def extract_job_outcome(job_id: str, events: Iterable[SSEEvent]) -> ProducerJobO
                 continue
             kind = part.get("part_kind")
             status = d.get("status")
+            idx = d.get("index")
+            part_idx = idx if isinstance(idx, int) else len(text_parts)
+            # Never leak model thinking/reasoning traces into user-visible text.
+            if kind in ("thinking", "thought", "reasoning"):
+                continue
             if kind == "tool-call" and status == "final":
                 out.tool_calls.append(part)
-            elif kind == "tool-return":
-                out.tool_returns.append(part)
-            elif kind == "text" and status == "final":
-                txt = part.get("content")
-                if isinstance(txt, str) and txt:
-                    out.text = f"{out.text}\n\n{txt}".strip()
+            elif kind == "tool-return" and status in (None, "final"):
+                parsed_content = _parse_tool_return_content(part.get("content"))
+                out.tool_returns.append({**part, "content": parsed_content})
+            elif kind == "text":
+                if status == "start":
+                    txt = part.get("content")
+                    text_parts[part_idx] = txt if isinstance(txt, str) else ""
+                elif status == "delta":
+                    delta = d.get("delta")
+                    if isinstance(delta, str) and delta:
+                        text_parts[part_idx] = text_parts.get(part_idx, "") + delta
+                elif status == "final":
+                    txt = part.get("content")
+                    if isinstance(txt, str) and txt:
+                        text_parts[part_idx] = txt
         elif ev.event == "message" and isinstance(d.get("parts"), list):
             for part in d["parts"]:
                 if not isinstance(part, dict):
                     continue
                 kind = part.get("part_kind")
+                if kind in ("thinking", "thought", "reasoning"):
+                    continue
                 if kind == "tool-call":
                     out.tool_calls.append(part)
                 elif kind == "tool-return":
-                    out.tool_returns.append(part)
+                    parsed_content = _parse_tool_return_content(part.get("content"))
+                    out.tool_returns.append({**part, "content": parsed_content})
                 elif kind == "text":
                     txt = part.get("content")
                     if isinstance(txt, str) and txt:
-                        out.text = f"{out.text}\n\n{txt}".strip()
-        elif ev.event == "complete":
+                        text_parts[len(text_parts)] = txt
+        elif ev.event in ("complete", "final"):
             out.completed = True
         elif ev.event == "error":
-            msg = d.get("message") or d.get("detail") or str(ev.data)
+            err_type = d.get("type") if isinstance(d.get("type"), str) else None
+            raw_err = d.get("raw_error") or d.get("error")
+            msg = d.get("message") or d.get("detail") or (str(raw_err) if raw_err else str(ev.data))
+            out.error_type = err_type
+            out.raw_error = str(raw_err)[:300] if raw_err else None
             out.error = str(msg)
+
+    cleaned_chunks = [_clean_sse_text(v) for _, v in sorted(text_parts.items())]
+    out.text = "\n\n".join(c for c in cleaned_chunks if c).strip()
     return out
+
+
+def _raise_producer_outcome_error(outcome: ProducerJobOutcome) -> None:
+    """Classify and raise a clear, actionable Chinese FlowMusicError from SSE error/failure fields."""
+    if outcome.error:
+        etype = (outcome.error_type or "").lower()
+        msg = outcome.error
+        raw = outcome.raw_error or ""
+        detail = f"{msg} | {raw}" if raw and raw not in msg else msg
+        low = f"{etype} {detail}".lower()
+        if any(
+            tok in low
+            for tok in ("moderation", "copyright", "policy", "artist", "flagged", "blocked", "safety", "recitation", "prohibited")
+        ):
+            raise FlowMusicError(
+                "FLOWMUSIC_BLOCKED",
+                f"触发 Flow Music 内容或版权审核（请移除真实歌手/乐队名并避免直接粘贴受版权保护的成曲歌词）：{detail}",
+            )
+        if "rate_limit" in low or "ratelimit" in low or "too many" in low:
+            raise FlowMusicError(
+                "FLOWMUSIC_RATE_LIMITED",
+                f"Flow Music 请求过于频繁，请稍等片刻后重试（{detail}）",
+                retryable=True,
+            )
+        if "credit" in low and ("insufficient" in low or "out of" in low or "not enough" in low):
+            raise FlowMusicError("FLOWMUSIC_OUT_OF_CREDITS", f"Flow Music 积分不足：{detail}")
+        if etype == "permission":
+            raise FlowMusicError("FLOWMUSIC_NO_ACCESS", f"当前账号无此操作权限：{detail}")
+        if "streaming parts" in low or etype == "inference":
+            raise FlowMusicError(
+                "FLOWMUSIC_PRODUCER_ERROR",
+                f"Flow Music 服务端流式生成中断（{detail}）。常见原因：提示词/歌词触发版权或歌手名限制、文本过长或服务端临时波动，请精简描述并确保使用原创歌词后重试。",
+                retryable=True,
+            )
+        raise FlowMusicError("FLOWMUSIC_PRODUCER_ERROR", f"Flow Music 生成报错：{detail}")
+
+    if outcome.failures:
+        first = outcome.failures[0]
+        msg = str(first.get("message") or first.get("error_message") or first.get("reason") or first.get("error") or first)
+        low = msg.lower()
+        if any(tok in low for tok in ("moderation", "copyright", "policy", "artist", "flagged", "blocked", "safety", "recitation")):
+            raise FlowMusicError(
+                "FLOWMUSIC_BLOCKED",
+                f"触发 Flow Music 内容或版权审核（请移除真实歌手名与版权歌词）：{msg}",
+            )
+        raise FlowMusicError("FLOWMUSIC_TOOL_FAILED", f"Flow Music 执行失败：{msg}")
 
 
 def _coerce_nonneg_int(val: Any) -> Optional[int]:
@@ -878,9 +1137,17 @@ class FlowMusicClient:
                         if resp.status_code >= 400:
                             body = (await resp.aread()).decode("utf-8", errors="replace")
                             raise _map_http_error(resp.status_code, body)
+                        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+                        buf = ""
                         lines: list[str] = []
-                        async for line in resp.aiter_lines():
-                            lines.append(line)
+                        async for chunk in resp.aiter_bytes():
+                            buf += decoder.decode(chunk, final=False)
+                            while "\n" in buf:
+                                raw_line, buf = buf.split("\n", 1)
+                                lines.append(raw_line.rstrip("\r"))
+                        tail = buf + decoder.decode(b"", final=True)
+                        if tail:
+                            lines.extend(tail.splitlines())
                         return parse_sse_lines(lines)
             except httpx.HTTPError as exc:
                 if flow_client.music_connected:
@@ -1065,6 +1332,9 @@ class FlowMusicClient:
         timeout: float = 180.0,
     ) -> ProducerJobOutcome:
         cid = conversation_id or await self.create_conversation()
+        merged_ctx = _default_client_context()
+        if client_context:
+            merged_ctx.update(client_context)
         payload = {
             "conversation_id": cid,
             "part": {
@@ -1073,7 +1343,7 @@ class FlowMusicClient:
                 "part_kind": "tool-call",
                 "tool_call_id": f"call_{uuid.uuid4().hex[:16]}",
             },
-            "client_context": client_context or {},
+            "client_context": merged_ctx,
         }
         res = await self.request_json("POST", "/producer/tool-call", json_body=payload, timeout=45.0)
         job_id = res.get("job_id") if isinstance(res, dict) else None
@@ -1084,12 +1354,85 @@ class FlowMusicClient:
         outcome = extract_job_outcome(job_id, events)
         if not outcome.conversation_id:
             outcome.conversation_id = cid
-        if outcome.error:
-            raise FlowMusicError("FLOWMUSIC_PRODUCER_ERROR", f"Flow Music 生成报错：{outcome.error}")
-        if outcome.failures:
-            first = outcome.failures[0]
-            msg = first.get("message") or first.get("reason") or first.get("error") or str(first)
-            raise FlowMusicError("FLOWMUSIC_TOOL_FAILED", f"Flow Music 执行失败：{msg}")
+        _raise_producer_outcome_error(outcome)
+        return outcome
+
+    async def register_lyrics(
+        self,
+        lyrics_text: str,
+        *,
+        conversation_id: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Register lyrics server-side via `lyrics__register`, returning `(lyrics_id, conversation_id)`."""
+        outcome = await self.run_tool_call(
+            tool_name="lyrics__register",
+            args={"lyrics": lyrics_text},
+            conversation_id=conversation_id,
+            client_context=_default_client_context(model=model),
+            timeout=45.0,
+        )
+        for tr in outcome.tool_returns:
+            content = _parse_tool_return_content(tr.get("content"))
+            if isinstance(content, dict):
+                lid = content.get("lyrics_id") or (
+                    content.get("data", {}).get("lyrics_id") if isinstance(content.get("data"), dict) else None
+                )
+                if isinstance(lid, str) and lid.strip():
+                    return lid.strip(), outcome.conversation_id or conversation_id
+        return None, outcome.conversation_id or conversation_id
+
+    async def run_conversation_song(
+        self,
+        *,
+        sound_prompt: str,
+        lyrics_text: Optional[str] = None,
+        instrumental: bool = False,
+        duration_s: Optional[int] = None,
+        model: Optional[str] = None,
+        title: Optional[str] = None,
+        conversation_id: Optional[str] = None,
+        timeout: float = 180.0,
+    ) -> ProducerJobOutcome:
+        """Official web-UI generation path via `POST /__api/conversation` (co-producer orchestration)."""
+        selected_model = (model or DEFAULT_MUSIC_MODEL).strip() or DEFAULT_MUSIC_MODEL
+        lines = [f"Create and render the song immediately without asking clarifying questions.\nStyle: {sound_prompt}"]
+        if title and title.strip():
+            lines.append(f"Title: {title.strip()[:120]}")
+        if duration_s and duration_s > 0:
+            lines.append(f"Target length: {format_duration_tag(duration_s)}")
+        if instrumental:
+            lines.append("Make it strictly instrumental (no vocals).")
+        elif lyrics_text and lyrics_text.strip():
+            clean_lyr = re.sub(r"\[End\s*-\s*\d+:\d+\]", "", lyrics_text).strip()
+            if clean_lyr:
+                lines.append(f"Use these lyrics:\n\n{clean_lyr}")
+
+        client_ctx = _default_client_context(model=selected_model)
+        client_ctx["clarifying_questions"] = {
+            "supports_question_options": False,
+            "supports_multi_question_options": False,
+            "arm": "questionnaire",
+        }
+        body: dict[str, Any] = {
+            "parts": [{"content": "\n\n".join(lines), "part_kind": "user-prompt"}],
+            "client_context": client_ctx,
+            "model_name": "producer:standard",
+            "mode": "standard",
+        }
+        if conversation_id:
+            body["conversation_id"] = conversation_id
+
+        res = await self.request_json("POST", "/conversation", json_body=body, timeout=45.0)
+        job_id = res.get("job_id") if isinstance(res, dict) else None
+        if not isinstance(job_id, str) or not job_id:
+            raise FlowMusicError("FLOWMUSIC_JOB_START_FAILED", "提交 Flow Music 对话生成任务失败。")
+
+        events = await self.stream_job_events(job_id, timeout=timeout)
+        outcome = extract_job_outcome(job_id, events)
+        if not outcome.conversation_id and conversation_id:
+            outcome.conversation_id = conversation_id
+        _raise_producer_outcome_error(outcome)
         return outcome
 
     async def generate_lyrics(self, prompt: str, *, lyrics_id: Optional[str] = None) -> dict[str, str]:
@@ -1097,26 +1440,60 @@ class FlowMusicClient:
         clean = (prompt or "").strip()
         if not clean:
             raise FlowMusicError("FLOWMUSIC_EMPTY_PROMPT", "请输入歌词主题或修改要求。")
+        prefer_zh = _looks_chinese_prompt(clean)
+        anchored_prompt = (
+            f"{clean}\n\n请用自然押韵的简体中文撰写完整歌词，使用 [Verse 1] / [Chorus] / [Bridge] / [Outro] 分段，只输出纯歌词。"
+            if prefer_zh and not lyrics_id
+            else clean
+        )
         tool = "lyrics__edit" if lyrics_id else "lyrics__create"
-        args: dict[str, Any] = {"prompt": clean}
+        args: dict[str, Any] = {"prompt": anchored_prompt}
         if lyrics_id:
             args["lyrics_id"] = lyrics_id
         outcome = await self.run_tool_call(tool_name=tool, args=args, timeout=90.0)
+
         for tr in outcome.tool_returns:
-            content = tr.get("content")
-            if isinstance(content, dict) and isinstance(content.get("lyrics"), str):
-                return {
-                    "title": str(content.get("title") or "").strip(),
-                    "lyrics": content["lyrics"].strip(),
-                    "lyrics_id": str(content.get("lyrics_id") or compute_lyrics_id(content["lyrics"].strip())),
-                }
+            content = _parse_tool_return_content(tr.get("content"))
+            candidates: list[tuple[str, str, Optional[str]]] = []
+            if isinstance(content, dict):
+                inner = content.get("data") if isinstance(content.get("data"), dict) else None
+                for src in (content, inner):
+                    if not isinstance(src, dict):
+                        continue
+                    raw_lyr = src.get("lyrics") or src.get("text")
+                    if isinstance(raw_lyr, str) and raw_lyr.strip():
+                        candidates.append(
+                            (
+                                str(src.get("title") or content.get("title") or outcome.title or "").strip(),
+                                raw_lyr,
+                                str(src.get("lyrics_id") or content.get("lyrics_id") or "").strip() or None,
+                            )
+                        )
+            elif isinstance(content, str) and content.strip():
+                candidates.append((outcome.title or "", content, None))
+
+            for cand_title, raw_lyr, cand_id in candidates:
+                valid = _clean_and_validate_lyrics(raw_lyr, prefer_chinese=prefer_zh)
+                if valid:
+                    return {
+                        "title": cand_title,
+                        "lyrics": valid,
+                        "lyrics_id": cand_id or compute_lyrics_id(valid),
+                    }
+
         if outcome.text:
-            return {
-                "title": outcome.title or "",
-                "lyrics": outcome.text,
-                "lyrics_id": compute_lyrics_id(outcome.text),
-            }
-        raise FlowMusicError("FLOWMUSIC_LYRICS_EMPTY", "Flow Music 未返回歌词内容，请调整描述后重试。")
+            valid = _clean_and_validate_lyrics(outcome.text, prefer_chinese=prefer_zh)
+            if valid:
+                return {
+                    "title": outcome.title or "",
+                    "lyrics": valid,
+                    "lyrics_id": compute_lyrics_id(valid),
+                }
+
+        raise FlowMusicError(
+            "FLOWMUSIC_LYRICS_INVALID",
+            "Flow Music 内置作词未返回有效歌词（可能含异常字符或格式不符）。请在「设置 → AI 模型」中配置对话模型以启用高质量中文作词，或调整主题后重试。",
+        )
 
     async def wait_for_clips(
         self,
@@ -1212,8 +1589,15 @@ class FlowMusicClient:
         title: Optional[str] = None,
         is_canceled: Optional[Callable[[], bool]] = None,
     ) -> dict[str, Any]:
-        """Generate a full song or instrumental BGM via Direct Tool-Call (5 music credits)."""
+        """Generate a full song or instrumental BGM (5 music credits).
+
+        Uses direct `lyrics__register` + `audio__create_song`, and automatically
+        falls back once to Flow Music's official web-UI `POST /__api/conversation`
+        endpoint if the direct tool-call encounters a server streaming error
+        (before any clip/credits are consumed).
+        """
         await self._respect_paid_cooldown()
+        selected_model = (model or DEFAULT_MUSIC_MODEL).strip() or DEFAULT_MUSIC_MODEL
         final_prompt = compose_sound_prompt(sound_prompt, bpm)
         if not final_prompt:
             raise FlowMusicError("FLOWMUSIC_EMPTY_PROMPT", "请输入曲风、乐器或情绪描述。")
@@ -1223,26 +1607,96 @@ class FlowMusicClient:
             instrumental=instrumental,
             duration_s=duration_s,
         )
+        lyrics_text = lyrics_map.get(lyrics_id) if lyrics_id else None
+
+        cid = await self.create_conversation()
+        # Register lyrics server-side just like Flow Music's web lyrics editor so
+        # Lyria 3.5 direct tool calls never fail looking up unregistered lyrics_id.
+        if lyrics_text:
+            try:
+                reg_id, reg_cid = await self.register_lyrics(
+                    lyrics_text,
+                    conversation_id=cid,
+                    model=selected_model,
+                )
+                if reg_cid:
+                    cid = reg_cid
+                if reg_id:
+                    lyrics_id = reg_id
+                    lyrics_map[reg_id] = lyrics_text
+            except FlowMusicError as reg_exc:
+                if reg_exc.code in (
+                    "FLOWMUSIC_AUTH_EXPIRED",
+                    "FLOWMUSIC_NOT_LOGGED_IN",
+                    "FLOWMUSIC_BLOCKED",
+                    "FLOWMUSIC_OUT_OF_CREDITS",
+                    "FLOWMUSIC_RATE_LIMITED",
+                ):
+                    raise
+                logger.info("lyrics__register skipped (%s); falling back to local lyrics_id_map", reg_exc.code)
+            except Exception:
+                logger.debug("lyrics__register non-fatal error; continuing with local lyrics_id_map", exc_info=True)
+
         args: dict[str, Any] = {"sound_prompt": final_prompt}
         if lyrics_id:
             args["lyrics_id"] = lyrics_id
         if seed is not None:
             args["seed"] = int(seed)
 
-        client_ctx: dict[str, Any] = {
-            "selected_model": (model or DEFAULT_MUSIC_MODEL).strip() or DEFAULT_MUSIC_MODEL,
-        }
-        if lyrics_map:
-            client_ctx["lyrics_id_map"] = lyrics_map
+        client_ctx = _default_client_context(model=selected_model, lyrics_map=lyrics_map)
 
-        outcome = await self.run_tool_call(
-            tool_name="audio__create_song",
-            args=args,
-            client_context=client_ctx,
-            timeout=180.0,
-        )
-        refs = outcome.clip_refs
+        outcome: Optional[ProducerJobOutcome] = None
+        direct_err: Optional[FlowMusicError] = None
+        try:
+            outcome = await self.run_tool_call(
+                tool_name="audio__create_song",
+                args=args,
+                conversation_id=cid,
+                client_context=client_ctx,
+                timeout=180.0,
+            )
+        except FlowMusicError as exc:
+            if exc.code not in ("FLOWMUSIC_PRODUCER_ERROR", "FLOWMUSIC_TOOL_FAILED", "FLOWMUSIC_NO_CLIPS"):
+                raise
+            direct_err = exc
+            logger.info(
+                "Direct audio__create_song failed (%s); falling back to official /conversation path",
+                exc.code,
+            )
+
+        if outcome is None or not outcome.clip_refs:
+            try:
+                conv_outcome = await self.run_conversation_song(
+                    sound_prompt=final_prompt,
+                    lyrics_text=lyrics_text,
+                    instrumental=instrumental,
+                    duration_s=duration_s,
+                    model=selected_model,
+                    title=title,
+                    conversation_id=None,
+                    timeout=180.0,
+                )
+                outcome = conv_outcome
+            except FlowMusicError as conv_exc:
+                # Prefer a more specific block/policy/credits error from the co-producer
+                if conv_exc.code in ("FLOWMUSIC_BLOCKED", "FLOWMUSIC_OUT_OF_CREDITS", "FLOWMUSIC_RATE_LIMITED"):
+                    raise conv_exc from None
+                if direct_err is not None:
+                    raise direct_err from None
+                raise conv_exc from None
+
+        refs = outcome.clip_refs if outcome else []
         if not refs:
+            if outcome and outcome.text:
+                low_txt = outcome.text.lower()
+                if any(tok in low_txt for tok in ("copyright", "artist", "policy", "cannot", "can't", "sorry", "版权", "歌手", "限制")):
+                    raise FlowMusicError(
+                        "FLOWMUSIC_BLOCKED",
+                        f"Flow Music 拒绝了本次生成（可能涉及真实歌手名或版权歌词，请移除歌手名并使用原创歌词）：{outcome.text[:260]}",
+                    )
+                raise FlowMusicError("FLOWMUSIC_NO_CLIPS", f"Flow Music 未生成音频，服务端回复：{outcome.text[:260]}")
+            if direct_err is not None:
+                raise direct_err
             raise FlowMusicError("FLOWMUSIC_NO_CLIPS", "Flow Music 未返回音频片段，请调整提示词后重试。")
 
         clips = await self.wait_for_clips(refs, is_canceled=is_canceled)
@@ -1251,17 +1705,17 @@ class FlowMusicClient:
         if title and title.strip():
             clean_title = title.strip()[:120]
             for clip in clips:
-                cid = clip.get("id")
-                if isinstance(cid, str) and cid:
+                cid_item = clip.get("id")
+                if isinstance(cid_item, str) and cid_item:
                     try:
-                        await self.request_json("PATCH", f"/clips/{cid}", json_body={"title": clean_title}, timeout=15.0)
+                        await self.request_json("PATCH", f"/clips/{cid_item}", json_body={"title": clean_title}, timeout=15.0)
                         clip["title"] = clean_title
                     except Exception:
                         pass
 
         return {
             "conversation_id": outcome.conversation_id,
-            "model": client_ctx["selected_model"],
+            "model": selected_model,
             "sound_prompt": final_prompt,
             "clips": clips,
         }
@@ -1301,9 +1755,12 @@ class FlowMusicClient:
         if not isinstance(recipe_id, str) or not recipe_id:
             raise FlowMusicError("FLOWMUSIC_RECIPE_FAILED", "创建音频编辑配方失败。")
 
-        args: dict[str, Any] = {"recipe_id": recipe_id}
-        if title and title.strip():
-            args["title"] = title.strip()[:120]
+        out_title = title.strip()[:120] if title and title.strip() else f"Flow Music ({action.strip().capitalize()})"
+        args: dict[str, Any] = {
+            "recipe_id": recipe_id,
+            "title": out_title,
+            "image_id": None,
+        }
 
         outcome = await self.run_tool_call(
             tool_name="audio__render_edit",
@@ -1415,12 +1872,11 @@ class FlowMusicClient:
         remove_vocals: bool = False,
     ) -> dict[str, Any]:
         """Upload audio to Flow Music and run 0-credit style caption + lyrics transcription."""
-        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "mp3"
         upload_res = await self.request_json(
             "POST",
             "/producer/upload-audio",
             files={"file": (filename, raw_bytes, mime)},
-            data={"file_type": ext, "filename": filename},
+            data={"file_type": mime, "filename": filename},
             timeout=90.0,
         )
         if not isinstance(upload_res, dict) or not upload_res.get("clip_id"):
@@ -1467,7 +1923,11 @@ class FlowMusicClient:
                     break
                 await asyncio.sleep(2.0)
 
-        audio_url = f"{GCS_CLIP_BASE}/{clip_id}.m4a"
+        audio_url = (
+            upload_res.get("url")
+            if isinstance(upload_res.get("url"), str) and upload_res["url"].startswith("http")
+            else f"{GCS_CLIP_BASE}/{clip_id}.m4a"
+        )
         caption_text = ""
         lyrics_text = ""
         try:

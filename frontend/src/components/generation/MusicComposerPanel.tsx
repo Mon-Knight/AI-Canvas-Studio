@@ -86,39 +86,95 @@ export function MusicComposerPanel({
     [nodes, rfId],
   );
 
-  // 收集上游连接的节点（文本、画面分镜、音频母带）
+  // 收集上游连接节点或画布分镜上下文（按叙事位置排序，同时收集图片 mediaId 供视觉构思）
   const upstreamInfo = useMemo(() => {
+    const typeLabel = (t: string): string => {
+      if (t === "video") return "视频分镜";
+      if (t === "character") return "角色卡";
+      if (t === "subject") return "主体参考";
+      if (t === "image") return "画面";
+      if (t === "prompt") return "文本剧本";
+      if (t === "note") return "便签";
+      return "节点";
+    };
+
+    const formatNodeSummary = (n: (typeof nodes)[number]): string | null => {
+      const label = displayNodeTitle(n.data.title, n.data.type);
+      const brief = typeof n.data.aiBrief === "string" ? n.data.aiBrief.trim() : "";
+      const p = typeof n.data.prompt === "string" ? n.data.prompt.trim() : "";
+      const parts: string[] = [];
+      if (brief) parts.push(`画面：${brief}`);
+      if (p && p !== brief) parts.push(`描述：${p}`);
+      if (parts.length === 0) return null;
+      const dur =
+        n.data.type === "video" && typeof n.data.durationSeconds === "number"
+          ? ` · ${n.data.durationSeconds}秒`
+          : "";
+      return `[${typeLabel(n.data.type)}${dur}] ${label} — ${parts.join("；")}`;
+    };
+
+    const extractImageMediaIds = (list: typeof nodes): string[] => {
+      const ids: string[] = [];
+      const seen = new Set<string>();
+      for (const n of list) {
+        if (ids.length >= 3) break;
+        if (n.data.type === "video" || n.data.type === "audio" || n.data.type === "prompt" || n.data.type === "note") {
+          continue;
+        }
+        const mid =
+          (typeof n.data.mediaId === "string" && n.data.mediaId.trim()) ||
+          (Array.isArray(n.data.mediaIds)
+            ? n.data.mediaIds.find((x): x is string => typeof x === "string" && x.trim().length > 0)?.trim()
+            : "") ||
+          "";
+        if (mid && !seen.has(mid)) {
+          seen.add(mid);
+          ids.push(mid);
+        }
+      }
+      return ids;
+    };
+
+    const sortByReadingOrder = (list: typeof nodes) =>
+      [...list].sort((a, b) => a.position.x - b.position.x || a.position.y - b.position.y);
+
+    const boardSourceNodes = sortByReadingOrder(
+      nodes.filter((n) => n.data.type !== "audio"),
+    );
+
     if (!rfId) {
-      const visualNodes = nodes.filter(
-        (n) =>
-          n.data.type !== "audio" &&
-          n.data.type !== "note" &&
-          Boolean(n.data.aiBrief || n.data.prompt),
-      );
+      const visualContext = boardSourceNodes
+        .map(formatNodeSummary)
+        .filter((s): s is string => Boolean(s))
+        .slice(0, 10);
       return {
         audioNode: null,
         promptTexts: [] as string[],
-        visualContext: visualNodes
-          .slice(0, 6)
-          .map((n) => (n.data.aiBrief || n.data.prompt || "").trim())
-          .filter(Boolean),
+        visualContext,
+        visualMediaIds: extractImageMediaIds(boardSourceNodes),
       };
     }
-    const incoming = edges
-      .filter((e) => e.target === rfId)
-      .map((e) => nodes.find((n) => n.id === e.source))
-      .filter((n): n is NonNullable<typeof n> => Boolean(n));
+
+    const incoming = sortByReadingOrder(
+      edges
+        .filter((e) => e.target === rfId)
+        .map((e) => nodes.find((n) => n.id === e.source))
+        .filter((n): n is NonNullable<typeof n> => Boolean(n)),
+    );
 
     const audioNode =
       incoming.find((n) => n.data.type === "audio" && Boolean(n.data.musicClipId)) ?? null;
     const promptTexts = incoming
       .filter((n) => n.data.type === "prompt" && typeof n.data.prompt === "string" && n.data.prompt.trim())
       .map((n) => n.data.prompt!.trim());
-    const visualContext = incoming
-      .filter((n) => n.data.type !== "audio")
-      .map((n) => (n.data.aiBrief || n.data.prompt || "").trim())
-      .filter(Boolean);
-    return { audioNode, promptTexts, visualContext };
+    const incomingNonAudio = incoming.filter((n) => n.data.type !== "audio");
+    const effectiveNodes = incomingNonAudio.length > 0 ? incomingNonAudio : boardSourceNodes;
+    const visualContext = effectiveNodes
+      .map(formatNodeSummary)
+      .filter((s): s is string => Boolean(s))
+      .slice(0, 10);
+    const visualMediaIds = extractImageMediaIds(effectiveNodes);
+    return { audioNode, promptTexts, visualContext, visualMediaIds };
   }, [rfId, nodes, edges]);
 
   const sourceClipId =
@@ -172,6 +228,7 @@ export function MusicComposerPanel({
   const [lyricsBusy, setLyricsBusy] = useState(false);
   const [composeBusy, setComposeBusy] = useState(false);
   const [preAiPrompt, setPreAiPrompt] = useState<string | null>(null);
+  const [preAiLyrics, setPreAiLyrics] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -313,20 +370,33 @@ export function MusicComposerPanel({
 
   async function handleGenerateLyrics() {
     if (lyricsBusy) return;
-    const seedPrompt = prompt.trim() || title.trim();
+    const seedPrompt =
+      prompt.trim() ||
+      title.trim() ||
+      upstreamInfo.visualContext.slice(0, 3).join("；");
     if (!seedPrompt) {
-      setError("请先在上方输入曲风或主题描述，再使用 AI 作词。");
+      setError("请先在上方输入曲风或主题描述（或连接画布分镜），再使用 AI 作词。");
       return;
     }
     setLyricsBusy(true);
     setError(null);
     setNotice(null);
     try {
-      const res = await generateMusicLyrics(seedPrompt);
+      setPreAiLyrics(lyrics);
+      const res = await generateMusicLyrics(seedPrompt, {
+        existingLyrics: lyrics.trim() || undefined,
+        contextTexts: upstreamInfo.visualContext,
+        targetDurationSec: durationSec,
+        titleHint: title.trim() || undefined,
+      });
       setInstrumental(false);
       if (res.lyrics) setLyrics(res.lyrics);
       if (res.title && !title.trim()) setTitle(res.title);
-      setNotice("✓ AI 作词完成（0 积分），请审阅或编辑歌词后再点击生成。");
+      setNotice(
+        res.source === "llm"
+          ? "✓ AI 已根据画面与曲风创作中文歌词（0 积分），请审阅或微调后再点击生成。"
+          : "✓ AI 作词完成（0 积分），请审阅或编辑歌词后再点击生成。",
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "AI 作词失败");
     } finally {
@@ -336,16 +406,10 @@ export function MusicComposerPanel({
 
   async function handleComposeFromContext() {
     if (composeBusy) return;
-    const contextTexts =
-      upstreamInfo.visualContext.length > 0
-        ? upstreamInfo.visualContext
-        : nodes
-            .filter((n) => n.data.type !== "audio" && (n.data.aiBrief || n.data.prompt))
-            .slice(0, 6)
-            .map((n) => (n.data.aiBrief || n.data.prompt || "").trim())
-            .filter(Boolean);
+    const contextTexts = upstreamInfo.visualContext;
+    const mediaIds = upstreamInfo.visualMediaIds;
 
-    if (contextTexts.length === 0 && !prompt.trim()) {
+    if (contextTexts.length === 0 && mediaIds.length === 0 && !prompt.trim()) {
       setError("当前没有可供参考的上游分镜或画布画面，请先输入配乐风格描述。");
       return;
     }
@@ -356,17 +420,21 @@ export function MusicComposerPanel({
       setPreAiPrompt(prompt);
       const res = await composeMusicPrompt({
         contextTexts,
+        mediaIds,
         userHint: prompt.trim(),
+        lyrics: !instrumental && lyrics.trim() ? lyrics.trim() : undefined,
         instrumental,
-        targetDurationSec: durationSec,
+        targetDurationSec: estimatedTimelineSec ?? durationSec,
       });
       setPrompt(res.sound_prompt);
       if (res.suggested_bpm > 0) setBpmInput(String(res.suggested_bpm));
       if (res.suggested_title && !title.trim()) setTitle(res.suggested_title);
       setNotice(
         res.used_llm
-          ? "✓ 已根据画面氛围构思专业配乐提示词，请确认或微调后再手动点击生成（不会自动扣分）。"
-          : "✓ 已按画布内容整理出配乐草稿，请审阅后手动点击生成。",
+          ? res.used_vision
+            ? "✓ 已结合画布画面图像与分镜内容构思中文配乐词，请确认或微调后再手动点击生成（不会自动扣分）。"
+            : "✓ 已结合画布分镜内容构思专业中文配乐词，请确认或微调后再手动点击生成（不会自动扣分）。"
+          : "✓ 已按画布关键词整理出中文配乐草稿（在「设置 → AI 模型」中配置对话模型可启用更精准的看图编曲）。",
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "构思配乐提示词失败");
@@ -823,14 +891,29 @@ export function MusicComposerPanel({
                 <div className="gen-dialog__field">
                   <div className="jm-music-field-head">
                     <span className="gen-dialog__label">歌词正文（支持 [Verse] / [Chorus] 结构标签）</span>
-                    <button
-                      type="button"
-                      className="jm-seq-ctrl-btn"
-                      disabled={lyricsBusy}
-                      onClick={() => void handleGenerateLyrics()}
-                    >
-                      {lyricsBusy ? "作词中…" : "✨ AI 作词 (0积分)"}
-                    </button>
+                    <div className="jm-music-field-actions">
+                      {preAiLyrics !== null && (
+                        <button
+                          type="button"
+                          className="jm-seq-ctrl-btn"
+                          onClick={() => {
+                            setLyrics(preAiLyrics);
+                            setPreAiLyrics(null);
+                            setNotice(null);
+                          }}
+                        >
+                          ↩ 还原原歌词
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="jm-seq-ctrl-btn"
+                        disabled={lyricsBusy}
+                        onClick={() => void handleGenerateLyrics()}
+                      >
+                        {lyricsBusy ? "作词中…" : "✨ AI 作词 (0积分)"}
+                      </button>
+                    </div>
                   </div>
                   <textarea
                     className="gen-dialog__textarea"
