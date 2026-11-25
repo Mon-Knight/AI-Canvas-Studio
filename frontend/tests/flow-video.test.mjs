@@ -44,7 +44,8 @@ test("selecting a draft is free; submission is bound to the visible account and 
     settings.setState({ mediaProvider: "muse", videoModel: "veo" });
     gen.getState().openGenerationDialog("7", "慢速推镜");
     assert.equal(board.getState().nodes[0].selected, true);
-    assert.equal(gen.getState().openDialog.rfId, null);
+    assert.equal(gen.getState().openDialog.rfId, "7");
+    assert.equal(gen.getState().openDialog.prompt, "慢速推镜");
     assert.equal(gen.getState().videoDraft.prompt, "慢速推镜");
     const opts = { kind: "video", prompt: "慢速推镜", sourceMediaId: "frame", flowAccountId: a.id, flowProjectId: a.project_id };
     select(null);

@@ -11,6 +11,7 @@ which one in Settings → AI Providers; default is Claude.
 """
 from __future__ import annotations
 
+from contextvars import ContextVar
 import json
 import logging
 from typing import Optional
@@ -23,8 +24,28 @@ from flowboard.node_mirror import apply_node_patch
 from flowboard.services.activity import record_activity
 from flowboard.services.llm import run_llm
 from flowboard.services.llm.base import LLMError
+from flowboard.services.prompt_safety import (
+    SAFETY_SYSTEM_POLICY_CLAUSE,
+    SafetySanitizeResult,
+    sanitize_prompt_for_flow_safety,
+)
 
 logger = logging.getLogger(__name__)
+
+_SAFETY_AUDIT_CTX: ContextVar[tuple[bool, list[str]]] = ContextVar(
+    "_prompt_synth_safety_audit",
+    default=(False, []),
+)
+
+
+def reset_safety_audit_ctx() -> None:
+    """Clear per-request safety audit metadata before running prompt synthesis."""
+    _SAFETY_AUDIT_CTX.set((False, []))
+
+
+def get_safety_audit_ctx() -> tuple[bool, list[str]]:
+    """Return ``(rewritten, notes)`` recorded by the most recent synthesis call in this task."""
+    return _SAFETY_AUDIT_CTX.get()
 
 
 _SYNTH_SYSTEM_IMAGE = (
@@ -255,7 +276,7 @@ def _video_system_prompt(
             f"If using time-coded beats, ensure timestamps span 0-{duration_s}s cleanly "
             f"(never exceed {duration_s}s)."
         )
-    return base
+    return base + SAFETY_SYSTEM_POLICY_CLAUSE
 
 
 class PromptSynthError(RuntimeError):
@@ -503,7 +524,7 @@ def _image_system_prompt(subject_count: int, *, narrative_mode: bool = False) ->
         out = out + _MULTI_SUBJECT_CLAUSE
     if narrative_mode:
         out = out + _NARRATIVE_DRAMA_CLAUSE
-    return out
+    return out + SAFETY_SYSTEM_POLICY_CLAUSE
 
 
 def _format_user_message(
@@ -716,34 +737,48 @@ def build_local_chinese_fallback_prompt(
     out = "，".join(chunks).strip("， ")
     if not out.endswith(("。", "！", "？")):
         out += "。"
-    return out[:480]
+    sanitized = sanitize_prompt_for_flow_safety(out)
+    return sanitized.text[:480]
 
 
-async def auto_prompt_batch(
+def _merge_safety_audit(
+    output_text: str,
+    seed_prompt: Optional[str],
+) -> SafetySanitizeResult:
+    """Sanitize output text and also note when the LLM proactively rewrote risky seed terms."""
+    out_res = sanitize_prompt_for_flow_safety(output_text)
+    if out_res.rewritten:
+        return out_res
+    if isinstance(seed_prompt, str) and seed_prompt.strip():
+        seed_res = sanitize_prompt_for_flow_safety(seed_prompt)
+        if seed_res.rewritten:
+            return SafetySanitizeResult(
+                text=out_res.text,
+                rewritten=True,
+                notes=seed_res.notes,
+            )
+    return out_res
+
+
+async def auto_prompt_batch_detailed(
     node_id: int,
     count: int,
     *,
     camera: Optional[str] = None,
     seed_prompt: Optional[str] = None,
     allow_fallback: bool = False,
-) -> list[str]:
-    """Compose N pose-distinct prompts in a single Claude call.
-
-    Used when the user wants multiple variants of an image — a single
-    prompt × N seeds produces near-identical poses. Each item in the
-    returned list picks a different stance from the pool so the variants
-    actually look like different shots.
-    """
+) -> tuple[list[str], bool, list[str]]:
+    """Compose N pose-distinct prompts with automatic Flow safety audit."""
     if count < 1:
         raise PromptSynthError("count must be >= 1")
     if count == 1:
-        single = await auto_prompt(
+        single, safety = await auto_prompt_detailed(
             node_id,
             camera=camera,
             seed_prompt=seed_prompt,
             allow_fallback=allow_fallback,
         )
-        return [single]
+        return [single], safety.rewritten, safety.notes
 
     records, target = _collect_upstream(node_id)
     if target is None:
@@ -777,6 +812,7 @@ async def auto_prompt_batch(
                 "迈步向前走近、神态自信从容",
                 "轻靠倚立姿态、眼神专注看向镜头",
             )
+            seed_audit = sanitize_prompt_for_flow_safety(seed_prompt or "")
             prompts = [
                 build_local_chinese_fallback_prompt(
                     records,
@@ -787,9 +823,15 @@ async def auto_prompt_batch(
                 )
                 for i in range(count)
             ]
-            activity.set_result({"prompts": prompts, "fallback": True})
+            activity.set_result({
+                "prompts": prompts,
+                "fallback": True,
+                "safety_rewritten": seed_audit.rewritten,
+                "safety_notes": seed_audit.notes,
+            })
+            _SAFETY_AUDIT_CTX.set((seed_audit.rewritten, list(seed_audit.notes)))
             apply_node_patch(node_id, data_patch={"prompt": prompts[0]})
-            return prompts
+            return prompts, seed_audit.rewritten, seed_audit.notes
 
         text = (text or "").strip()
         # Strip markdown fences if the provider added them despite instructions.
@@ -808,38 +850,71 @@ async def auto_prompt_batch(
             ) from exc
         if not isinstance(arr, list):
             raise PromptSynthError("auto-prompt batch response is not a JSON array")
-        prompts = [str(p).strip() for p in arr if isinstance(p, str) and p.strip()]
-        if not prompts:
+        raw_prompts = [str(p).strip() for p in arr if isinstance(p, str) and p.strip()]
+        if not raw_prompts:
             raise PromptSynthError("auto-prompt batch returned no valid prompts")
+
+        prompts: list[str] = []
+        notes: list[str] = []
+        rewritten = False
+        for item in raw_prompts:
+            audited = _merge_safety_audit(item, seed_prompt)
+            prompts.append(audited.text)
+            if audited.rewritten:
+                rewritten = True
+                for n in audited.notes:
+                    if n not in notes:
+                        notes.append(n)
+
         # Pad / trim to requested count. If the provider returned fewer, repeat
         # the last one — better to have N items than fail the dispatch.
         while len(prompts) < count:
             prompts.append(prompts[-1])
         prompts = prompts[:count]
-        activity.set_result({"prompts": prompts})
+        activity.set_result({
+            "prompts": prompts,
+            "safety_rewritten": rewritten,
+            "safety_notes": notes,
+        })
+        _SAFETY_AUDIT_CTX.set((rewritten, list(notes)))
         apply_node_patch(node_id, data_patch={"prompt": prompts[0]})
-        return prompts
+        return prompts, rewritten, notes
 
 
-async def auto_prompt(
+async def auto_prompt_batch(
+    node_id: int,
+    count: int,
+    *,
+    camera: Optional[str] = None,
+    seed_prompt: Optional[str] = None,
+    allow_fallback: bool = False,
+) -> list[str]:
+    """Compose N pose-distinct prompts in a single Claude call.
+
+    Used when the user wants multiple variants of an image — a single
+    prompt × N seeds produces near-identical poses. Each item in the
+    returned list picks a different stance from the pool so the variants
+    actually look like different shots.
+    """
+    prompts, _, _ = await auto_prompt_batch_detailed(
+        node_id,
+        count,
+        camera=camera,
+        seed_prompt=seed_prompt,
+        allow_fallback=allow_fallback,
+    )
+    return prompts
+
+
+async def auto_prompt_detailed(
     node_id: int,
     *,
     camera: Optional[str] = None,
     seed_prompt: Optional[str] = None,
     allow_fallback: bool = False,
     duration_s: Optional[int] = None,
-) -> str:
-    """Compose a generation prompt by walking upstream + asking the
-    configured Auto-Prompt provider.
-
-    Branch by target type:
-    - ``image`` (or anything else default) → photorealistic composition prompt
-      that combines all upstream briefs.
-    - ``video`` → motion/camera prompt for the single source image brief
-      (i2v has exactly one upstream image — multi-ref isn't a thing). The
-      ``camera`` arg (e.g. ``"static"``) selects a system-prompt variant so
-      the synthesiser respects the user's framing constraint.
-    """
+) -> tuple[str, SafetySanitizeResult]:
+    """Compose a generation prompt and return ``(prompt, safety_audit)``."""
     records, target = _collect_upstream(node_id)
     if target is None:
         raise PromptSynthError(f"node {node_id} not found")
@@ -874,22 +949,46 @@ async def auto_prompt(
         except LLMError as exc:
             if not allow_fallback:
                 raise PromptSynthError(f"auto-prompt provider failed: {exc}") from exc
+            seed_audit = sanitize_prompt_for_flow_safety(seed_prompt or "")
             text = build_local_chinese_fallback_prompt(
                 records,
                 target,
                 camera=camera,
                 seed_prompt=seed_prompt,
             )
-            activity.set_result({"prompt": text, "fallback": True})
+            safety = SafetySanitizeResult(
+                text=text,
+                rewritten=seed_audit.rewritten,
+                notes=seed_audit.notes,
+            )
+            activity.set_result({
+                "prompt": text,
+                "fallback": True,
+                "safety_rewritten": safety.rewritten,
+                "safety_notes": safety.notes,
+            })
+            _SAFETY_AUDIT_CTX.set((safety.rewritten, list(safety.notes)))
             apply_node_patch(node_id, data_patch={"prompt": text})
-            return text
+            return text, safety
 
         text = (text or "").strip().strip('"').strip("'")
         if not text:
             raise PromptSynthError("empty response from auto-prompt provider")
+        safety = _merge_safety_audit(text, seed_prompt)
+        text = safety.text
         if len(text) > 500:
             text = text[:500].rstrip() + "…"
-        activity.set_result({"prompt": text})
+            safety = SafetySanitizeResult(
+                text=text,
+                rewritten=safety.rewritten,
+                notes=safety.notes,
+            )
+        activity.set_result({
+            "prompt": text,
+            "safety_rewritten": safety.rewritten,
+            "safety_notes": safety.notes,
+        })
+        _SAFETY_AUDIT_CTX.set((safety.rewritten, list(safety.notes)))
         # Write the composed prompt onto the node before the row settles.
         #
         # Nothing used to persist this at all: the dialog dropped the text
@@ -906,4 +1005,33 @@ async def auto_prompt(
         # runs when the node's prompt is empty, so there is nothing here
         # to overwrite.
         apply_node_patch(node_id, data_patch={"prompt": text})
-        return text
+        return text, safety
+
+
+async def auto_prompt(
+    node_id: int,
+    *,
+    camera: Optional[str] = None,
+    seed_prompt: Optional[str] = None,
+    allow_fallback: bool = False,
+    duration_s: Optional[int] = None,
+) -> str:
+    """Compose a generation prompt by walking upstream + asking the
+    configured Auto-Prompt provider.
+
+    Branch by target type:
+    - ``image`` (or anything else default) → photorealistic composition prompt
+      that combines all upstream briefs.
+    - ``video`` → motion/camera prompt for the single source image brief
+      (i2v has exactly one upstream image — multi-ref isn't a thing). The
+      ``camera`` arg (e.g. ``"static"``) selects a system-prompt variant so
+      the synthesiser respects the user's framing constraint.
+    """
+    text, _ = await auto_prompt_detailed(
+        node_id,
+        camera=camera,
+        seed_prompt=seed_prompt,
+        allow_fallback=allow_fallback,
+        duration_s=duration_s,
+    )
+    return text

@@ -101,6 +101,7 @@ export interface FlowboardNodeData extends Record<string, unknown> {
   seed?: number | null;
   videoQuality?: string;
   videoResolution?: string;
+  videoSubMode?: "auto" | "t2v" | "ingredients" | "first_frame" | "first_last";
   resolution?: string;
   omniVersion?: string;
   durationSeconds?: number | null;

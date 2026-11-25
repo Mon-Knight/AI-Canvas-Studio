@@ -53,6 +53,13 @@ async function resolveBoardProject() {
   return ensureBoardProject(boardId);
 }
 
+export type VideoSubMode =
+  | "auto"
+  | "t2v"
+  | "ingredients"
+  | "first_frame"
+  | "first_last";
+
 interface GenerationState {
   active: Record<string, PollEntry>;
   sidecar: Record<string, PollEntry>;
@@ -95,7 +102,7 @@ interface GenerationState {
       durationSeconds?: number;
       videoResolution?: VideoResolutionKey;
       videoRefFrame?: VideoRefFrameMode;
-      videoSubMode?: "auto" | "first_last" | "t2v";
+      videoSubMode?: VideoSubMode;
       endMediaId?: string;
     },
   ): Promise<void>;
@@ -141,7 +148,7 @@ async function submitFlowVideo(
     durationSeconds?: number;
     videoResolution?: VideoResolutionKey;
     videoRefFrame?: VideoRefFrameMode;
-    videoSubMode?: "auto" | "first_last" | "t2v";
+    videoSubMode?: VideoSubMode;
     endMediaId?: string;
   },
 ) {
@@ -174,8 +181,17 @@ async function submitFlowVideo(
     return reject("请在右上角绑定 Flow 项目，并打开该账号的 Flow 网页、连接扩展。");
   if (!opts.prompt.trim()) return reject("请输入视频提示词。");
   const settings = useSettingsStore.getState();
+  const subMode: VideoSubMode = opts.videoSubMode ?? "auto";
   const chosenModelFamily = opts.videoModel ?? settings.videoModel;
-  const omni = chosenModelFamily === "omni_flash";
+  // Ingredients mode routes through Flow's multi-reference Omni engine (MZZa6b)
+  // so attached images serve as subject/style references rather than locking frame 0.
+  // Explicit `first_frame` mode locks frame 0 via Veo 3.1 i2v (`eb1hJf`).
+  const omni =
+    subMode === "ingredients"
+      ? true
+      : subMode === "first_frame"
+        ? false
+        : chosenModelFamily === "omni_flash";
   const omniVersion: OmniFlashVersion =
     opts.omniVersion ?? settings.omniVersion ?? "1.2";
   const rawDuration = opts.durationSeconds ?? settings.omniFlashDuration ?? 4;
@@ -192,7 +208,6 @@ async function submitFlowVideo(
     Math.max(1, opts.variantCount ?? settings.defaultVideoCount ?? 1),
   );
   const rawEntries = collectUpstreamRefEntries(rfId, board.nodes, board.edges);
-  const subMode = opts.videoSubMode ?? "auto";
   const rawReferences =
     subMode === "t2v"
       ? []
@@ -331,6 +346,7 @@ async function submitFlowVideo(
       status: "queued",
       prompt: normalizedPrompt,
       error: undefined,
+      videoSubMode: subMode,
       videoResolution:
         reqType === "gen_video_text" && rawVideoRes === "360p"
           ? "720p"
@@ -391,7 +407,7 @@ export const useGenerationStore = create<GenerationState>((set, get) => {
           ),
         );
         set({
-          openDialog: { rfId: null, prompt: "" },
+          openDialog: { rfId, prompt },
           videoDraft: { rfId, prompt, revision: ++draftRevision },
         });
         return;

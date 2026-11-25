@@ -17,12 +17,12 @@
   </p>
 
   <p>
-    <a href="https://github.com/Mon-Knight/AI-Canvas-Studio/releases/download/v1.1.4/AI-Canvas-Studio-v1.1.4-win64-setup.exe">
-      <strong>📥 下载 Windows 安装版 Setup.exe (v1.1.4)</strong>
+    <a href="https://github.com/Mon-Knight/AI-Canvas-Studio/releases/download/v1.1.5/AI-Canvas-Studio-v1.1.5-win64-setup.exe">
+      <strong>📥 下载 Windows 安装版 Setup.exe (v1.1.5)</strong>
     </a>
     &nbsp;&nbsp;|&nbsp;&nbsp;
-    <a href="https://github.com/Mon-Knight/AI-Canvas-Studio/releases/download/v1.1.4/AI-Canvas-Studio-v1.1.4-win64-portable.zip">
-      <strong>📦 下载免安装绿色便携版 Portable.zip (v1.1.4)</strong>
+    <a href="https://github.com/Mon-Knight/AI-Canvas-Studio/releases/download/v1.1.5/AI-Canvas-Studio-v1.1.5-win64-portable.zip">
+      <strong>📦 下载免安装绿色便携版 Portable.zip (v1.1.5)</strong>
     </a>
     &nbsp;&nbsp;|&nbsp;&nbsp;
     <a href="docs/USER_MANUAL.md">

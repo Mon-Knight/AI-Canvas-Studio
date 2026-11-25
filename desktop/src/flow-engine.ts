@@ -1249,37 +1249,60 @@ export class FlowEngineManager {
           if (match) {
             const beforeWindow = 1024;
             const afterWindow = 4096;
-            let entryHit = -1;
-            let commaHit = -1;
-            let firstHit = -1;
-            let searchFrom = 0;
-            while (searchFrom < text.length) {
-              const idx = text.indexOf(match, searchFrom);
-              if (idx === -1) break;
-              if (firstHit === -1) firstHit = idx;
-              const after = text.slice(idx + match.length, idx + match.length + 24);
-              if (
-                entryHit === -1 &&
-                (after.startsWith('",null,null,[') || after.startsWith('\\\\",null,null,['))
-              ) {
-                entryHit = idx;
-                break;
+            const collect = (needle) => {
+              let listingHit = -1;
+              let recordHit = -1;
+              let otherHit = -1;
+              let searchFrom = 0;
+              while (searchFrom < text.length) {
+                const idx = text.indexOf(needle, searchFrom);
+                if (idx === -1) break;
+                if (otherHit === -1) otherHit = idx;
+                const before = text.slice(Math.max(0, idx - 6), idx);
+                const after = text.slice(idx + needle.length, idx + needle.length + 24);
+                const isListingHead =
+                  (before.endsWith('["') || before.endsWith('[\\\\"')) &&
+                  (after.startsWith('",') || after.startsWith('\\\\",'));
+                const isRecordSlot2 =
+                  (before.endsWith(',"') || before.endsWith(',\\\\"')) &&
+                  (after.startsWith('",null,null,[') ||
+                    after.startsWith('\\\\",null,null,[') ||
+                    after.startsWith('","CAE",null,[') ||
+                    after.startsWith('\\\\",\\\\"CAE\\\\",null,['));
+                if (listingHit === -1 && isListingHead) {
+                  listingHit = idx;
+                } else if (recordHit === -1 && isRecordSlot2) {
+                  recordHit = idx;
+                }
+                if (listingHit !== -1 && recordHit !== -1) break;
+                searchFrom = idx + needle.length;
               }
-              if (
-                commaHit === -1 &&
-                (after.startsWith('",') || after.startsWith('\\\\",'))
-              ) {
-                commaHit = idx;
-              }
-              searchFrom = idx + match.length;
+              return { listingHit, recordHit, otherHit };
+            };
+            let hits = collect(match);
+            if (hits.listingHit === -1 && hits.recordHit === -1 && hits.otherHit === -1) {
+              const lower = match.toLowerCase();
+              if (lower !== match) hits = collect(lower);
             }
-            const found = entryHit !== -1 ? entryHit : (commaHit !== -1 ? commaHit : firstHit);
+            const picks = [];
+            if (hits.listingHit !== -1) picks.push(hits.listingHit);
+            if (hits.recordHit !== -1) picks.push(hits.recordHit);
+            if (picks.length === 0 && hits.otherHit !== -1) picks.push(hits.otherHit);
+            picks.sort((a, b) => a - b);
+            const ranges = [];
+            for (const pos of picks) {
+              const s = Math.max(0, pos - beforeWindow);
+              const e = Math.min(text.length, pos + afterWindow);
+              if (ranges.length > 0 && s <= ranges[ranges.length - 1][1]) {
+                ranges[ranges.length - 1][1] = Math.max(ranges[ranges.length - 1][1], e);
+              } else {
+                ranges.push([s, e]);
+              }
+            }
             return {
               status: resp.status,
-              matched: found !== -1,
-              text: found === -1
-                ? ''
-                : text.slice(Math.max(0, found - beforeWindow), found + afterWindow),
+              matched: ranges.length > 0,
+              text: ranges.map(([s, e]) => text.slice(s, e)).join('\\n'),
             };
           }
           return { status: resp.status, text: text.slice(0, maxText) };

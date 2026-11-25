@@ -82,6 +82,8 @@ export function SettingsPanel({
   const setDefaultVideoAspect = useSettingsStore((s) => s.setDefaultVideoAspect);
   const defaultVideoCount = useSettingsStore((s) => s.defaultVideoCount);
   const setDefaultVideoCount = useSettingsStore((s) => s.setDefaultVideoCount);
+  const confirmBeforeVideoGen = useSettingsStore((s) => s.confirmBeforeVideoGen);
+  const setConfirmBeforeVideoGen = useSettingsStore((s) => s.setConfirmBeforeVideoGen);
 
   const selectedVideoId = resolveVideoSelectionId(videoModel, omniVersion, videoQuality);
   const activeDefaultVideoDuration = videoModel === "omni_flash" ? omniFlashDuration : 8;
@@ -416,6 +418,31 @@ export function SettingsPanel({
               </>
             )}
           </section>}
+
+          <section className="settings-panel__section" aria-labelledby="generation-settings-confirm">
+            <div className="settings-panel__tier-head">
+              <h3 className="settings-panel__label" id="generation-settings-confirm">生成前先确认（视频消耗积分保护）</h3>
+              <div className="settings-panel__segmented" role="group" aria-label="视频生成前确认策略">
+                <button
+                  type="button"
+                  className={`settings-panel__seg-btn${confirmBeforeVideoGen === "always" ? " settings-panel__seg-btn--active" : ""}`}
+                  onClick={() => setConfirmBeforeVideoGen("always")}
+                >
+                  始终
+                </button>
+                <button
+                  type="button"
+                  className={`settings-panel__seg-btn${confirmBeforeVideoGen === "never" ? " settings-panel__seg-btn--active" : ""}`}
+                  onClick={() => setConfirmBeforeVideoGen("never")}
+                >
+                  永不
+                </button>
+              </div>
+            </div>
+            <div className="settings-panel__hint">
+              参考 Google Flow 官方策略：设为「始终」时，每次提交消耗积分的视频任务前会展示模式、模型、清晰度、预估积分与最终提示词供确认，避免误触扣点；设为「永不」则点击后直接提交。
+            </div>
+          </section>
 
           <div className="settings-panel__models">
             <section className="settings-panel__section" aria-labelledby="generation-settings-video">

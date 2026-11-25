@@ -122,23 +122,26 @@ VIDEO_ASPECT_BY_NAME = {
     "VIDEO_ASPECT_RATIO_LANDSCAPE": VIDEO_ASPECT_LANDSCAPE,
 }
 
-#: `CAE` is the operation's terminal state. Anything else means still working.
+#: `CAE` was the operation's legacy terminal marker (replaced by `null` on
+#: 2026-10-06; live completion is signalled by `details[8][0] == OUTCOME_OK`).
 STATUS_DONE = "CAE"
 
-#: Outcome codes seen in the operation's status block. Code 4 carries a
-#: message like "Media not found." — but it is NOT a verdict: jobs that report
-#: it still finish, and the finished media shows up in the project listing
-#: seconds later. Treat it as something to quote on a timeout, never as a
-#: reason to stop waiting.
+#: Outcome codes seen in the operation's status block (`record[5][8][0]`):
+#: 6 = submitted, 2 = running, 3 = done, 4 = failed/complaint.
+#: Code 4 can carry a survivable `"Media not found."` complaint — jobs that
+#: report it can still finish in the listing, while `PUBLIC_ERROR_*` or
+#: explicit failure text indicates a real rejection.
+OUTCOME_RUNNING = 2
 OUTCOME_OK = 3
 OUTCOME_COMPLAINT = 4
+OUTCOME_SUBMITTED = 6
 
 #: Surface id the web client stamps on every call. Constant in every capture.
 SURFACE_ID = 22
 
-#: Crop box on the reference image, verbatim from the UI when nothing was
-#: reframed by hand: a hair inside the edges, spanning 128/129 of the frame.
-FULL_FRAME_CROP = [None, 0.0038759689922481244, 1, 0.9961240310077519]
+#: Crop box on the reference image, verbatim from the current Flow UI when
+#: nothing was reframed by hand (live-captured 2026-09-23 / Nov 2026).
+FULL_FRAME_CROP = [None, None, 1, 1]
 
 #: Image inputs put the media id first and the input type four slots later.
 #: Type 1 is a reference; type 2 is the image being edited (BASE_IMAGE).
@@ -183,10 +186,12 @@ class Operation:
     project_id: Optional[str]
     status: Optional[str]
     error: Optional[str] = None
+    outcome: Optional[int] = None
+    media_id: Optional[str] = None
 
     @property
     def done(self) -> bool:
-        return self.status == STATUS_DONE
+        return self.status == STATUS_DONE or self.outcome == OUTCOME_OK
 
     @property
     def complained(self) -> bool:
@@ -603,10 +608,68 @@ def read_uploaded_media_id(payload: Any) -> str:
     return media_id
 
 
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+_ENTRY_HEAD_RE = re.compile(
+    r'\[\\?"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\\?",\s*(?:null|\\?"[^"\\]*\\?"),\s*null,\s*\[',
+    re.IGNORECASE,
+)
+
+_GEN_RECORD_PREFIX_RE = re.compile(
+    r'\[\\?"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\\?",\s*'
+    r'\\?"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\\?",\s*\\?"$',
+    re.IGNORECASE,
+)
+
+_GEN_RECORD_SUFFIX_RE = re.compile(
+    r'^\\?",\s*(?:null|\\?"CAE\\?"),\s*null,\s*\[',
+    re.IGNORECASE,
+)
+
+
+def _is_uuid(value: Any) -> bool:
+    return isinstance(value, str) and bool(_UUID_RE.fullmatch(value))
+
+
+def _is_generation_record(node: Any) -> bool:
+    """True for Flow's `[wfId, projectId, listingId, status|null, null, [details...], ...]` record.
+
+    Slot 3 became `null` (formerly `"CAE"`) on 2026-10-06, so records are
+    identified by three UUIDs in slots 0..2 plus the details list at slot 5.
+    """
+    return (
+        isinstance(node, list)
+        and len(node) >= 6
+        and _is_uuid(node[0])
+        and _is_uuid(node[1])
+        and _is_uuid(node[2])
+        and isinstance(node[5], list)
+    )
+
+
+def _find_generation_record(node: Any) -> Optional[list]:
+    for item in _walk_lists(node):
+        if _is_generation_record(item):
+            return item
+    return None
+
+
 def read_text_video_submit(payload: Any) -> dict:
-    """Read YhhmEf's submitted media/workflow record."""
+    """Read YhhmEf's submitted media/workflow record.
+
+    Handles both single-nested (`payload[3] = [[media, proj, wf, status]]`) and
+    double-nested (`payload[3] = [[[media, proj, wf, status, ...]]]`) envelopes.
+    """
     records = payload[3] if isinstance(payload, list) and len(payload) > 3 else None
-    record = records[0] if isinstance(records, list) and records else None
+    record = _find_generation_record(records)
+    if record is None:
+        candidate = records[0] if isinstance(records, list) and records else None
+        if isinstance(candidate, list) and candidate and isinstance(candidate[0], list):
+            candidate = candidate[0]
+        record = candidate
     if not isinstance(record, list) or not record:
         raise FlowBatchError("text-video submit carried no generation record")
     media_id = record[0] if len(record) > 0 else None
@@ -622,6 +685,7 @@ def read_text_video_submit(payload: Any) -> dict:
         "status": status if isinstance(status, str) else None,
     }
 
+
 def read_upscaled_image(payload: Any) -> str:
     """Return the base64 image body from FlowService.UpsampleImage."""
     encoded = payload[1] if isinstance(payload, list) and len(payload) > 1 else None
@@ -630,21 +694,82 @@ def read_upscaled_image(payload: Any) -> str:
     return encoded
 
 
-def read_operation(payload: Any) -> Operation:
-    """`[null, 50, [[opId, projectId, sceneId, status, …]]]`.
+def read_operation_outcome(record: list) -> Optional[int]:
+    """Read the integer outcome code at ``record[5][8][0]`` (6=sub, 2=run, 3=ok, 4=err)."""
+    detail = record[5] if len(record) > 5 else None
+    if not isinstance(detail, list) or len(detail) <= 8:
+        return None
+    block = detail[8]
+    if isinstance(block, list) and block and isinstance(block[0], int) and not isinstance(block[0], bool):
+        return block[0]
+    return None
 
-    Note the third uuid is the **scene**, not the media. Reading it as a media
-    id is what made every `as29s` lookup answer NOT_FOUND.
+
+def read_operation(payload: Any) -> Operation:
+    """Decode a video submit or ``jwpduf`` status-poll payload.
+
+    Live ``flow.google.com`` submit replies (`eb1hJf`, `MZZa6b`, `nprQif`,
+    `YhhmEf`) carry a listing stub at ``payload[2]`` keyed by the listing/tile
+    UUID and the real generation record at ``payload[3]`` keyed by the
+    workflow/media UUID that both ``jwpduf`` and ``as29s`` expect. Reading the
+    listing UUID from ``payload[2][0][0]`` instead causes ``jwpduf`` to answer
+    ``"Media not found."`` and ``as29s`` to answer ``[5]`` NOT_FOUND forever.
     """
+    if isinstance(payload, list) and len(payload) > 3:
+        gen_rec = _find_generation_record(payload[3])
+        if gen_rec is not None:
+            return Operation(
+                operation_id=gen_rec[0],
+                project_id=gen_rec[1],
+                status=gen_rec[3] if isinstance(gen_rec[3], str) else None,
+                error=read_operation_error(gen_rec),
+                outcome=read_operation_outcome(gen_rec),
+                media_id=gen_rec[0],
+            )
+
     records = payload[2] if isinstance(payload, list) and len(payload) > 2 else None
     record = records[0] if isinstance(records, list) and records else None
+    if isinstance(record, list) and record and isinstance(record[0], list):
+        record = record[0]
     if not isinstance(record, list) or not record:
         raise FlowBatchError("operation payload carried no record")
+
+    # Listing stub without a sibling payload[3] generation record:
+    # `[listingId, null, null, [title, ts, null, null, wfId, clientUuid, ts], projectId]`
+    if (
+        len(record) >= 4
+        and record[1] is None
+        and record[2] is None
+        and isinstance(record[3], list)
+    ):
+        proj = record[4] if len(record) > 4 and isinstance(record[4], str) else None
+        wf_id = record[3][4] if len(record[3]) > 4 and _is_uuid(record[3][4]) else None
+        if wf_id:
+            return Operation(
+                operation_id=wf_id,
+                project_id=proj,
+                status=None,
+                error=None,
+                outcome=None,
+                media_id=wf_id,
+            )
+        return Operation(
+            operation_id=record[0],
+            project_id=proj,
+            status=None,
+            error=None,
+            outcome=None,
+        )
+
+    outcome = read_operation_outcome(record)
+    status_val = record[3] if len(record) > 3 and isinstance(record[3], str) else None
     return Operation(
         operation_id=record[0],
-        project_id=record[1] if len(record) > 1 else None,
-        status=record[3] if len(record) > 3 else None,
+        project_id=record[1] if len(record) > 1 and isinstance(record[1], str) else None,
+        status=status_val,
         error=read_operation_error(record),
+        outcome=outcome,
+        media_id=record[0] if _is_generation_record(record) else None,
     )
 
 
@@ -652,10 +777,11 @@ def read_operation_error(record: list) -> Optional[str]:
     """The complaint attached to this operation, if it carries one.
 
     It hides in the detail block's status slot as
-    ``[4, [null, "Media not found."], ["Media not found."]]``. Measured
-    behaviour: an operation can report ``"Media not found."`` and still deliver
-    a finished 8-second clip, while ``PUBLIC_ERROR_*`` codes indicate explicit
-    policy/safety rejections.
+    ``[4, [null, "Media not found."], ["Media not found."]]`` or
+    ``[4, [13, "Generation job finished with state: FAILED"], [...]]``.
+    Measured behaviour: an operation can report ``"Media not found."`` and still
+    deliver a finished clip, while ``PUBLIC_ERROR_*`` codes and explicit job
+    failure messages indicate terminal failures.
     """
     detail = record[5] if len(record) > 5 else None
     if not isinstance(detail, list) or len(detail) <= 8:
@@ -680,28 +806,27 @@ def read_operation_error(record: list) -> Optional[str]:
     return "operation failed without a message"
 
 
-_UUID_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-    re.IGNORECASE,
-)
-
-_ENTRY_HEAD_RE = re.compile(
-    r'\[\\?"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\\?",\s*null,\s*null,\s*\[',
-    re.IGNORECASE,
-)
-
-
 def find_media_id(payload: Any, operation_id: str) -> Optional[str]:
-    """Look an operation up in the project listing and take its media id.
+    """Look an operation up in the project listing and take its media/workflow id.
 
-    Entries look like
-    ``[opId, null, null, [title, created, null, null, mediaId, clientUuid, done], projectId]``.
-    Also tolerates the reversed layout
-    ``[mediaId, null, null, [title, created, null, null, opId, clientUuid, done], projectId]``
-    observed on migrated text-video records when the forward lookup finds nothing.
+    Handles all observed ``Zzl0ze`` record shapes:
+    1. Forward listing stub:
+       ``[opId, folderOrNull, null, [title, ts, isVideoOrNull, null, mediaId, ...], projectId]``
+    2. Generation record (live Oct/Nov 2026 Flow):
+       ``[wfId, projectId, opId, null|"CAE", null, [details...], ...]``
+    3. ``detail[5]`` match:
+       ``[assetId, folderOrNull, null, [title, ts, ..., mediaId, opId, ...], projectId]``
+    4. Reversed listing stub:
+       ``[mediaId, null, null, [title, ts, null, null, opId, ...], projectId]``
     """
-    for node in _walk_lists(payload):
-        if len(node) < 4 or node[0] != operation_id:
+    if not operation_id:
+        return None
+    op_lower = operation_id.lower()
+    nodes = list(_walk_lists(payload))
+
+    # 1. Forward listing stub: node[0] == operation_id -> detail[4]
+    for node in nodes:
+        if len(node) < 4 or not isinstance(node[0], str) or node[0].lower() != op_lower:
             continue
         detail = node[3]
         if (
@@ -709,21 +834,48 @@ def find_media_id(payload: Any, operation_id: str) -> Optional[str]:
             and len(detail) > 4
             and isinstance(detail[4], str)
             and detail[4]
-            and detail[4] != operation_id
+            and detail[4].lower() != op_lower
         ):
             return detail[4]
-    for node in _walk_lists(payload):
+
+    # 2. Generation record: [wfId, projectId, opId, null|"CAE", null, [details...]] -> wfId
+    for node in nodes:
+        if _is_generation_record(node) and node[2].lower() == op_lower and node[0].lower() != op_lower:
+            return node[0]
+
+    # 3. detail[5] == operation_id -> detail[4]
+    for node in nodes:
+        if len(node) < 4 or not isinstance(node[3], list):
+            continue
+        detail = node[3]
+        if (
+            len(detail) > 5
+            and isinstance(detail[5], str)
+            and detail[5].lower() == op_lower
+            and isinstance(detail[4], str)
+            and detail[4]
+            and detail[4].lower() != op_lower
+            and _is_uuid(detail[4])
+        ):
+            return detail[4]
+
+    # 4. Reversed listing stub: [mediaId, null, null, [..., opId, ...]] -> mediaId
+    for node in nodes:
         if (
             len(node) < 4
-            or not isinstance(node[0], str)
-            or node[0] == operation_id
-            or not _UUID_RE.fullmatch(node[0])
+            or not _is_uuid(node[0])
+            or node[0].lower() == op_lower
             or node[1] is not None
             or node[2] is not None
         ):
             continue
         detail = node[3]
-        if isinstance(detail, list) and len(detail) > 4 and detail[4] == operation_id:
+        if (
+            isinstance(detail, list)
+            and len(detail) > 4
+            and isinstance(detail[4], str)
+            and detail[4].lower() == op_lower
+        ):
             return node[0]
     return None
 
@@ -788,8 +940,8 @@ def _unescape_wrb_fragment(fragment: str) -> str:
     return "".join(out)
 
 
-def _parse_entry_detail_slot4(after_id: str) -> Optional[str]:
-    """Decode ``, elem1, elem2, [d0, d1, d2, d3, d4, ...]`` and return ``d4``.
+def _parse_entry_detail_slots(after_id: str) -> tuple[Optional[str], Optional[str]]:
+    """Decode ``, elem1, elem2, [d0, d1, d2, d3, d4, d5, ...]`` and return ``(d4, d5)``.
 
     Strict slot parsing prevents two bugs that the old ``null,null,"UUID"``
     regex hit in production:
@@ -811,94 +963,115 @@ def _parse_entry_detail_slot4(after_id: str) -> Optional[str]:
     for _ in range(2):
         pos = _skip_ws(pos)
         if pos >= n or after_id[pos] != ",":
-            return None
+            return None, None
         pos = _skip_ws(pos + 1)
         if pos >= n:
-            return None
+            return None, None
         try:
             _, pos = decoder.raw_decode(after_id, pos)
         except json.JSONDecodeError:
-            return None
+            return None, None
 
     pos = _skip_ws(pos)
     if pos >= n or after_id[pos] != ",":
-        return None
+        return None, None
     pos = _skip_ws(pos + 1)
     if pos >= n or after_id[pos] != "[":
-        return None
+        return None, None
     pos += 1
 
-    for slot in range(5):
+    slot4: Optional[str] = None
+    slot5: Optional[str] = None
+    for slot in range(6):
         pos = _skip_ws(pos)
         if pos >= n or after_id[pos] == "]":
-            return None
+            break
         if slot > 0:
             if after_id[pos] != ",":
-                return None
+                break
             pos = _skip_ws(pos + 1)
             if pos >= n or after_id[pos] == "]":
-                return None
+                break
         try:
             value, pos = decoder.raw_decode(after_id, pos)
         except json.JSONDecodeError:
-            return None
+            break
         if slot == 4:
-            return value if isinstance(value, str) and value else None
-    return None
+            slot4 = value if isinstance(value, str) and value else None
+        elif slot == 5:
+            slot5 = value if isinstance(value, str) and value else None
+    return slot4, slot5
 
 
-def _extract_entry_slot4(text: str, id_end: int) -> Optional[str]:
-    """Read ``detail[4]`` starting right after the closing characters of ``node[0]``."""
+def _extract_entry_slots(text: str, id_end: int) -> tuple[Optional[str], Optional[str]]:
+    """Read ``(detail[4], detail[5])`` starting right after ``node[0]``."""
     after = text[id_end : id_end + 8192]
     if after.startswith('\\"'):
         body = _unescape_wrb_fragment(after[2:])
     elif after.startswith('"'):
         body = after[1:]
     else:
-        return None
-    return _parse_entry_detail_slot4(body)
+        return None, None
+    return _parse_entry_detail_slots(body)
+
+
+def _extract_entry_slot4(text: str, id_end: int) -> Optional[str]:
+    return _extract_entry_slots(text, id_end)[0]
 
 
 def find_media_id_in_text(text: str, operation_id: str) -> Optional[str]:
     """Same lookup as :func:`find_media_id`, but on an unparsed listing window.
 
-    The project listing has no page size that shrinks it and grows with every
-    generation, so it will outrun whatever response cap is in place — and a
-    truncated tail cannot be JSON-decoded even though the entry we want is
-    sitting in it intact. Decoding ``detail[0..4]`` structurally right after
-    ``operation_id`` finds ``mediaId`` reliably even on a truncated window,
-    without ever misreading ``clientUuid`` (``detail[5]``) or bleeding into
-    an adjacent listing entry.
+    Handles:
+    1. Forward listing stub: ``["<opId>", ..., [..., "<mediaId>", ...]]``
+    2. Live generation record: ``["<wfId>", "<projId>", "<opId>", null|"CAE", null, [...]]``
+    3. Reversed / ``detail[5]`` listing stub match.
     """
     if not text or not operation_id:
         return None
 
+    lower_text = text.lower()
+    lower_op = operation_id.lower()
     occurrences: list[int] = []
     search_from = 0
-    while search_from < len(text):
-        start = text.find(operation_id, search_from)
+    while search_from < len(lower_text):
+        start = lower_text.find(lower_op, search_from)
         if start == -1:
             break
         search_from = start + len(operation_id)
         if start > 0 and text[start - 1] != '"':
             continue
         occurrences.append(start)
-        slot4 = _extract_entry_slot4(text, start + len(operation_id))
-        if slot4 and slot4 != operation_id and _UUID_RE.fullmatch(slot4):
-            return slot4
 
-    # Fallback: reversed layout `[mediaId, null, null, [title, ts, null, null, opId, ...]]`
+        # 1. Forward listing stub: `["<opId>", ...` (or start==0 slice from an older extension) -> detail[4]
+        head_before = text[max(0, start - 4) : start]
+        if start == 0 or head_before.endswith('["') or head_before.endswith('[\\"'):
+            slot4 = _extract_entry_slot4(text, start + len(operation_id))
+            if slot4 and slot4.lower() != lower_op and _is_uuid(slot4):
+                return slot4
+
+    # 2. Generation record: `["<wfId>","<projId>","<opId>",null|"CAE",null,[` -> wfId
+    for start in occurrences:
+        prefix = text[max(0, start - 160) : start]
+        suffix = text[start + len(operation_id) : start + len(operation_id) + 32]
+        m = _GEN_RECORD_PREFIX_RE.search(prefix)
+        if m and _GEN_RECORD_SUFFIX_RE.match(suffix):
+            cand = m.group(1)
+            if cand.lower() != lower_op:
+                return cand
+
+    # 3. Fallback: listing stub where opId sits at detail[5] or detail[4]
     for start in occurrences:
         prefix_offset = max(0, start - 2048)
         prefix = text[prefix_offset:start]
         matches = list(_ENTRY_HEAD_RE.finditer(prefix))
         for m in reversed(matches):
             cand = m.group(1)
-            if cand == operation_id:
-                continue
             cand_end = prefix_offset + m.end(1)
-            slot4 = _extract_entry_slot4(text, cand_end)
-            if slot4 == operation_id:
+            slot4, slot5 = _extract_entry_slots(text, cand_end)
+            if slot5 and slot5.lower() == lower_op and slot4 and slot4.lower() != lower_op and _is_uuid(slot4):
+                return slot4
+            if cand.lower() != lower_op and slot4 and slot4.lower() == lower_op:
                 return cand
     return None
 

@@ -92,7 +92,11 @@ class FlowSDKVideoMixin:
             except Exception as exc:  # broad by design: reported, never swallowed
                 failures.append((mid, exc))
                 continue
-            self._remember_operation(operation.operation_id, pid)
+            self._remember_operation(
+                operation.operation_id,
+                operation.project_id or pid,
+                media_id=operation.media_id,
+            )
             operation_ids.append(operation.operation_id)
 
         out = self._video_submit_result(
@@ -326,7 +330,11 @@ class FlowSDKVideoMixin:
             except Exception as exc:  # broad by design: reported, never swallowed
                 failures.append((f"variant-{idx + 1}", exc))
                 continue
-            self._remember_operation(operation.operation_id, pid)
+            self._remember_operation(
+                operation.operation_id,
+                operation.project_id or pid,
+                media_id=operation.media_id,
+            )
             operation_ids.append(operation.operation_id)
 
         out = self._video_submit_result(
@@ -445,7 +453,11 @@ class FlowSDKVideoMixin:
             except Exception as exc:  # broad by design: surfaced cleanly
                 failures.append((f"variant-{idx + 1}", exc))
                 continue
-            self._remember_operation(operation.operation_id, pid)
+            self._remember_operation(
+                operation.operation_id,
+                operation.project_id or pid,
+                media_id=operation.media_id,
+            )
             operation_ids.append(operation.operation_id)
 
         out = self._video_submit_result(
@@ -524,7 +536,11 @@ class FlowSDKVideoMixin:
                 except (fb.FlowBatchError, ValueError, KeyError, IndexError, TypeError):
                     operation = fb.read_operation(payload)
                     op_id = operation.operation_id
-                    self._remember_operation(op_id, pid)
+                    self._remember_operation(
+                        op_id,
+                        operation.project_id or pid,
+                        media_id=operation.media_id,
+                    )
             except Exception as exc:  # broad by design: surfaced cleanly
                 failures.append((f"variant-{idx + 1}", exc))
                 continue
@@ -587,7 +603,11 @@ class FlowSDKVideoMixin:
         except Exception as exc:  # broad by design: reported, never swallowed
             return _sdk()._batch_failure(exc)
 
-        self._remember_operation(operation.operation_id, pid)
+        self._remember_operation(
+            operation.operation_id,
+            operation.project_id or pid,
+            media_id=operation.media_id,
+        )
         out = self._video_submit_result(
             [operation.operation_id], [], model=upsampler_model, sources=1
         )
@@ -680,7 +700,7 @@ class FlowSDKVideoMixin:
 
     @staticmethod
     def _is_policy_rejection_text(complaint: Optional[str]) -> bool:
-        """True for explicit safety/policy refusal text (never ``Media not found.``)."""
+        """True for explicit safety/policy or terminal job failure text (never ``Media not found.``)."""
         if not isinstance(complaint, str) or not complaint.strip():
             return False
         low = complaint.lower()
@@ -699,8 +719,19 @@ class FlowSDKVideoMixin:
                 "self-harm",
                 "audio_filtered",
                 "prominent_people",
+                "finished with state: failed",
+                "generation job finished",
+                "generation failed",
             )
         )
+
+    @staticmethod
+    def _merge_complaint(primary: Optional[str], secondary: Optional[str]) -> Optional[str]:
+        a = (primary or "").strip()
+        b = (secondary or "").strip()
+        if a and b and b not in a:
+            return f"{a} | {b}"[:220]
+        return (a or b or None)
 
     def _maybe_terminal_failure(
         self, operation_id: str, complaint: Optional[str]
@@ -729,25 +760,24 @@ class FlowSDKVideoMixin:
         arrive out of order:
 
         * the operation poll says how the job is going — it may carry the
-          signed ``/video/`` url directly, sit at no status on a job that
-          finished, carry a survivable ``"Media not found."`` complaint, or
-          report an explicit ``PUBLIC_ERROR_*`` safety/policy rejection;
-        * the project listing is what actually gains a media id when ``jwpduf``
-          omits the url;
-        * the media record serves the poster image first and grows the
-          ``/video/`` url in later.
-
-        A ``media_id`` is cached ONLY after ``as29s`` confirms it exists (no
-        gRPC ``[5]`` NOT_FOUND), so an uncommitted or mis-parsed id can never
-        trap the worker in a 5-minute ``as29s failed: [5]`` loop.
+          signed ``/video/`` url directly, report ``outcome == 3`` (done, with
+          slot 3 now ``null`` instead of ``"CAE"``), carry a survivable
+          ``"Media not found."`` complaint, or report an explicit
+          ``PUBLIC_ERROR_*`` / ``FAILED`` rejection;
+        * once ``jwpduf`` reports ``outcome == 3`` (or on every 3rd round for
+          submit-known workflow ids), ``as29s`` fetches the signed ``/video/``
+          url directly without downloading the 17 MB ``Zzl0ze`` project listing;
+        * ``Zzl0ze`` remains the authoritative fallback whenever ``jwpduf``
+          omits the media id or ``as29s`` answers ``[5]`` NOT_FOUND.
         """
         media_id = self._operation_media.get(operation_id)
         from_cache = bool(media_id)
+        from_direct_hint = False
         complaint: Optional[str] = None
 
         if not media_id:
-            media_id, complaint, direct_result = await self._find_operation_media(
-                operation_id
+            media_id, complaint, direct_result, from_direct_hint = (
+                await self._find_operation_media(operation_id)
             )
             if direct_result is not None:
                 return direct_result
@@ -757,31 +787,66 @@ class FlowSDKVideoMixin:
                     return terminal
                 return _sdk()._pending_operation(operation_id, complaint=complaint)
 
+        media_err: Optional[str] = None
         try:
-            urls = await self._media_urls(media_id)
+            urls, media_err = await self._media_urls_and_error(media_id)
         except fb.RpcError as exc:
             if not _sdk()._is_rpc_not_found(exc):
                 raise
             logger.warning(
-                "operation %s as29s NOT_FOUND [5] for media_id=%s (cached=%s)",
-                operation_id[:20], media_id[:20], from_cache,
+                "operation %s as29s NOT_FOUND [5] for media_id=%s (cached=%s, hint=%s)",
+                operation_id[:20], media_id[:20], from_cache, from_direct_hint,
             )
             if operation_id.startswith("t2v:"):
                 return _sdk()._pending_operation(
-                    operation_id, complaint=complaint or str(exc)[:200]
+                    operation_id,
+                    complaint=self._merge_complaint(complaint, str(exc)[:160]),
                 )
             # Evict unverified/stale media_id so the next round re-checks
             # jwpduf and Zzl0ze instead of looping on [5] until timeout.
             self._operation_media.pop(operation_id, None)
-            if from_cache:
-                fresh_mid, fresh_complaint, direct_result = (
+            if from_direct_hint:
+                self._operation_submit_media.pop(operation_id, None)
+                project_id = (
+                    self._operation_projects.get(operation_id) or effective_project_id()
+                )
+                listing_mid = (
+                    await self._media_id_for(operation_id, project_id)
+                    if project_id
+                    else None
+                )
+                if listing_mid and listing_mid != media_id:
+                    try:
+                        urls, media_err = await self._media_urls_and_error(listing_mid)
+                        media_id = listing_mid
+                        from_direct_hint = False
+                    except fb.RpcError as retry_exc:
+                        if not _sdk()._is_rpc_not_found(retry_exc):
+                            raise
+                        terminal = self._maybe_terminal_failure(operation_id, complaint)
+                        if terminal is not None:
+                            return terminal
+                        return _sdk()._pending_operation(
+                            operation_id,
+                            complaint=self._merge_complaint(complaint, str(retry_exc)[:160]),
+                        )
+                else:
+                    terminal = self._maybe_terminal_failure(operation_id, complaint)
+                    if terminal is not None:
+                        return terminal
+                    return _sdk()._pending_operation(
+                        operation_id,
+                        complaint=self._merge_complaint(complaint, str(exc)[:160]),
+                    )
+            elif from_cache:
+                fresh_mid, fresh_complaint, direct_result, _ = (
                     await self._find_operation_media(operation_id)
                 )
                 if direct_result is not None:
                     return direct_result
                 if fresh_mid and fresh_mid != media_id:
                     try:
-                        urls = await self._media_urls(fresh_mid)
+                        urls, media_err = await self._media_urls_and_error(fresh_mid)
                         media_id = fresh_mid
                         complaint = fresh_complaint
                     except fb.RpcError as retry_exc:
@@ -794,7 +859,9 @@ class FlowSDKVideoMixin:
                             return terminal
                         return _sdk()._pending_operation(
                             operation_id,
-                            complaint=fresh_complaint or str(retry_exc)[:200],
+                            complaint=self._merge_complaint(
+                                fresh_complaint, str(retry_exc)[:160]
+                            ),
                         )
                 else:
                     terminal = self._maybe_terminal_failure(
@@ -804,26 +871,39 @@ class FlowSDKVideoMixin:
                         return terminal
                     return _sdk()._pending_operation(
                         operation_id,
-                        complaint=fresh_complaint or str(exc)[:200],
+                        complaint=self._merge_complaint(
+                            fresh_complaint, str(exc)[:160]
+                        ),
                     )
             else:
                 terminal = self._maybe_terminal_failure(operation_id, complaint)
                 if terminal is not None:
                     return terminal
                 return _sdk()._pending_operation(
-                    operation_id, complaint=complaint or str(exc)[:200]
+                    operation_id,
+                    complaint=self._merge_complaint(complaint, str(exc)[:160]),
                 )
+
+        if not urls.video:
+            effective_complaint = media_err or complaint
+            if media_err:
+                terminal = self._maybe_terminal_failure(operation_id, media_err)
+                if terminal is not None:
+                    return terminal
+            # Lock the media_id once as29s serves a poster or once Zzl0ze
+            # confirmed it; keep jwpduf polling alive when an early direct-hint
+            # probe returned only a bare id string while still generating.
+            if urls.image or not from_direct_hint:
+                self._operation_media[operation_id] = media_id
+                if not media_err:
+                    self._operation_policy_strikes.pop(operation_id, None)
+            return _sdk()._pending_operation(
+                operation_id, complaint=effective_complaint, media_id=media_id
+            )
 
         # Cache only once as29s has actually recognised the media record.
         self._operation_media[operation_id] = media_id
         self._operation_policy_strikes.pop(operation_id, None)
-
-        if not urls.video:
-            # The id landed but the clip is still being written. Downloading on
-            # the id alone here saves the poster still, not the video.
-            return _sdk()._pending_operation(
-                operation_id, complaint=complaint, media_id=media_id
-            )
 
         # The media id stays cached rather than cleared: a batch re-polls its
         # finished operations alongside the pending ones, and a cleared entry
@@ -840,15 +920,14 @@ class FlowSDKVideoMixin:
 
     async def _find_operation_media(
         self, operation_id: str
-    ) -> tuple[Optional[str], Optional[str], Optional[dict]]:
-        """Ask the operation how it is doing, then the listing where its media is.
+    ) -> tuple[Optional[str], Optional[str], Optional[dict], bool]:
+        """Ask the operation how it is doing, then resolve its media id.
 
-        The listing is the authority — a poll has been observed never to report
-        a finished job the listing already knew about — but it is also the
-        expensive call, so it is consulted only when the poll says something
-        happened, when the poll is unreadable, or every third round regardless.
-        If ``jwpduf`` already carries a signed ``/video/`` CDN url, return it
-        immediately without waiting on ``Zzl0ze`` or ``as29s``.
+        Returns ``(media_id, complaint, direct_result, from_direct_hint)``.
+        When ``jwpduf`` already carries a signed ``/video/`` CDN url, return it
+        immediately. When ``jwpduf`` reports ``outcome == 3`` (done) for a
+        generation record (or on every 3rd round for a submit-known media id),
+        probe ``as29s`` directly before downloading the 17 MB ``Zzl0ze`` listing.
         """
         rounds = self._operation_polls.get(operation_id, 0) + 1
         self._operation_polls[operation_id] = rounds
@@ -858,6 +937,7 @@ class FlowSDKVideoMixin:
         )
         complaint: Optional[str] = None
         worth_looking = rounds % 3 == 0
+        operation: Optional[fb.Operation] = None
         try:
             op_payload = await self._payload(
                 fb.RPC_OPERATION,
@@ -885,12 +965,20 @@ class FlowSDKVideoMixin:
                             },
                             "status": "MEDIA_GENERATION_STATUS_SUCCESSFUL",
                         },
+                        True,
                     )
             operation = fb.read_operation(op_payload)
             complaint = operation.error
             project_id = operation.project_id or project_id
             if project_id:
                 self._remember_operation(operation_id, project_id)
+            if operation.outcome == fb.OUTCOME_OK:
+                direct_mid = (
+                    operation.media_id
+                    or self._operation_submit_media.get(operation_id)
+                )
+                if direct_mid:
+                    return direct_mid, complaint, None, True
             worth_looking = (
                 worth_looking or operation.done or operation.complained
             )
@@ -904,20 +992,23 @@ class FlowSDKVideoMixin:
             worth_looking = True
 
         if not worth_looking:
-            return None, complaint, None
+            return None, complaint, None, False
+        submit_mid = self._operation_submit_media.get(operation_id)
+        if submit_mid and (operation is None or not operation.complained):
+            return submit_mid, complaint, None, True
         if not project_id:
-            return None, "no project id for the listing lookup", None
-        return await self._media_id_for(operation_id, project_id), complaint, None
+            return None, "no project id for the listing lookup", None, False
+        return await self._media_id_for(operation_id, project_id), complaint, None, False
 
     async def _media_id_for(
         self, operation_id: str, project_id: str
     ) -> Optional[str]:
         """Find an operation's media id in the project listing.
 
-        Asks the extension for a compact window around the operation id
-        rather than the whole listing: that payload is past 17 MB and grows
-        with every generation, so anything shipping it whole gets truncated and
-        loses roughly half of all lookups depending on where the id sorts.
+        Asks the extension for compact windows around the operation id rather
+        than the whole listing: that payload is past 17 MB and grows with every
+        generation, so anything shipping it whole gets truncated and loses
+        roughly half of all lookups depending on where the id sorts.
         """
         result = await self._client.batch_rpc(
             fb.RPC_PROJECT_MEDIA,
@@ -940,9 +1031,21 @@ class FlowSDKVideoMixin:
                 media_id = None
         return media_id
 
-    async def _media_urls(self, media_id: str) -> Any:
+    async def _media_urls_and_error(
+        self, media_id: str
+    ) -> tuple[fb.MediaUrls, Optional[str]]:
         payload = await self._payload(
             fb.RPC_MEDIA, fb.media_request(media_id), timeout=60.0
         )
-        return fb.read_media_urls(payload, media_id)
+        urls = fb.read_media_urls(payload, media_id)
+        media_err: Optional[str] = None
+        if not urls.video:
+            gen_rec = fb._find_generation_record(payload)
+            if gen_rec is not None:
+                media_err = fb.read_operation_error(gen_rec)
+        return urls, media_err
+
+    async def _media_urls(self, media_id: str) -> Any:
+        urls, _ = await self._media_urls_and_error(media_id)
+        return urls
 

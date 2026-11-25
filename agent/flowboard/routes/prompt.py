@@ -14,11 +14,15 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from .local_only import local_origin
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from flowboard.services import prompt_synth
 from flowboard.services.llm.base import LLMError
 from flowboard.services.llm.registry import run_llm
+from flowboard.services.prompt_safety import (
+    SAFETY_SYSTEM_POLICY_CLAUSE,
+    sanitize_prompt_for_flow_safety,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +42,8 @@ class AutoPromptBody(BaseModel):
 class AutoPromptResponse(BaseModel):
     node_id: int
     prompt: str
+    safety_rewritten: bool = False
+    safety_notes: list[str] = Field(default_factory=list)
 
 
 @router.post("/auto", response_model=AutoPromptResponse)
@@ -49,11 +55,18 @@ async def auto_prompt(body: AutoPromptBody) -> AutoPromptResponse:
         kwargs["allow_fallback"] = True
     if body.duration_s is not None:
         kwargs["duration_s"] = body.duration_s
+    prompt_synth.reset_safety_audit_ctx()
     try:
         text = await prompt_synth.auto_prompt(body.node_id, **kwargs)  # type: ignore[arg-type]
     except prompt_synth.PromptSynthError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
-    return AutoPromptResponse(node_id=body.node_id, prompt=text)
+    rewritten, notes = prompt_synth.get_safety_audit_ctx()
+    return AutoPromptResponse(
+        node_id=body.node_id,
+        prompt=text,
+        safety_rewritten=rewritten,
+        safety_notes=notes,
+    )
 
 
 class AutoPromptBatchBody(BaseModel):
@@ -67,6 +80,8 @@ class AutoPromptBatchBody(BaseModel):
 class AutoPromptBatchResponse(BaseModel):
     node_id: int
     prompts: list[str]
+    safety_rewritten: bool = False
+    safety_notes: list[str] = Field(default_factory=list)
 
 
 @router.post("/auto-batch", response_model=AutoPromptBatchResponse)
@@ -81,6 +96,7 @@ async def auto_prompt_batch(body: AutoPromptBatchBody) -> AutoPromptBatchRespons
         kwargs["seed_prompt"] = body.seed_prompt
     if body.allow_fallback:
         kwargs["allow_fallback"] = True
+    prompt_synth.reset_safety_audit_ctx()
     try:
         prompts = await prompt_synth.auto_prompt_batch(
             body.node_id,
@@ -89,7 +105,13 @@ async def auto_prompt_batch(body: AutoPromptBatchBody) -> AutoPromptBatchRespons
         )
     except prompt_synth.PromptSynthError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
-    return AutoPromptBatchResponse(node_id=body.node_id, prompts=prompts)
+    rewritten, notes = prompt_synth.get_safety_audit_ctx()
+    return AutoPromptBatchResponse(
+        node_id=body.node_id,
+        prompts=prompts,
+        safety_rewritten=rewritten,
+        safety_notes=notes,
+    )
 
 
 class ScriptBreakdownBody(BaseModel):
@@ -123,7 +145,7 @@ _CAMERA_ROTATION = (
 
 
 def _offline_script_breakdown(script: str, count: int) -> ScriptBreakdownResponse:
-    clean = re.sub(r"\s+", " ", script).strip()
+    clean = sanitize_prompt_for_flow_safety(re.sub(r"\s+", " ", script).strip()).text
     parts = [p.strip() for p in re.split(r"[。！？\n；;]+", clean) if p.strip()]
     if not parts:
         parts = [clean]
@@ -139,22 +161,27 @@ def _offline_script_breakdown(script: str, count: int) -> ScriptBreakdownRespons
             if idx < count - 1
             else "戏剧收尾与余韵留白"
         )
+        img_prompt = sanitize_prompt_for_flow_safety(
+            f"第 {idx + 1} 镜（{phase_tag}）：围绕「{beat}」，保持 ref_image_1 主角外貌与服装一致性，"
+            f"电影级真实光影与景深层次，采用{cam}构图视角"
+        ).text
+        vid_prompt = sanitize_prompt_for_flow_safety(
+            f"基于当前画面演绎「{beat}」{phase_tag}动态镜头，{cam}，人物动作连贯自然，电影胶片质感与真实物理光影流动"
+        ).text
         shots.append(
             ScriptShotSpec(
                 title=f"镜头 {idx + 1}",
-                image_prompt=(
-                    f"第 {idx + 1} 镜（{phase_tag}）：围绕「{beat}」，保持 ref_image_1 主角外貌与服装一致性，"
-                    f"电影级真实光影与景深层次，采用{cam}构图视角"
-                ),
-                video_prompt=(
-                    f"基于当前首帧演绎「{beat}」{phase_tag}动态镜头，{cam}，人物动作连贯自然，电影胶片质感与真实物理光影流动"
-                ),
+                image_prompt=img_prompt,
+                video_prompt=vid_prompt,
                 camera=cam,
             )
         )
+    char_prompt = sanitize_prompt_for_flow_safety(
+        f"电影级主角三视图与核心造型设定，源于故事主题：{clean[:120]}，五官清晰、服化道质感统一"
+    ).text
     return ScriptBreakdownResponse(
         title=short_title or "AI 剧本分镜",
-        character_prompt=f"电影级主角三视图与核心造型设定，源于故事主题：{clean[:120]}，五官清晰、服化道质感统一",
+        character_prompt=char_prompt,
         shots=shots,
         source="fallback",
     )
@@ -194,6 +221,7 @@ async def script_breakdown(body: ScriptBreakdownBody) -> ScriptBreakdownResponse
         '    }\n'
         '  ]\n'
         '}'
+        + SAFETY_SYSTEM_POLICY_CLAUSE
     )
     try:
         raw = await run_llm(
@@ -208,8 +236,8 @@ async def script_breakdown(body: ScriptBreakdownBody) -> ScriptBreakdownResponse
             for idx, item in enumerate(data["shots"][:count]):
                 if not isinstance(item, dict):
                     continue
-                img_p = str(item.get("image_prompt") or "").strip()
-                vid_p = str(item.get("video_prompt") or img_p).strip()
+                img_p = sanitize_prompt_for_flow_safety(str(item.get("image_prompt") or "").strip()).text
+                vid_p = sanitize_prompt_for_flow_safety(str(item.get("video_prompt") or img_p).strip()).text
                 if not img_p:
                     continue
                 parsed_shots.append(
@@ -223,7 +251,9 @@ async def script_breakdown(body: ScriptBreakdownBody) -> ScriptBreakdownResponse
             if parsed_shots:
                 return ScriptBreakdownResponse(
                     title=str(data.get("title") or "AI 剧本分镜")[:60],
-                    character_prompt=str(data.get("character_prompt") or clean[:120]),
+                    character_prompt=sanitize_prompt_for_flow_safety(
+                        str(data.get("character_prompt") or clean[:120])
+                    ).text,
                     shots=parsed_shots,
                     source="llm",
                 )

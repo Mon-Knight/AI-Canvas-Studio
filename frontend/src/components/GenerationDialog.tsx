@@ -3,6 +3,7 @@ import {
   collectUpstreamPromptText,
   collectUpstreamRefEntries,
   useGenerationStore,
+  type VideoSubMode,
 } from "../store/generation";
 import { type VideoRefFrameMode } from "../lib/videoFrame";
 import { useFlowAccounts } from "../store/flowAccounts";
@@ -17,6 +18,7 @@ import {
   totalPanels,
 } from "../lib/storyboardPrompt";
 import { composeVideoPromptWithDirectives } from "../lib/promptMentions";
+import { sanitizePromptForFlowSafetyClient } from "../lib/promptSafety";
 import { filterDirectorSkills, type DirectorSkillEntry } from "../constants/directorSkills";
 import {
   useSettingsStore,
@@ -71,6 +73,22 @@ const REF_SOURCE_TYPES = new Set([
   "video",
 ]);
 
+interface PendingVideoConfirmPayload {
+  modeLabel: string;
+  modelLabel: string;
+  resolutionLabel: string;
+  durationSec: number;
+  clipCount: number;
+  costDisplay: string;
+  costBreakdown: string;
+  costTotal: number | null;
+  accountLabel: string;
+  finalPrompt: string;
+  dispatchOpts: Parameters<
+    ReturnType<typeof useGenerationStore.getState>["dispatchGeneration"]
+  >[1];
+}
+
 export function GenerationDialog() {
   const { rfId, prompt } = useGenerationStore((s) => s.openDialog);
   const close = useGenerationStore((s) => s.closeGenerationDialog);
@@ -87,18 +105,19 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
   const promptId = useId();
   const titleId = useId();
   const dispatchGeneration = useGenerationStore((s) => s.dispatchGeneration);
+  const openResultViewer = useGenerationStore((s) => s.openResultViewer);
   const nodes = useBoardStore((s) => s.nodes);
 
   const [prompt, setPrompt] = useState(initialPrompt);
   const [aspectRatio, setAspectRatio] = useState<AspectKey>("IMAGE_ASPECT_RATIO_LANDSCAPE");
   const [variants, setVariants] = useState(1);
-  const [camera, setCamera] = useState<CameraKey>("static");
+  const [camera, setCamera] = useState<CameraKey>("dynamic");
   // Storyboard layout. The node dispatches via the standard image
   // handler with a locked template prompt wrapping the user's topic
   // into a single composite NxN grid. See lib/storyboardPrompt.ts.
   const [storyboardGrid, setStoryboardGrid] = useState<StoryboardGrid>("2x2");
   const [storyboardMode, setStoryboardMode] = useState<StoryboardMode>("narrative");
-  const [videoSubMode, setVideoSubMode] = useState<"auto" | "first_last" | "t2v">("auto");
+  const [videoSubMode, setVideoSubMode] = useState<VideoSubMode>("auto");
   const [firstFrameId, setFirstFrameId] = useState("");
   const [lastFrameId, setLastFrameId] = useState("");
   const [audioOpen, setAudioOpen] = useState(false);
@@ -114,9 +133,12 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
   const [autoBuilding, setAutoBuilding] = useState(false);
   const [autoPromptUsed, setAutoPromptUsed] = useState(false);
   const [pendingAiConfirm, setPendingAiConfirm] = useState(false);
+  const [safetyAuditNotes, setSafetyAuditNotes] = useState<string[]>([]);
   const [preAiPrompt, setPreAiPrompt] = useState<string | null>(null);
   const [pendingBatchPrompts, setPendingBatchPrompts] = useState<string[] | undefined>(undefined);
   const [videoRefFrame, setVideoRefFrame] = useState<VideoRefFrameMode>("last");
+  const [pendingVideoConfirm, setPendingVideoConfirm] = useState<PendingVideoConfirmPayload | null>(null);
+  const [rememberNeverConfirm, setRememberNeverConfirm] = useState(false);
 
   // Per-variant selection for multi-source i2v. Default: all selected.
   // Stored as a Set of indices so the UI can toggle individual variants
@@ -162,6 +184,8 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
   const setVideoResolution = useSettingsStore((s) => s.setVideoResolution);
   const defaultVideoAspect = useSettingsStore((s) => s.defaultVideoAspect);
   const defaultVideoCount = useSettingsStore((s) => s.defaultVideoCount);
+  const confirmBeforeVideoGen = useSettingsStore((s) => s.confirmBeforeVideoGen);
+  const setConfirmBeforeVideoGen = useSettingsStore((s) => s.setConfirmBeforeVideoGen);
   const [seedInput, setSeedInput] = useState("");
   // Generation backend — sticky choice; dispatch reads it from here.
   const mediaProvider = useSettingsStore((s) => s.mediaProvider);
@@ -272,10 +296,6 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
       ? collectUpstreamPromptText(rfId, nodes, edges)
       : "";
 
-  const refSourceNodes = (!isVideo || isOmniVideo) && rfId
-    ? collectUpstreamRefEntries(rfId, nodes, edges)
-    : [];
-
   const allVideoRefEntries = isVideo && rfId
     ? collectUpstreamRefEntries(rfId, nodes, edges)
     : [];
@@ -300,8 +320,30 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     return out;
   })();
 
+  const effectiveVideoMode: "t2v" | "ingredients" | "first_frame" | "first_last" =
+    !isVideo
+      ? "t2v"
+      : videoCandidateFrames.length === 0 || videoSubMode === "t2v"
+        ? "t2v"
+        : videoSubMode === "first_last" && videoCandidateFrames.length >= 2
+          ? "first_last"
+          : videoSubMode === "ingredients"
+            ? "ingredients"
+            : videoSubMode === "first_frame"
+              ? "first_frame"
+              : isOmniVideo
+                ? "ingredients"
+                : "first_frame";
+
+  const effectiveVideoOmni = isVideo && effectiveVideoMode === "ingredients";
+
+  const refSourceNodes = (!isVideo || effectiveVideoOmni) && rfId
+    ? collectUpstreamRefEntries(rfId, nodes, edges)
+    : [];
+
   const hasVideoUpstream =
     sourceNode?.data.type === "video" ||
+    allVideoRefEntries.some((r) => r.node.data.type === "video") ||
     refSourceNodes.some((r) => r.node.data.type === "video");
 
   // Reset form when dialog opens for a different node
@@ -341,8 +383,11 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
       promptManuallyEditedRef.current = !!initialPrompt.trim() && !isStoryboardAuto;
       setPrompt(nextPrompt);
       setPendingAiConfirm(false);
+      setSafetyAuditNotes([]);
       setPreAiPrompt(null);
       setPendingBatchPrompts(undefined);
+      setPendingVideoConfirm(null);
+      setRememberNeverConfirm(false);
       setVideoRefFrame("last");
       // Character → preserve saved aspect, else match upstream ref aspect when linked, else 1:1.
       // Image / video → preserve node's saved aspectRatio first, else match
@@ -378,7 +423,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
           ? defaultVideoCount
           : defaultImageCount,
       );
-      setCamera("static");
+      setCamera("dynamic");
       // Hydrate storyboard grid from existing node data when reopening.
       // Fresh nodes + legacy values ("3x3" from 1.2.15-1.2.18) → "2x2".
       const openNodeData = useBoardStore
@@ -386,7 +431,33 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
         .nodes.find((n) => n.id === rfId)?.data;
       setStoryboardGrid(normaliseStoryboardGrid(openNodeData?.storyboardGrid));
       setStoryboardMode(normaliseStoryboardMode(openNodeData?.storyboardMode));
-      setVideoSubMode("auto");
+      const savedSubMode = openNodeData?.videoSubMode;
+      const upstreamEntriesAtOpen =
+        openNodeType === "video"
+          ? collectUpstreamRefEntries(rfId, boardNodes, boardEdges)
+          : [];
+      if (
+        savedSubMode === "t2v" ||
+        savedSubMode === "ingredients" ||
+        savedSubMode === "first_frame" ||
+        savedSubMode === "first_last"
+      ) {
+        setVideoSubMode(savedSubMode);
+      } else if (openNodeType === "video") {
+        // First-frame locking is optional: when upstream images exist, default
+        // to non-locked Ingredients mode if Omni is active or multiple upstream
+        // nodes are connected; single-image Veo starts in first_frame with 1-click
+        // switching to Ingredients or pure T2V right at the top of the panel.
+        if (upstreamEntriesAtOpen.length === 0) {
+          setVideoSubMode("t2v");
+        } else if (videoModelFamily === "omni_flash" || upstreamEntriesAtOpen.length >= 2) {
+          setVideoSubMode("ingredients");
+        } else {
+          setVideoSubMode("first_frame");
+        }
+      } else {
+        setVideoSubMode("auto");
+      }
       setAudioOpen(false);
       setDialogueText("");
       setSfxText("");
@@ -488,6 +559,11 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     if (inline) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        if (pendingVideoConfirm !== null) {
+          e.preventDefault();
+          setPendingVideoConfirm(null);
+          return;
+        }
         // ESC closes the variant picker first if open, otherwise the
         // dialog. Lets the user back out of a stray picker click
         // without losing their prompt + form state.
@@ -501,7 +577,12 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
       }
       if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
         e.preventDefault();
-        if (!e.isComposing && canGenerate) void handleSubmit();
+        if (e.isComposing) return;
+        if (pendingVideoConfirm) {
+          void confirmPendingVideoDispatch();
+        } else if (canGenerate) {
+          void handleSubmit();
+        }
       }
     };
     document.addEventListener("keydown", onKeyDown);
@@ -601,13 +682,32 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     }
   }
 
+  const effectiveVideoModelFamily =
+    effectiveVideoMode === "ingredients"
+      ? "omni_flash"
+      : effectiveVideoMode === "first_frame"
+        ? "veo"
+        : videoModelFamily;
+
   const selectedVideoId = resolveVideoSelectionId(
-    videoModelFamily,
+    effectiveVideoModelFamily,
     omniVersion,
     videoQuality,
   );
   const selectedVideoEntry = findVideoModelEntry(selectedVideoId);
   const selectedImageEntry = findImageModelEntry(imageModel);
+
+  function handleSelectVideoSubMode(nextMode: VideoSubMode) {
+    setVideoSubMode(nextMode);
+    persistNodeDraftPatch({ videoSubMode: nextMode });
+    if (nextMode === "ingredients" && videoModelFamily !== "omni_flash") {
+      setVideoModel("omni_flash");
+      setOmniVersion("1.2");
+    } else if (nextMode === "first_frame" && videoModelFamily !== "veo") {
+      setVideoModel("veo");
+      if (videoResolution === "360p") setVideoResolution("720p");
+    }
+  }
 
   function applyVideoSelection(id: VideoModelCatalogEntry["id"]) {
     const entry = findVideoModelEntry(id);
@@ -617,16 +717,29 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     if (entry.videoModel === "veo" && videoResolution === "360p") {
       setVideoResolution("720p");
     }
+    if (isVideo && videoCandidateFrames.length > 0) {
+      if (entry.videoModel === "omni_flash" && effectiveVideoMode === "first_frame") {
+        setVideoSubMode("ingredients");
+        persistNodeDraftPatch({ videoSubMode: "ingredients" });
+      } else if (entry.videoModel === "veo" && effectiveVideoMode === "ingredients") {
+        setVideoSubMode("first_frame");
+        persistNodeDraftPatch({ videoSubMode: "first_frame" });
+      }
+    }
   }
 
-  const activeVideoDuration = isOmniVideo ? omniFlashDuration : 8;
+  const activeVideoDuration = effectiveVideoModelFamily === "omni_flash" ? omniFlashDuration : 8;
 
   function handleSelectVideoDuration(nextSec: number) {
     const clamped = Math.min(15, Math.max(3, Math.round(nextSec))) as OmniFlashDuration;
-    if (!isOmniVideo) {
+    if (effectiveVideoModelFamily !== "omni_flash") {
       if (clamped !== 8) {
         setVideoModel("omni_flash");
         setOmniVersion("1.2");
+        if (videoCandidateFrames.length > 0 && effectiveVideoMode === "first_frame") {
+          setVideoSubMode("ingredients");
+          persistNodeDraftPatch({ videoSubMode: "ingredients" });
+        }
       }
       setOmniFlashDuration(clamped);
       return;
@@ -661,6 +774,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     setPrompt(restored);
     setPreAiPrompt(null);
     setPendingAiConfirm(false);
+    setSafetyAuditNotes([]);
     setAutoPromptUsed(false);
     setPendingBatchPrompts(undefined);
     promptManuallyEditedRef.current = !!restored.trim();
@@ -707,6 +821,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     const seedText = prompt.trim();
     setPreAiPrompt(prompt);
     setPendingBatchPrompts(undefined);
+    setSafetyAuditNotes([]);
     setAutoBuilding(true);
     if (!isNaN(dbId)) {
       useBoardStore.getState().updateNodeData(rfId, { autoPromptStatus: "pending" });
@@ -724,6 +839,11 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
         setPrompt(nextPrompt);
         setAutoPromptUsed(true);
         setPendingAiConfirm(true);
+        setSafetyAuditNotes(
+          res.safety_rewritten
+            ? (res.safety_notes?.length ? res.safety_notes : ["已自动优化敏感表达，降低审核拦截风险"])
+            : [],
+        );
         useBoardStore.getState().updateNodeData(rfId, { autoPromptStatus: undefined });
         if (inline) persistNodeDraftPatch({ prompt: nextPrompt });
         window.requestAnimationFrame(() => firstFocusRef.current?.focus());
@@ -734,16 +854,39 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
       const localPatch = isVideo
         ? "主体动作连贯流畅，电影级自然光影流转，真实物理景深视差，画面稳定高清"
         : "电影级布光与自然通透色彩，材质与边缘细节清晰锐利，和谐比例构图，真实质感摄影";
-      const nextPrompt = (seedText ? `${seedText}，${localPatch}` : localPatch).slice(0, PROMPT_MAX_LENGTH);
+      const rawLocal = seedText ? `${seedText}，${localPatch}` : localPatch;
+      const audited = sanitizePromptForFlowSafetyClient(rawLocal);
+      const nextPrompt = audited.text.slice(0, PROMPT_MAX_LENGTH);
       promptManuallyEditedRef.current = true;
       setPrompt(nextPrompt);
       setAutoPromptUsed(true);
       setPendingAiConfirm(true);
+      setSafetyAuditNotes(audited.rewritten ? audited.notes : []);
       useBoardStore.getState().updateNodeData(rfId, { autoPromptStatus: undefined });
       if (inline) persistNodeDraftPatch({ prompt: nextPrompt });
       window.requestAnimationFrame(() => firstFocusRef.current?.focus());
     } finally {
       setAutoBuilding(false);
+    }
+  }
+
+  async function confirmPendingVideoDispatch() {
+    if (!pendingVideoConfirm || submitLock.current) return;
+    const payload = pendingVideoConfirm;
+    submitLock.current = true;
+    try {
+      if (rememberNeverConfirm) {
+        setConfirmBeforeVideoGen("never");
+      }
+      setPendingVideoConfirm(null);
+      setRememberNeverConfirm(false);
+      setPendingAiConfirm(false);
+      setPreAiPrompt(null);
+      setPendingBatchPrompts(undefined);
+      closeGenerationDialog();
+      await dispatchGeneration(rfId, payload.dispatchOpts);
+    } finally {
+      submitLock.current = false;
     }
   }
 
@@ -843,6 +986,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
           return;
         }
         setPreAiPrompt(prompt);
+        setSafetyAuditNotes([]);
         setAutoBuilding(true);
         useBoardStore.getState().updateNodeData(rfId, { autoPromptStatus: "pending" });
         try {
@@ -851,6 +995,11 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
             const nextText = res.prompts.join("\n\n— 变体 —\n\n").slice(0, PROMPT_MAX_LENGTH);
             setPendingBatchPrompts(res.prompts);
             setPrompt(nextText);
+            setSafetyAuditNotes(
+              res.safety_rewritten
+                ? (res.safety_notes?.length ? res.safety_notes : ["已自动优化敏感表达，降低审核拦截风险"])
+                : [],
+            );
           } else {
             const res = await autoPromptApi(dbId, {
               camera: isVideo ? camera : undefined,
@@ -859,6 +1008,11 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
             });
             setPendingBatchPrompts(undefined);
             setPrompt(res.prompt.slice(0, PROMPT_MAX_LENGTH));
+            setSafetyAuditNotes(
+              res.safety_rewritten
+                ? (res.safety_notes?.length ? res.safety_notes : ["已自动优化敏感表达，降低审核拦截风险"])
+                : [],
+            );
           }
           promptManuallyEditedRef.current = true;
           setAutoPromptUsed(true);
@@ -879,10 +1033,6 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
         }
       }
     }
-    setPendingAiConfirm(false);
-    setPreAiPrompt(null);
-    setPendingBatchPrompts(undefined);
-    closeGenerationDialog();
     if (isVideo) {
       const videoPrompt = composeVideoPromptWithDirectives({
         prompt: finalPrompt,
@@ -890,31 +1040,90 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
         dialogue: dialogueText,
         sfx: sfxText,
       });
-      const isT2v = videoCandidateFrames.length === 0 || videoSubMode === "t2v";
+      const isT2v = effectiveVideoMode === "t2v";
+      const isIngredients = effectiveVideoMode === "ingredients";
       const isFirstLast =
-        videoSubMode === "first_last" &&
+        effectiveVideoMode === "first_last" &&
         Boolean(firstFrameId && lastFrameId && firstFrameId !== lastFrameId);
       const picked = sourceMediaIds.filter((_, i) => selectedSourceIdx.has(i));
-      const useMulti = picked.length > 1;
-      return dispatchGeneration(rfId, {
+      const useMulti = !isIngredients && !isT2v && !isFirstLast && picked.length > 1;
+      const clipCount = !isFirstLast && !isT2v && !isIngredients && useMulti ? picked.length : variants;
+      const effectiveRes: VideoResolutionKey =
+        effectiveVideoModelFamily !== "omni_flash" && videoResolution === "360p"
+          ? "720p"
+          : videoResolution;
+      const dispatchOpts: PendingVideoConfirmPayload["dispatchOpts"] = {
         prompt: videoPrompt,
         aspectRatio,
         kind: "video",
         flowAccountId: account?.id,
         flowProjectId: account?.project_id ?? undefined,
-        videoSubMode: isFirstLast ? "first_last" : isT2v ? "t2v" : "auto",
-        sourceMediaId: isFirstLast ? firstFrameId : useMulti ? undefined : picked[0],
+        videoSubMode: isFirstLast
+          ? "first_last"
+          : isT2v
+            ? "t2v"
+            : isIngredients
+              ? "ingredients"
+              : "first_frame",
+        sourceMediaId: isFirstLast
+          ? firstFrameId
+          : isIngredients || isT2v || useMulti
+            ? undefined
+            : picked[0],
         endMediaId: isFirstLast ? lastFrameId : undefined,
-        sourceMediaIds: !isFirstLast && useMulti ? picked : undefined,
-        variantCount: !isFirstLast && !isT2v && useMulti ? picked.length : variants,
-        videoModel: videoModelFamily,
+        sourceMediaIds: !isFirstLast && !isIngredients && !isT2v && useMulti ? picked : undefined,
+        variantCount: clipCount,
+        videoModel: effectiveVideoModelFamily,
         videoQuality,
         omniVersion,
-        durationSeconds: omniFlashDuration,
-        videoResolution,
+        durationSeconds: activeVideoDuration,
+        videoResolution: effectiveRes,
         videoRefFrame: hasVideoUpstream ? videoRefFrame : undefined,
-      });
+      };
+
+      if (confirmBeforeVideoGen === "always") {
+        const modeLabel = isT2v
+          ? "纯文生视频（不锁首帧）"
+          : isIngredients
+            ? `参考元素生视频（不锁首帧 · ${refSourceNodes.length} 项参考）`
+            : isFirstLast
+              ? "首尾帧锁定"
+              : `首帧一致图生视频（可选 · ${Math.max(1, picked.length)} 张首帧）`;
+        const videoEst = estimateVideoCreditCost({
+          videoModel: effectiveVideoModelFamily,
+          omniVersion,
+          videoQuality,
+          durationSeconds: activeVideoDuration,
+          videoResolution: effectiveRes,
+          count: clipCount,
+          paygateTier,
+        });
+        setPendingVideoConfirm({
+          modeLabel,
+          modelLabel: selectedVideoEntry.label,
+          resolutionLabel: effectiveRes.toUpperCase(),
+          durationSec: activeVideoDuration,
+          clipCount,
+          costDisplay: videoEst.displayText,
+          costBreakdown: videoEst.breakdown,
+          costTotal: videoEst.total,
+          accountLabel: account?.label || "当前 Flow 账号",
+          finalPrompt: videoPrompt,
+          dispatchOpts,
+        });
+        return;
+      }
+
+      setPendingAiConfirm(false);
+      setPreAiPrompt(null);
+      setPendingBatchPrompts(undefined);
+      closeGenerationDialog();
+      return dispatchGeneration(rfId, dispatchOpts);
     } else {
+      setPendingAiConfirm(false);
+      setPreAiPrompt(null);
+      setPendingBatchPrompts(undefined);
+      closeGenerationDialog();
       return dispatchGeneration(rfId, {
         prompt: finalPrompt,
         aspectRatio,
@@ -975,8 +1184,8 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     || node?.data.aiBriefStatus === "pending";
   const isWorking = autoBuilding || nodeLLMBusy;
 
-  const isVideoTextMode = isVideo && (videoCandidateFrames.length === 0 || videoSubMode === "t2v");
-  const isVideoFirstLastMode = isVideo && videoSubMode === "first_last" && videoCandidateFrames.length >= 2;
+  const isVideoTextMode = isVideo && effectiveVideoMode === "t2v";
+  const isVideoFirstLastMode = isVideo && effectiveVideoMode === "first_last";
   const queued = node.data.status === "queued" || node.data.status === "running";
   const canGenerate = !queued && !isWorking && (!isVideo || !accountIssue) && (isCharacter
     ? prompt.trim().length > 0 || refSourceNodes.length > 0 || Boolean(upstreamPromptText)
@@ -984,7 +1193,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     ? Boolean(firstFrameId && lastFrameId && firstFrameId !== lastFrameId)
     : isVideoTextMode
     ? prompt.trim().length > 0
-    : isOmniVideo
+    : effectiveVideoOmni
     ? refSourceNodes.length > 0 && !isWorking
     : isVideo
     ? sourceMediaIds.some((_, idx) => selectedSourceIdx.has(idx))
@@ -1060,6 +1269,11 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
       {pendingAiConfirm && !isWorking && !hasStoryboardUpstream && (
         <div className="gen-dialog__confirm-banner" role="status">
           <span>✨ AI 已润色/生成提示词，请检查或微调后点击「确认生成」</span>
+        </div>
+      )}
+      {safetyAuditNotes.length > 0 && !isWorking && !hasStoryboardUpstream && (
+        <div className="gen-dialog__safety-banner" role="status">
+          <span>🛡️ 安全词审核已自动改写：{safetyAuditNotes.join("；")}</span>
         </div>
       )}
       <textarea
@@ -1213,11 +1427,11 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
   const references = (
     <UpstreamReferencesSection
       isVideo={isVideo}
-      isOmniVideo={isOmniVideo}
+      isOmniVideo={effectiveVideoOmni}
       isVideoFirstLastMode={isVideoFirstLastMode}
       isVideoTextMode={isVideoTextMode}
       videoSubMode={videoSubMode}
-      setVideoSubMode={setVideoSubMode}
+      onSelectVideoSubMode={handleSelectVideoSubMode}
       videoCandidateFrames={videoCandidateFrames}
       firstFrameId={firstFrameId}
       setFirstFrameId={setFirstFrameId}
@@ -1243,20 +1457,22 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
   const showCreditsPill =
     !isPrompt && (isVideo || mediaProvider === "flow") && liveCredits !== null;
 
-  const effectiveVideoCount = isOmniVideo
-    ? variants
-    : selectedSourceIdx.size > 1
+  const effectiveVideoCount =
+    effectiveVideoMode === "first_frame" && selectedSourceIdx.size > 1
       ? selectedSourceIdx.size
       : variants;
   const costEstimate =
     !isPrompt && (isVideo || mediaProvider === "flow")
       ? isVideo
         ? estimateVideoCreditCost({
-            videoModel: videoModelFamily,
+            videoModel: effectiveVideoModelFamily,
             omniVersion,
             videoQuality,
-            durationSeconds: omniFlashDuration,
-            videoResolution,
+            durationSeconds: activeVideoDuration,
+            videoResolution:
+              effectiveVideoModelFamily !== "omni_flash" && videoResolution === "360p"
+                ? "720p"
+                : videoResolution,
             count: effectiveVideoCount,
             paygateTier,
           })
@@ -1526,12 +1742,25 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     );
   }
 
+  const hasGeneratedMedia =
+    !isPrompt &&
+    Boolean(node.data.mediaId || node.data.mediaIds?.some((m) => typeof m === "string" && m.length > 0));
+
+  const insufficientCredits =
+    pendingVideoConfirm !== null &&
+    liveCredits !== null &&
+    pendingVideoConfirm.costTotal !== null &&
+    pendingVideoConfirm.costTotal > liveCredits;
+
   return (
     <div
       className="gen-dialog-backdrop"
       role="presentation"
       onClick={(e) => {
-        if (e.target === e.currentTarget) closeGenerationDialog();
+        if (e.target === e.currentTarget) {
+          if (pendingVideoConfirm) setPendingVideoConfirm(null);
+          else closeGenerationDialog();
+        }
       }}
     >
       <div
@@ -1547,26 +1776,41 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
           <div>
             <h2 id={titleId} className="gen-dialog__title">
               {isVideo
-                ? "生成视频"
+                ? "视频详细参数与生成"
                 : isCharacter
-                ? "生成主体设定"
+                ? "主体设定详细参数"
                 : isStoryboard
-                ? "生成分镜故事板"
+                ? "故事板详细参数"
                 : isPrompt
                 ? "编辑文本提示词"
-                : "生成图片"}
+                : "图片详细参数与生成"}
             </h2>
             <span className="gen-dialog__subtitle">
               节点 #{node?.data.shortId ?? rfId}
             </span>
           </div>
-          <button
-            className="gen-dialog__close"
-            onClick={closeGenerationDialog}
-            aria-label="关闭窗口 (ESC)"
-          >
-            ✕
-          </button>
+          <div className="gen-dialog__header-actions">
+            {hasGeneratedMedia && (
+              <button
+                type="button"
+                className="gen-dialog__showcase-btn"
+                onClick={() => {
+                  closeGenerationDialog();
+                  openResultViewer(rfId, 0);
+                }}
+                title={isVideo ? "打开官方风格视频展示页与时间轴播控" : "全屏预览已生成的图片与高清重塑"}
+              >
+                {isVideo ? "▶ 视频展示页" : "▣ 全屏预览"}
+              </button>
+            )}
+            <button
+              className="gen-dialog__close"
+              onClick={closeGenerationDialog}
+              aria-label="关闭窗口 (ESC)"
+            >
+              ✕
+            </button>
+          </div>
         </div>
 
         <div className="gen-dialog__body">
@@ -1578,7 +1822,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
           isVideo={isVideo}
           isPrompt={isPrompt}
           isStoryboard={isStoryboard}
-          isOmniVideo={isOmniVideo}
+          isOmniVideo={effectiveVideoModelFamily === "omni_flash"}
           accountIssue={accountIssue ?? null}
           mediaProvider={mediaProvider}
           setMediaProvider={setMediaProvider}
@@ -1602,7 +1846,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
           handleSelectVideoDuration={handleSelectVideoDuration}
           camera={camera}
           setCamera={setCamera}
-          selectedSourceCount={selectedSourceIdx.size}
+          selectedSourceCount={effectiveVideoMode === "first_frame" ? selectedSourceIdx.size : 1}
           variants={variants}
           updateVariants={updateVariants}
           seedInput={seedInput}
@@ -1619,6 +1863,20 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
           <span className="gen-dialog__board-ctx">
             {boardName === "Untitled" || !boardName ? "未命名项目" : boardName} · 共 {nodeCount} 个节点
           </span>
+          {isVideo && (
+            <button
+              type="button"
+              className={`gen-dialog__confirm-toggle${confirmBeforeVideoGen === "always" ? " gen-dialog__confirm-toggle--on" : ""}`}
+              onClick={() =>
+                setConfirmBeforeVideoGen(
+                  confirmBeforeVideoGen === "always" ? "never" : "always",
+                )
+              }
+              title="切换视频生成前二次确认策略（可在设置中修改：始终 / 永不）"
+            >
+              生成前确认：{confirmBeforeVideoGen === "always" ? "始终" : "永不"}
+            </button>
+          )}
           {costEstimate && (
             <span
               className={`jm-cost-pill${costEstimate.isZero ? " jm-cost-pill--zero" : ""}`}
@@ -1652,11 +1910,92 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
               ? "构思中…"
               : isPrompt
               ? "保存文本 ⌘↵"
+              : isVideo && confirmBeforeVideoGen === "always"
+              ? "下一步：确认生成 ⌘↵"
               : pendingAiConfirm
               ? "确认并生成 ⌘↵"
               : "立即生成 ⌘↵"}
           </button>
         </div>
+
+        {pendingVideoConfirm && (
+          <div className="gen-dialog__confirm-overlay" role="alertdialog" aria-modal="true" aria-label="确认视频生成参数与积分消耗">
+            <div className="gen-dialog__confirm-card">
+              <div className="gen-dialog__confirm-head">
+                <div>
+                  <h3 className="gen-dialog__confirm-title">确认生成视频</h3>
+                  <p className="gen-dialog__confirm-sub">
+                    请核对本次生成模式、模型清晰度与预计积分消耗，确认无误后提交至 Google Flow。
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="gen-dialog__close"
+                  onClick={() => setPendingVideoConfirm(null)}
+                  aria-label="返回修改"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <dl className="gen-dialog__confirm-grid">
+                <dt>当前账号</dt>
+                <dd>{pendingVideoConfirm.accountLabel}</dd>
+                <dt>生成模式</dt>
+                <dd>{pendingVideoConfirm.modeLabel}</dd>
+                <dt>视频模型</dt>
+                <dd>{pendingVideoConfirm.modelLabel}</dd>
+                <dt>规格参数</dt>
+                <dd>
+                  {pendingVideoConfirm.resolutionLabel} · {pendingVideoConfirm.durationSec} 秒 · x{pendingVideoConfirm.clipCount} 条
+                </dd>
+                <dt>预计消耗</dt>
+                <dd>
+                  <span className={`jm-cost-pill${pendingVideoConfirm.costTotal === 0 ? " jm-cost-pill--zero" : ""}`}>
+                    {pendingVideoConfirm.costDisplay}
+                  </span>
+                  {liveCredits !== null && (
+                    <span className={`gen-dialog__confirm-balance${insufficientCredits ? " gen-dialog__confirm-balance--low" : ""}`}>
+                      当前余额 {liveCredits.toLocaleString("zh-CN")} 积分
+                      {insufficientCredits ? "（余额可能不足）" : ""}
+                    </span>
+                  )}
+                </dd>
+              </dl>
+
+              <div className="gen-dialog__confirm-prompt-box">
+                <div className="gen-dialog__confirm-prompt-label">最终提交提示词</div>
+                <p className="gen-dialog__confirm-prompt-text">{pendingVideoConfirm.finalPrompt}</p>
+              </div>
+
+              <label className="gen-dialog__confirm-skip">
+                <input
+                  type="checkbox"
+                  checked={rememberNeverConfirm}
+                  onChange={(e) => setRememberNeverConfirm(e.target.checked)}
+                />
+                <span>以后生成视频直接提交，不再确认（可随时在「设置 → 生成前先确认」恢复为始终）</span>
+              </label>
+
+              <div className="gen-dialog__confirm-actions">
+                <button
+                  type="button"
+                  className="gen-dialog__confirm-cancel"
+                  onClick={() => setPendingVideoConfirm(null)}
+                >
+                  返回修改
+                </button>
+                <button
+                  type="button"
+                  className="gen-dialog__confirm-submit"
+                  onClick={() => void confirmPendingVideoDispatch()}
+                >
+                  确认生成视频 ⌘↵
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

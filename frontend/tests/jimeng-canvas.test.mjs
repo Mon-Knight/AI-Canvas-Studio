@@ -1250,3 +1250,150 @@ test("useBoardStore supports free node resizing, persistence hydration, and dime
     await server.close();
   }
 });
+
+test("promptSafety client sanitizer, video confirm toggle, GIF89a/timecode helpers, and optional first-frame routing", async () => {
+  const server = await createServer({ server: { middlewareMode: true, hmr: false, ws: false }, logLevel: "error" });
+  const savedFetch = globalThis.fetch;
+  try {
+    const { sanitizePromptForFlowSafetyClient } = await server.ssrLoadModule("/src/lib/promptSafety.ts");
+    const { formatVideoTimecode, encodeGif89a } = await server.ssrLoadModule("/src/lib/videoGifExport.ts");
+    const { useSettingsStore } = await server.ssrLoadModule("/src/store/settings.ts");
+    const { useBoardStore } = await server.ssrLoadModule("/src/store/board.ts");
+    const { useGenerationStore } = await server.ssrLoadModule("/src/store/generation.ts");
+    const { useFlowAccounts } = await server.ssrLoadModule("/src/store/flowAccounts.ts");
+
+    // 1. Prompt safety sanitizer
+    const risky = sanitizePromptForFlowSafetyClient(
+      "动漫少女毅然向后仰身纵入苍茫夜空，身体在失重气流中向深处坠落，大喊杀了你们",
+    );
+    assert.equal(risky.rewritten, true);
+    assert.ok(risky.notes.length >= 2);
+    assert.ok(!risky.text.includes("纵入苍茫夜空"));
+    assert.ok(!risky.text.includes("杀了你们"));
+
+    const safe = sanitizePromptForFlowSafetyClient("少女在樱花树下轻柔起舞，温暖夕阳逆光");
+    assert.equal(safe.rewritten, false);
+    assert.deepEqual(safe.notes, []);
+    assert.equal(safe.text, "少女在樱花树下轻柔起舞，温暖夕阳逆光");
+
+    // 2. Video generation confirmation preference (default "always", switchable to "never")
+    assert.equal(useSettingsStore.getState().confirmBeforeVideoGen, "always");
+    useSettingsStore.getState().setConfirmBeforeVideoGen("never");
+    assert.equal(useSettingsStore.getState().confirmBeforeVideoGen, "never");
+    useSettingsStore.getState().setConfirmBeforeVideoGen("always");
+    assert.equal(useSettingsStore.getState().confirmBeforeVideoGen, "always");
+
+    // 3. Video Showcase timecode + 270p GIF89a binary encoder
+    assert.equal(formatVideoTimecode(0), "00:00:00");
+    assert.equal(formatVideoTimecode(8), "00:08:00");
+    assert.equal(formatVideoTimecode(65.5, 24), "01:05:12");
+
+    const frame1 = new Uint8ClampedArray(4 * 4 * 4).fill(200);
+    const frame2 = new Uint8ClampedArray(4 * 4 * 4).fill(80);
+    const gif = encodeGif89a([frame1, frame2], 4, 4, 12);
+    const header = String.fromCharCode(...gif.slice(0, 6));
+    assert.equal(header, "GIF89a");
+    assert.equal(gif[gif.length - 1], 0x3b);
+    assert.ok(gif.length > 800);
+
+    // 4. Optional first-frame videoSubMode routing: t2v vs ingredients vs first_frame vs first_last
+    const posted = [];
+    let reqCounter = 100;
+    globalThis.fetch = async (url, options) => {
+      if (url === "/api/requests" && options?.method === "POST") {
+        posted.push(JSON.parse(options.body));
+        return Response.json({ id: ++reqCounter, status: "done", result: { media_ids: [`v-${reqCounter}`] } });
+      }
+      if (typeof url === "string" && url.startsWith("/api/requests/")) {
+        return Response.json({ id: reqCounter, status: "done", type: "gen_video", params: {}, result: { media_ids: [`v-${reqCounter}`] } });
+      }
+      return Response.json({});
+    };
+
+    const acc = {
+      id: "acc-1",
+      project_id: "proj-1",
+      label: "主账号",
+      credits: 500,
+      connected: true,
+      flow_tab_open: true,
+      paygate_tier: "PAYGATE_TIER_TWO",
+    };
+    useFlowAccounts.getState().apply({ accounts: [acc], active_account_id: acc.id, extension_path: "" });
+    useBoardStore.setState({
+      boardId: 1,
+      nodes: [
+        { id: "1", type: "image", position: { x: 0, y: 0 }, data: { type: "image", shortId: "I1", title: "参考1", mediaId: "img-1", mediaIds: ["img-1"] } },
+        { id: "2", type: "image", position: { x: 0, y: 200 }, data: { type: "image", shortId: "I2", title: "参考2", mediaId: "img-2", mediaIds: ["img-2"] } },
+        { id: "3", type: "video", position: { x: 300, y: 0 }, data: { type: "video", shortId: "V3", title: "视频", status: "idle" } },
+      ],
+      edges: [
+        { id: "e1", source: "1", target: "3", data: { sourceVariantIdx: null } },
+        { id: "e2", source: "2", target: "3", data: { sourceVariantIdx: null } },
+      ],
+    });
+
+    const resetVideoNode = () => {
+      useGenerationStore.getState().cancelGeneration("3");
+      useBoardStore.getState().updateNodeData("3", { status: "idle" });
+    };
+
+    // (a) Pure Text-to-Video ignores upstream images even when wired!
+    await useGenerationStore.getState().dispatchGeneration("3", {
+      kind: "video",
+      prompt: "纯文本自由运镜海浪日出",
+      videoSubMode: "t2v",
+      flowAccountId: acc.id,
+      flowProjectId: acc.project_id,
+    });
+    assert.equal(posted[0].type, "gen_video_text");
+    assert.ok(!("start_media_id" in posted[0].params));
+    resetVideoNode();
+
+    // (b) Ingredients mode routes to gen_video_omni (ref_media_ids) without locking frame 0
+    await useGenerationStore.getState().dispatchGeneration("3", {
+      kind: "video",
+      prompt: "让 @图1 穿着 @图2 的服装自由起舞",
+      videoSubMode: "ingredients",
+      videoModel: "veo",
+      flowAccountId: acc.id,
+      flowProjectId: acc.project_id,
+    });
+    assert.equal(posted[1].type, "gen_video_omni");
+    assert.deepEqual(posted[1].params.ref_media_ids, ["img-1", "img-2"]);
+    assert.ok(!("start_media_id" in posted[1].params));
+    resetVideoNode();
+
+    // (c) Explicit optional first_frame mode locks start_media_id via gen_video
+    await useGenerationStore.getState().dispatchGeneration("3", {
+      kind: "video",
+      prompt: "首帧起拍微笑挥手",
+      videoSubMode: "first_frame",
+      sourceMediaId: "img-1",
+      videoModel: "omni_flash",
+      flowAccountId: acc.id,
+      flowProjectId: acc.project_id,
+    });
+    assert.equal(posted[2].type, "gen_video");
+    assert.equal(posted[2].params.start_media_id, "img-1");
+    resetVideoNode();
+
+    // (d) First + Last frame lock routes to gen_video_first_last
+    await useGenerationStore.getState().dispatchGeneration("3", {
+      kind: "video",
+      prompt: "平滑过渡镜头",
+      videoSubMode: "first_last",
+      sourceMediaId: "img-1",
+      endMediaId: "img-2",
+      flowAccountId: acc.id,
+      flowProjectId: acc.project_id,
+    });
+    assert.equal(posted[3].type, "gen_video_first_last");
+    assert.equal(posted[3].params.start_media_id, "img-1");
+    assert.equal(posted[3].params.end_media_id, "img-2");
+    resetVideoNode();
+  } finally {
+    globalThis.fetch = savedFetch;
+    await server.close();
+  }
+});

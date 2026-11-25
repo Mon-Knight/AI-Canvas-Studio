@@ -13,16 +13,7 @@ import {
   resolveStoryboardLayout,
 } from "../lib/storyboardPrompt";
 import { splitStoryboardToShotNodes } from "../lib/storyboardSplit";
-import {
-  CAMERA_ANGLE_PRESETS,
-  LIGHTING_PRESETS,
-  deriveCameraAngle,
-  deriveNextScene,
-  derivePrevScene,
-  relightImageNode,
-  switchNodeHistoryVersion,
-  upscaleImageNode2K,
-} from "../lib/quickDerive";
+import { switchNodeHistoryVersion } from "../lib/quickDerive";
 
 import {
   IconImage, IconNote, IconStoryboard, IconSubject, IconText, IconVideo, IconVisualAsset,
@@ -484,8 +475,11 @@ function ImageBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }) {
     setDragOver(false);
   }
 
-  function openGenerate() {
-    selectForContextualGeneration(rfId);
+  function openGenerate(e?: React.MouseEvent) {
+    e?.stopPropagation();
+    const initialPrompt =
+      (data.type === "Storyboard" ? data.aiBrief : data.prompt) ?? "";
+    useGenerationStore.getState().openGenerationDialog(rfId, initialPrompt);
   }
 
   // Empty state — same action-bar UX as character/visual_asset so users
@@ -554,11 +548,9 @@ function ImageBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }) {
   for (let i = 0; i < tileCount; i++) {
     const rawMid = ids[i];
     const mid = typeof rawMid === "string" && rawMid ? rawMid : undefined;
-    // Click a tile → open viewer at that variant. The "Use →" overlay
-    // (when present) is a separate action handled by onUseAsRef.
-    const onClick = mid
-      ? () => useGenerationStore.getState().openResultViewer(rfId, i)
-      : undefined;
+    // Single-click selects/highlights/drags the node cleanly without opening
+    // modals; double-click opens detailed parameters, and the header/overlay
+    // preview button opens the full-screen viewer.
     tiles.push(
       <ImageTile
         key={i}
@@ -566,7 +558,6 @@ function ImageBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }) {
         mediaId={mid}
         isProcessing={isProcessing && !mid}
         alt={data.title}
-        onClick={onClick}
         onUseAsRef={
           isMultiVariant && mid && !isProcessing
             ? () => onUseVariantClick(i)
@@ -646,27 +637,73 @@ function ImageBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }) {
 function VideoPreviewTile({ mediaId, label, onDetails }: {
   mediaId: string; label: string; onDetails: () => void;
 }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
   const [attempt, setAttempt] = useState(0);
   const [failed, setFailed] = useState(false);
+  const [playing, setPlaying] = useState(false);
   useEffect(() => {
     if (!failed || attempt >= 3) return;
     const timer = window.setTimeout(() => { setFailed(false); setAttempt(a => a + 1); }, 2000);
     return () => window.clearTimeout(timer);
   }, [failed, attempt]);
+
+  function toggleInlinePlay(e: React.MouseEvent) {
+    e.stopPropagation();
+    const el = videoRef.current;
+    if (!el) return;
+    if (el.paused) {
+      void el.play().catch(() => {});
+    } else {
+      el.pause();
+    }
+  }
+
   return (
-    <div className="video-tile jm-video-preview nodrag nopan nowheel"
-      onDoubleClick={e => e.stopPropagation()}>
-      <video key={attempt} controls playsInline preload="metadata"
+    <div className="video-tile jm-video-preview">
+      <video
+        ref={videoRef}
+        key={attempt}
+        playsInline
+        loop
+        preload="metadata"
         src={mediaUrl(mediaId) + (attempt ? `?preview=${attempt}` : "")}
-        aria-label={label} onError={() => setFailed(true)} />
+        aria-label={label}
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+        onEnded={() => setPlaying(false)}
+        onError={() => setFailed(true)}
+      />
       {failed && (
-        <div className="jm-video-preview__fallback" role="status">
+        <div className="jm-video-preview__fallback nodrag" role="status">
           {attempt < 3 ? "正在读取视频…" :
-            <button type="button" onClick={() => { setAttempt(0); setFailed(false); }}>重新加载预览</button>}
+            <button type="button" onClick={(e) => { e.stopPropagation(); setAttempt(0); setFailed(false); }}>重新加载预览</button>}
         </div>
       )}
-      <button type="button" className="jm-video-preview__details" onClick={onDetails}
-        aria-label={`${label}：查看详情`}>详情</button>
+      {!failed && (
+        <button
+          type="button"
+          className="jm-video-preview__play nodrag"
+          onClick={toggleInlinePlay}
+          onDoubleClick={(e) => e.stopPropagation()}
+          aria-label={playing ? `暂停 ${label}` : `预览播放 ${label}`}
+          title={playing ? "暂停画布预览" : "画布内快速播放"}
+        >
+          {playing ? "⏸ 暂停" : "▶ 播放"}
+        </button>
+      )}
+      <button
+        type="button"
+        className="jm-video-preview__details nodrag"
+        onClick={(e) => {
+          e.stopPropagation();
+          onDetails();
+        }}
+        onDoubleClick={(e) => e.stopPropagation()}
+        aria-label={`${label}：打开视频展示页`}
+        title="进入官方风格视频展示页与时间轴播控"
+      >
+        ⛶ 展示页
+      </button>
     </div>
   );
 }
@@ -691,8 +728,8 @@ function VideoBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }) {
           return id ? <VideoPreviewTile key={`${i}:${id}`} mediaId={id} label={label} onDetails={() => open(i)} /> :
             <div key={i} className="video-tile jm-video-empty">
               {partial && (data.slotErrors?.[i] || ids[i] === null) ?
-                <button type="button" className="nodrag" onClick={() => open(i)}>此片段未生成 · 查看原因</button>
-                : processing ? "等待视频" : data.status === "error" ? "暂无可播放的视频" : "选中节点，编写视频提示词"}
+                <button type="button" className="nodrag" onClick={(e) => { e.stopPropagation(); open(i); }}>此片段未生成 · 查看原因</button>
+                : processing ? "等待视频" : data.status === "error" ? "暂无可播放的视频" : "双击节点，配置视频参数与提示词"}
             </div>;
         })}
       </div>
@@ -829,8 +866,9 @@ function VisualAssetBody({ rfId, data }: { rfId: string; data: FlowboardNodeData
     setRefMediaId(null);
   }
 
-  function openGenerate() {
-    selectForContextualGeneration(rfId);
+  function openGenerate(e?: React.MouseEvent) {
+    e?.stopPropagation();
+    useGenerationStore.getState().openGenerationDialog(rfId, data.prompt ?? "");
   }
 
   if (!mediaId) {
@@ -1177,14 +1215,6 @@ function downloadExt(type: string): string {
   return "png";
 }
 
-function selectForContextualGeneration(rfId: string) {
-  const { nodes, setNodes } = useBoardStore.getState();
-  setNodes(nodes.map((node) => {
-    const selected = node.id === rfId;
-    return Boolean(node.selected) === selected ? node : { ...node, selected };
-  }));
-}
-
 export function NodeCard(props: NodeProps<FlowNode>) {
   const data = props.data;
   const isNote = data.type === "note";
@@ -1200,14 +1230,6 @@ export function NodeCard(props: NodeProps<FlowNode>) {
     ? Math.max(0, historyList.findIndex((h) => h.mediaId === data.mediaId))
     : Math.max(0, historyList.length - 1);
   const showHistoryBar = historyList.length >= 2 && !isProcessing;
-  const showQuickDerive =
-    Boolean(props.selected) &&
-    !isProcessing &&
-    !llmBusy &&
-    Boolean(data.mediaId) &&
-    (data.type === "image" || data.type === "character" || data.type === "visual_asset");
-  const [quickBusy, setQuickBusy] = useState<string | null>(null);
-  const [openQuickMenu, setOpenQuickMenu] = useState<"angle" | "light" | null>(null);
   const hasCustomSize = useBoardStore((s) => {
     const cur = s.nodes.find((it) => it.id === props.id);
     if (!cur) return false;
@@ -1217,38 +1239,18 @@ export function NodeCard(props: NodeProps<FlowNode>) {
     );
   });
 
-  useEffect(() => {
-    if (!props.selected) {
-      setOpenQuickMenu(null);
-    }
-  }, [props.selected]);
-
-  async function runQuickAction(key: string, fn: () => Promise<void>) {
-    if (quickBusy) return;
-    setOpenQuickMenu(null);
-    setQuickBusy(key);
-    try {
-      await fn();
-    } catch (err) {
-      useGenerationStore.setState({
-        error: err instanceof Error ? err.message : "快捷衍生操作失败",
-      });
-    } finally {
-      setQuickBusy(null);
-    }
-  }
-
   function handleGenerate(e: React.MouseEvent) {
     e.stopPropagation();
     if (llmBusy || isProcessing) return;
-    useGenerationStore.getState().openGenerationDialog(props.id, data.prompt ?? "");
-    if (data.type === "video") {
-      requestAnimationFrame(() => {
-        const ta = document.querySelector<HTMLTextAreaElement>(".jm-context-generator textarea");
-        ta?.focus();
-        ta?.scrollIntoView({ block: "nearest" });
-      });
-    }
+    const initialPrompt =
+      (data.type === "Storyboard" ? data.aiBrief : data.prompt) ?? "";
+    useGenerationStore.getState().openGenerationDialog(props.id, initialPrompt);
+  }
+
+  function handlePreview(e: React.MouseEvent) {
+    e.stopPropagation();
+    if (!downloadable) return;
+    useGenerationStore.getState().openResultViewer(props.id, 0);
   }
 
   function handleDownload(e: React.MouseEvent) {
@@ -1362,6 +1364,19 @@ export function NodeCard(props: NodeProps<FlowNode>) {
               <button
                 type="button"
                 className="node-header__btn"
+                onClick={handlePreview}
+                aria-label={data.type === "video" ? "打开视频展示页" : "全屏预览成品"}
+                title={data.type === "video" ? "进入官方风格视频展示页" : "全屏预览成品与高清重塑"}
+              >
+                <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M3.5 8V4.5H7M13 4.5h3.5V8M16.5 12v3.5H13M7 15.5H3.5V12" />
+                </svg>
+              </button>
+            )}
+            {downloadable && (
+              <button
+                type="button"
+                className="node-header__btn"
                 onClick={handleDownload}
                 aria-label="下载媒体文件"
                 title="下载到本地"
@@ -1376,8 +1391,8 @@ export function NodeCard(props: NodeProps<FlowNode>) {
                 type="button"
                 className="node-header__btn"
                 onClick={handleGenerate}
-                aria-label={data.type === "video" ? "编辑视频生成参数" : "打开高级生成设置"}
-                title={data.type === "video" ? "编辑视频生成参数" : "高级生成设置"}
+                aria-label="打开详细参数"
+                title="打开详细参数与提示词（也可双击节点）"
                 disabled={llmBusy || isProcessing}
               >
                 <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
@@ -1432,135 +1447,6 @@ export function NodeCard(props: NodeProps<FlowNode>) {
           >
             ›
           </button>
-        </div>
-      )}
-
-      {showQuickDerive && (
-        <div
-          className="jm-quick-derive-bar nodrag nopan"
-          role="toolbar"
-          aria-label="单图快捷创作"
-          onDoubleClick={(e) => e.stopPropagation()}
-        >
-          <button
-            type="button"
-            className="jm-quick-derive-btn"
-            disabled={quickBusy !== null}
-            onClick={(e) => {
-              e.stopPropagation();
-              void runQuickAction("prev", () => derivePrevScene(props.id));
-            }}
-            title="基于当前画面倒推 5 秒前镜头（Flow 0 积分）"
-          >
-            ⏮ 前一幕
-          </button>
-          <button
-            type="button"
-            className="jm-quick-derive-btn"
-            disabled={quickBusy !== null}
-            onClick={(e) => {
-              e.stopPropagation();
-              void runQuickAction("next", () => deriveNextScene(props.id));
-            }}
-            title="基于当前画面推演 3 秒后下一幕（Flow 0 积分）"
-          >
-            ⏭ 下一幕
-          </button>
-          <button
-            type="button"
-            className={`jm-quick-derive-btn${openQuickMenu === "angle" ? " jm-quick-derive-btn--active" : ""}`}
-            disabled={quickBusy !== null}
-            onClick={(e) => {
-              e.stopPropagation();
-              setOpenQuickMenu((m) => (m === "angle" ? null : "angle"));
-            }}
-            title="锁定主体并衍生其他电影机位视角"
-          >
-            🎥 换机位
-          </button>
-          <button
-            type="button"
-            className={`jm-quick-derive-btn${openQuickMenu === "light" ? " jm-quick-derive-btn--active" : ""}`}
-            disabled={quickBusy !== null}
-            onClick={(e) => {
-              e.stopPropagation();
-              setOpenQuickMenu((m) => (m === "light" ? null : "light"));
-            }}
-            title="保持构图与主体，重塑电影级环境光影"
-          >
-            💡 重打光
-          </button>
-          <button
-            type="button"
-            className="jm-quick-derive-btn"
-            disabled={quickBusy !== null}
-            onClick={(e) => {
-              e.stopPropagation();
-              setOpenQuickMenu(null);
-              window.dispatchEvent(
-                new CustomEvent("flowboard:open-layer-editor", {
-                  detail: { rfId: props.id, tab: "inpaint" },
-                }),
-              );
-            }}
-            title="打开图层精修画板（局部涂抹重绘 / 消除笔 / 比例扩图 / 多图拼贴）"
-          >
-            ❖ 局部精修
-          </button>
-          <button
-            type="button"
-            className="jm-quick-derive-btn jm-quick-derive-btn--cyan"
-            disabled={quickBusy !== null}
-            onClick={(e) => {
-              e.stopPropagation();
-              void runQuickAction("2k", () => upscaleImageNode2K(props.id, "2K"));
-            }}
-            title="调用 Flow SPrCad 0 积分 2K 高清重塑并记录历史版本"
-          >
-            {quickBusy === "2k" ? "2K…" : "🔍 2K超清"}
-          </button>
-
-          {openQuickMenu === "angle" && (
-            <div className="jm-quick-derive-menu" role="menu" aria-label="选择机位角度">
-              {CAMERA_ANGLE_PRESETS.map((preset) => (
-                <button
-                  key={preset.key}
-                  type="button"
-                  role="menuitem"
-                  className="jm-quick-derive-menu__item"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void runQuickAction(`angle:${preset.key}`, () =>
-                      deriveCameraAngle(props.id, preset.key),
-                    );
-                  }}
-                >
-                  {preset.label}
-                </button>
-              ))}
-            </div>
-          )}
-
-          {openQuickMenu === "light" && (
-            <div className="jm-quick-derive-menu" role="menu" aria-label="选择电影布光风格">
-              {LIGHTING_PRESETS.map((preset) => (
-                <button
-                  key={preset.key}
-                  type="button"
-                  role="menuitem"
-                  className="jm-quick-derive-menu__item"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void runQuickAction(`light:${preset.key}`, () =>
-                      relightImageNode(props.id, preset.key),
-                    );
-                  }}
-                >
-                  {preset.label}
-                </button>
-              ))}
-            </div>
-          )}
         </div>
       )}
     </div>

@@ -68,6 +68,7 @@ export const OMNI_1_2_DURATIONS: readonly number[] = [
 // queue (no Flow plan, no extension needed). Picked per dispatch in the
 // GenerationDialog and sticky — persisted here like the model picks.
 export type MediaProviderKey = "flow" | "muse";
+export type VideoConfirmMode = "always" | "never";
 
 interface SettingsState {
   imageModel: ImageModelKey;
@@ -83,6 +84,7 @@ interface SettingsState {
   defaultVideoAspect: string;
   defaultVideoCount: OutputCountOption;
   mediaProvider: MediaProviderKey;
+  confirmBeforeVideoGen: VideoConfirmMode;
   setImageModel(model: ImageModelKey): void;
   setImageResolution(res: ImageResolutionKey): void;
   setImageThinkingLevel(level: ImageThinkingLevel): void;
@@ -96,6 +98,7 @@ interface SettingsState {
   setDefaultVideoAspect(aspect: string): void;
   setDefaultVideoCount(count: OutputCountOption): void;
   setMediaProvider(p: MediaProviderKey): void;
+  setConfirmBeforeVideoGen(mode: VideoConfirmMode): void;
 }
 
 const STORAGE_KEY = "flowboard.settings.v1";
@@ -114,6 +117,7 @@ interface PersistShape {
   defaultVideoAspect?: string;
   defaultVideoCount?: OutputCountOption;
   mediaProvider?: MediaProviderKey;
+  confirmBeforeVideoGen?: VideoConfirmMode;
 }
 
 function loadPersisted(): PersistShape {
@@ -149,6 +153,7 @@ const VALID_VIDEO_QUALITIES: VideoQuality[] = ["fast", "lite", "quality", "lite_
 const VALID_VIDEO_RESOLUTIONS: VideoResolutionKey[] = ["360p", "720p", "1080p", "4k"];
 const VALID_OMNI_VERSIONS: OmniFlashVersion[] = ["1.1", "1.2"];
 const VALID_MEDIA_PROVIDERS: MediaProviderKey[] = ["flow", "muse"];
+const VALID_VIDEO_CONFIRM_MODES: VideoConfirmMode[] = ["always", "never"];
 
 function snapshotPersist(get: () => SettingsState): PersistShape {
   return {
@@ -165,6 +170,7 @@ function snapshotPersist(get: () => SettingsState): PersistShape {
     defaultVideoAspect: get().defaultVideoAspect,
     defaultVideoCount: get().defaultVideoCount,
     mediaProvider: get().mediaProvider,
+    confirmBeforeVideoGen: get().confirmBeforeVideoGen,
   };
 }
 
@@ -220,6 +226,11 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     persisted.mediaProvider && VALID_MEDIA_PROVIDERS.includes(persisted.mediaProvider)
       ? persisted.mediaProvider
       : "flow",
+  confirmBeforeVideoGen:
+    persisted.confirmBeforeVideoGen &&
+    VALID_VIDEO_CONFIRM_MODES.includes(persisted.confirmBeforeVideoGen)
+      ? persisted.confirmBeforeVideoGen
+      : "always",
   setImageModel(model) {
     set({ imageModel: model });
     persist(snapshotPersist(get));
@@ -272,6 +283,10 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   },
   setMediaProvider(p) {
     set({ mediaProvider: p });
+    persist(snapshotPersist(get));
+  },
+  setConfirmBeforeVideoGen(mode) {
+    set({ confirmBeforeVideoGen: mode });
     persist(snapshotPersist(get));
   },
 }));

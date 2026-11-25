@@ -2,7 +2,7 @@ import type { Dispatch, SetStateAction } from "react";
 import { mediaUrl } from "../../api/client";
 import { displayNodeTitle } from "../../constants/nodeLabels";
 import type { FlowNode } from "../../store/board";
-import type { UpstreamRefEntry } from "../../store/generation";
+import type { UpstreamRefEntry, VideoSubMode } from "../../store/generation";
 import type { VideoRefFrameMode } from "../../lib/videoFrame";
 
 interface PromptSourceNodeItem {
@@ -21,8 +21,8 @@ interface UpstreamReferencesSectionProps {
   isOmniVideo: boolean;
   isVideoFirstLastMode: boolean;
   isVideoTextMode: boolean;
-  videoSubMode: "auto" | "first_last" | "t2v";
-  setVideoSubMode: (mode: "auto" | "first_last" | "t2v") => void;
+  videoSubMode: VideoSubMode;
+  onSelectVideoSubMode: (mode: VideoSubMode) => void;
   videoCandidateFrames: VideoCandidateFrame[];
   firstFrameId: string;
   setFirstFrameId: (id: string) => void;
@@ -49,7 +49,7 @@ export function UpstreamReferencesSection({
   isVideoFirstLastMode,
   isVideoTextMode,
   videoSubMode,
-  setVideoSubMode,
+  onSelectVideoSubMode,
   videoCandidateFrames,
   firstFrameId,
   setFirstFrameId,
@@ -69,39 +69,90 @@ export function UpstreamReferencesSection({
   videoRefFrame,
   setVideoRefFrame,
 }: UpstreamReferencesSectionProps) {
+  const effectiveVideoMode: "t2v" | "ingredients" | "first_frame" | "first_last" =
+    videoCandidateFrames.length === 0 || videoSubMode === "t2v"
+      ? "t2v"
+      : videoSubMode === "first_last" && videoCandidateFrames.length >= 2
+        ? "first_last"
+        : videoSubMode === "ingredients"
+          ? "ingredients"
+          : videoSubMode === "first_frame"
+            ? "first_frame"
+            : isOmniVideo
+              ? "ingredients"
+              : "first_frame";
+
+  const hasAnyFrame = videoCandidateFrames.length >= 1;
+  const hasTwoFrames = videoCandidateFrames.length >= 2;
+
   return (
     <>
-      {isVideo && videoCandidateFrames.length >= 2 && (
+      {isVideo && (
         <div className="gen-dialog__field">
           <div className="gen-dialog__label-row">
-            <span className="gen-dialog__label">视频驱动方式</span>
+            <span className="gen-dialog__label">视频生成模式（首帧锁定为可选项）</span>
             <div className="aspect-chip-row">
               <button
                 type="button"
-                className={`aspect-chip${videoSubMode === "auto" ? " aspect-chip--active" : ""}`}
-                onClick={() => setVideoSubMode("auto")}
+                className={`aspect-chip${effectiveVideoMode === "t2v" ? " aspect-chip--active" : ""}`}
+                onClick={() => onSelectVideoSubMode("t2v")}
+                title="纯文生视频（YhhmEf）：不锁定首帧，完全按文本自由生成开场构图与运镜"
               >
-                {isOmniVideo ? "多图参考驱动" : "首帧/变体生视频"}
+                ✦ 纯文生视频
               </button>
               <button
                 type="button"
-                className={`aspect-chip${videoSubMode === "first_last" ? " aspect-chip--active" : ""}`}
-                onClick={() => setVideoSubMode("first_last")}
-                title="调用 Flow 原生首尾帧锁定接口（nprQif），精准控制视频起始与结束画面"
+                className={`aspect-chip${effectiveVideoMode === "ingredients" ? " aspect-chip--active" : ""}`}
+                disabled={!hasAnyFrame}
+                onClick={() => onSelectVideoSubMode("ingredients")}
+                title={
+                  hasAnyFrame
+                    ? "参考元素生视频（Flow Ingredients / Omni）：将连线图片作为角色/服饰/场景成分参考，不强制首帧像素一致，运镜更自由"
+                    : "连线至少 1 张参考图后可用"
+                }
               >
-                ⇄ 首尾帧锁定
+                ❖ 参考元素（不锁首帧）
               </button>
               <button
                 type="button"
-                className={`aspect-chip${videoSubMode === "t2v" ? " aspect-chip--active" : ""}`}
-                onClick={() => setVideoSubMode("t2v")}
-                title="忽略参考图，调用 Flow 纯文生视频（YhhmEf）"
+                className={`aspect-chip${effectiveVideoMode === "first_frame" ? " aspect-chip--active" : ""}`}
+                disabled={!hasAnyFrame}
+                onClick={() => onSelectVideoSubMode("first_frame")}
+                title={
+                  hasAnyFrame
+                    ? "首帧一致图生视频（Veo 3.1 i2v · 可选）：以选定参考图作为视频第 0 帧严格起拍"
+                    : "连线至少 1 张参考图后可用"
+                }
               >
-                纯文生视频
+                ▣ 首帧一致（可选）
               </button>
+              {hasTwoFrames && (
+                <button
+                  type="button"
+                  className={`aspect-chip${effectiveVideoMode === "first_last" ? " aspect-chip--active" : ""}`}
+                  onClick={() => onSelectVideoSubMode("first_last")}
+                  title="首尾帧锁定（nprQif）：精准控制视频起始帧与结束帧画面过渡"
+                >
+                  ⇄ 首尾帧锁定
+                </button>
+              )}
             </div>
           </div>
-          {videoSubMode === "first_last" && (
+
+          <p className="gen-dialog__hint">
+            {effectiveVideoMode === "t2v" &&
+              (hasAnyFrame
+                ? "当前已忽略上游参考图作为首帧，将调用 Flow 纯文生视频（YhhmEf）自由演绎开场构图。"
+                : "当前未连线参考图，已自动采用 Flow 纯文生视频（YhhmEf）。连线图片后可按需启用「参考元素」或「首帧一致」。")}
+            {effectiveVideoMode === "ingredients" &&
+              "官方参考元素模式（Omni Flash）：上游图片仅作为主体外貌/服装/场景参考（可用 @图1 引用），不再强制第 0 帧与原图像素锁死，适合自由运镜与全新构图。"}
+            {effectiveVideoMode === "first_frame" &&
+              "已显式启用「首帧一致」：视频第 0 帧将从下方勾选的图片无缝起拍；若希望角色保留特征但自由换构图，可随时切回「参考元素（不锁首帧）」。"}
+            {effectiveVideoMode === "first_last" &&
+              "已启用「首尾帧锁定」：视频将从选定首帧平滑过渡至指定尾帧。"}
+          </p>
+
+          {effectiveVideoMode === "first_last" && (
             <div className="gen-dialog__first-last-row">
               <div className="gen-dialog__first-last-slot">
                 <span className="gen-dialog__first-last-tag">首帧（Start）</span>
@@ -149,15 +200,15 @@ export function UpstreamReferencesSection({
       )}
 
       {isVideo &&
-        !isOmniVideo &&
+        effectiveVideoMode === "first_frame" &&
         !isVideoFirstLastMode &&
         !isVideoTextMode && (
           <div className="gen-dialog__field">
             <div className="gen-dialog__label-row">
               <span className="gen-dialog__label">
                 {sourceNode?.data.type === "video"
-                  ? "源视频参考"
-                  : "源图像变体"}
+                  ? "首帧来源（上游视频抽帧）"
+                  : "已启用首帧锁定 · 选择起始帧"}
                 {sourceMediaIds.length > 1 ? ` (${sourceMediaIds.length})` : ""}
               </span>
               {sourceMediaIds.length > 1 && (
@@ -236,11 +287,11 @@ export function UpstreamReferencesSection({
                 <p className="gen-dialog__hint">
                   {selectedSourceIdx.size === 0 ? (
                     <span style={{ color: "#f87171" }}>
-                      请至少勾选 1 个源参考以生成视频。
+                      请至少勾选 1 张起始首帧，或切换到上方「纯文生视频 / 参考元素」模式。
                     </span>
                   ) : (
                     <>
-                      将批量生成 <strong>{selectedSourceIdx.size} 条视频</strong>
+                      将以选定画面作为首帧生成 <strong>{selectedSourceIdx.size} 条视频</strong>
                       {selectedSourceIdx.size === sourceMediaIds.length
                         ? "（全部变体）"
                         : `（已选 ${selectedSourceIdx.size}/${sourceMediaIds.length} 个变体）`}
@@ -254,8 +305,8 @@ export function UpstreamReferencesSection({
             ) : (
               <div className="source-image-row source-image-row--empty">
                 {videoCandidateFrames.length === 0
-                  ? "当前未连线参考图 —— 可直接输入视频提示词走 Flow 原生纯文生视频（YhhmEf）"
-                  : "请先勾选至少一个用于生成的源参考"}
+                  ? "当前未连线参考图 —— 已采用 Flow 原生纯文生视频（YhhmEf）"
+                  : "请先勾选至少一个用于首帧生成的源参考"}
               </div>
             )}
           </div>

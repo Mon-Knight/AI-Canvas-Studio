@@ -670,11 +670,15 @@ export interface VisionDescribeResponse {
 export interface AutoPromptResponse {
   node_id: number;
   prompt: string;
+  safety_rewritten?: boolean;
+  safety_notes?: string[];
 }
 
 export interface AutoPromptBatchResponse {
   node_id: number;
   prompts: string[];
+  safety_rewritten?: boolean;
+  safety_notes?: string[];
 }
 
 export async function autoPromptBatch(

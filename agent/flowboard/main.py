@@ -161,7 +161,7 @@ def _resolve_agent_version() -> str:
                     return ver.strip()
             except Exception:  # noqa: BLE001
                 pass
-    return "1.1.4"
+    return "1.1.5"
 
 
 APP_VERSION = _resolve_agent_version()

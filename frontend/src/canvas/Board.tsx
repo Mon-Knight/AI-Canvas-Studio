@@ -8,8 +8,6 @@ import {
   applyNodeChanges,
   useReactFlow,
   useStore,
-  useInternalNode,
-  useViewport,
   type Connection,
   type EdgeChange,
   type NodeChange,
@@ -19,9 +17,7 @@ import {
 
 import { useBoardStore, type FlowNode, type NodeType } from "../store/board";
 import { useReferencesStore } from "../store/references";
-import { GenerationComposer } from "../components/GenerationDialog";
 import { SequencePlayerModal } from "../components/SequencePlayerModal";
-import "./ContextualPromptBar.css";
 import { NodeCard } from "./NodeCard";
 import { VariantEdge } from "./VariantEdge";
 import { ViewportCapsule } from "./ViewportCapsule";
@@ -224,57 +220,7 @@ function QuickCreatePopover({
 }
 
 const INITIAL_FIT_OPTIONS = { maxZoom: 1 };
-const CONTEXT_NODE_TYPES = new Set<NodeType>(["prompt", "image", "video", "character", "Storyboard"]);
 const ACCEPT_IMAGE_MIME = "image/png,image/jpeg,image/webp,image/gif";
-
-function supportsContextualBar(node: FlowNode): boolean {
-  if (CONTEXT_NODE_TYPES.has(node.data.type)) return true;
-  return node.data.type === "visual_asset" && !node.data.mediaId;
-}
-
-function ContextualPromptBar({ node }: { node: FlowNode }) {
-  const internal = useInternalNode(node.id);
-  const { x, y, zoom } = useViewport();
-  const width = useStore((state) => state.width);
-  const height = useStore((state) => state.height);
-  const measuredWidth = internal?.measured.width;
-  const measuredHeight = internal?.measured.height;
-  if (!internal || !measuredWidth || !measuredHeight || width < 120 || height < 120) return null;
-
-  const origin = internal.internals.positionAbsolute;
-  const left = x + origin.x * zoom;
-  const top = y + origin.y * zoom;
-  const right = left + measuredWidth * zoom;
-  const bottom = top + measuredHeight * zoom;
-  if (right < 0 || left > width || bottom < 0 || top > height) return null;
-
-  // Position in screen pixels: the bar follows pan/zoom while remaining readable.
-  const gutter = width >= 640 ? 70 : 12;
-  const panelWidth = Math.min(580, width - gutter * 2);
-  const center = (left + right) / 2;
-  const panelLeft = Math.max(gutter, Math.min(center - panelWidth / 2, width - gutter - panelWidth));
-  const below = height - bottom - 24;
-  const above = top - 70;
-  const preferAbove = below < 260 && above > below;
-  const fit = preferAbove ? above : below;
-  const fallback = fit < 220;
-
-  return (
-    <div
-      className="jm-context-anchor"
-      style={{
-        left: panelLeft,
-        width: panelWidth,
-        top: fallback ? undefined : preferAbove ? top - 34 : bottom + 12,
-        bottom: fallback ? 56 : undefined,
-        transform: !fallback && preferAbove ? "translateY(-100%)" : undefined,
-        maxHeight: fallback ? Math.min(480, Math.max(200, height - 114)) : fit,
-      }}
-    >
-      <GenerationComposer rfId={node.id} initialPrompt={(node.data.type === "Storyboard" ? node.data.aiBrief : node.data.prompt) ?? ""} inline />
-    </div>
-  );
-}
 
 export function Board() {
   const nodes = useBoardStore((s) => s.nodes);
@@ -582,6 +528,8 @@ export function Board() {
 
   const onNodeDoubleClick = useCallback(
     (event: React.MouseEvent, node: FlowNode) => {
+      const target = event.target as Element | null;
+      if (target?.closest("button,input,select,textarea")) return;
       const isGenerable = [
         "image",
         "video",
@@ -590,22 +538,14 @@ export function Board() {
         "Storyboard",
       ].includes(node.data.type);
       if (!isGenerable) return;
-      const s = useGenerationStore.getState();
-      if (node.data.type === "video") {
-        if ((event.target as Element).closest("video,button,input,select,textarea")) return;
-        s.openGenerationDialog(node.id, node.data.prompt ?? "");
-        return;
-      }
-      if (node.data.mediaId) {
-        s.openResultViewer(node.id);
-      } else {
-        s.openGenerationDialog(node.id, node.data.prompt ?? "");
-      }
+      const initialPrompt =
+        (node.data.type === "Storyboard" ? node.data.aiBrief : node.data.prompt) ?? "";
+      useGenerationStore.getState().openGenerationDialog(node.id, initialPrompt);
     },
     [],
   );
 
-  // 快捷键：选中节点按 g 打开生成/预览，按 l 切换资产库，多选 Ctrl/Cmd+G 编组分镜
+  // 快捷键：选中节点按 g 打开详细参数，按 l 切换资产库，多选 Ctrl/Cmd+G 编组分镜
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       const active = document.activeElement;
@@ -642,29 +582,22 @@ export function Board() {
         .nodes.filter(
           (n) =>
             n.selected &&
-            ["image", "prompt", "video", "character", "Storyboard"].includes(
+            ["image", "prompt", "video", "character", "Storyboard", "visual_asset"].includes(
               n.data.type,
             ),
         );
       if (selectedNodes.length === 0) return;
       e.preventDefault();
       const target = selectedNodes[0];
-      const s = useGenerationStore.getState();
-      if (target.data.mediaId && target.data.type !== "video") {
-        s.openResultViewer(target.id);
-      } else {
-        s.openGenerationDialog(target.id, target.data.prompt ?? "");
-      }
+      const initialPrompt =
+        (target.data.type === "Storyboard" ? target.data.aiBrief : target.data.prompt) ?? "";
+      useGenerationStore.getState().openGenerationDialog(target.id, initialPrompt);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  const dialogNodeId = useGenerationStore((state) => state.openDialog.rfId);
   const selectedNodes = nodes.filter((node) => node.selected);
-  const selected = selectedNodes.length === 1 && supportsContextualBar(selectedNodes[0])
-    ? selectedNodes[0]
-    : undefined;
 
   return (
     <div
@@ -819,11 +752,6 @@ export function Board() {
           onClose={closeQuickMenu}
         />
       </ReactFlow>
-      {selected && !quickMenu && (
-        <div hidden={dialogNodeId !== null}>
-          <ContextualPromptBar key={selected.id} node={selected} />
-        </div>
-      )}
       {selectedNodes.length >= 2 && (
         <div className="jm-multi-select-bar" role="toolbar" aria-label="多选节点批量操作">
           <span className="jm-multi-select-bar__count">

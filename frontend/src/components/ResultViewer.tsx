@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useGenerationStore } from "../store/generation";
+import { collectUpstreamRefEntries, useGenerationStore } from "../store/generation";
 import { estimateVideoUpscaleCreditCost } from "../constants/models";
 import { useBoardStore } from "../store/board";
 import { displayNodeTitle } from "../constants/nodeLabels";
@@ -12,7 +12,8 @@ import {
   type MediaStatus,
 } from "../api/client";
 import { countryLabel, vibeLabel } from "../constants/character";
-import { switchNodeHistoryVersion } from "../lib/quickDerive";
+import { deriveNextScene, derivePrevScene, switchNodeHistoryVersion } from "../lib/quickDerive";
+import { FlowVideoShowcase } from "./FlowVideoShowcase";
 
 const ICON: Record<string, string> = {
   character: "◎",
@@ -148,44 +149,8 @@ export function ResultViewer() {
     return { label: "—", isBadge: false };
   })();
 
-  // Upstream refs feeding this target. Walk EDGES (not just nodes) so
-  // each entry resolves to the variant the edge is pinned to — same
-  // logic as `collectUpstreamRefMediaIds` at dispatch. The chip then
-  // shows the exact thumbnail Flow will receive instead of always
-  // defaulting to the source's "active" mediaId.
-  const REF_TYPES = new Set(["character", "image", "visual_asset", "Storyboard", "video"]);
   const refSourceNodes = rfId
-    ? edges
-        .filter((e) => e.target === rfId)
-        .map((e) => {
-          const n = nodes.find((node) => node.id === e.source);
-          if (!n || !REF_TYPES.has(n.data.type)) return null;
-          const variants = Array.isArray(n.data.mediaIds) ? n.data.mediaIds : [];
-          const pin = (e.data?.sourceVariantIdx ?? null) as number | null;
-          let mediaId: string | undefined;
-          let variantIdx: number | null = null;
-          if (
-            pin !== null
-            && pin >= 0
-            && pin < variants.length
-            && typeof variants[pin] === "string"
-            && variants[pin]
-          ) {
-            mediaId = variants[pin] as string;
-            variantIdx = pin;
-          } else if (typeof n.data.mediaId === "string" && n.data.mediaId) {
-            mediaId = n.data.mediaId;
-          } else if (
-            variants.length > 0
-            && typeof variants[0] === "string"
-            && variants[0]
-          ) {
-            mediaId = variants[0] as string;
-          }
-          if (!mediaId) return null;
-          return { node: n, mediaId, variantIdx };
-        })
-        .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
+    ? collectUpstreamRefEntries(rfId, nodes, edges)
     : [];
 
   // Slot-aware mediaId resolution. When the node has a per-variant
@@ -239,11 +204,14 @@ export function ResultViewer() {
   // Keyboard handling
   useEffect(() => {
     if (rfId === null) return;
+    const isVid = data?.type === "video";
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
         closeResultViewer();
+        return;
       }
+      if (isVid) return;
       if (e.key === "ArrowRight" || e.key === " ") {
         e.preventDefault();
         setActiveIdx((i) => (i + 1) % Math.max(mediaIds.length, 1));
@@ -464,6 +432,54 @@ export function ResultViewer() {
     } finally {
       setUpscalingRes(null);
     }
+  }
+
+  if (isVideo && node) {
+    return (
+      <div
+        className="result-viewer-backdrop"
+        role="presentation"
+        onClick={(e) => {
+          if (e.target === e.currentTarget) closeResultViewer();
+        }}
+      >
+        <div ref={dialogRef}>
+          <FlowVideoShowcase
+            rfId={rfId}
+            node={node}
+            data={data}
+            nodeTitle={nodeTitle}
+            mediaIds={mediaIds}
+            slotErrors={data.slotErrors ?? []}
+            activeIdx={activeIdx}
+            setActiveIdx={setActiveIdx}
+            currentMediaId={currentMediaId ?? undefined}
+            currentSlotError={slotError}
+            mediaReady={mediaReady}
+            setMediaReady={setMediaReady}
+            cacheKey={cacheKey}
+            onRetryMedia={handleRefresh}
+            status={status}
+            refSourceNodes={refSourceNodes}
+            metadataModel={metadataModel}
+            aspectLabel={formatAspectRatio(data.aspectRatio)}
+            relativeTimeLabel={formatRelativeTime(data.renderedAt)}
+            llmBusy={llmBusy}
+            projectId={projectId}
+            savedFlash={savedFlash}
+            saving={saving}
+            upscalingRes={upscalingRes}
+            upscaleError={upscaleError}
+            onUpscale={(target) => handleUpscale(target)}
+            onClose={closeResultViewer}
+            onEditPrompt={handleEditPrompt}
+            onRegenerate={handleRegenerate}
+            onNewVariant={() => void handleNewVariant()}
+            onSaveToLibrary={() => void handleSaveToLibrary()}
+          />
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -788,26 +804,69 @@ export function ResultViewer() {
                 })()
               ) : (
                 ["image", "character", "visual_asset", "Storyboard"].includes(data.type) && (
-                  <div className="result-viewer__upscale-row">
-                    <button
-                      type="button"
-                      className="result-viewer__btn result-viewer__btn--upscale"
-                      onClick={() => void handleUpscale("2K")}
-                      disabled={upscalingRes !== null}
-                      title="调用官方 SPrCad 将当前图片高清重塑为 2K（Free 即可使用）"
-                    >
-                      {upscalingRes === "2K" ? "2K 处理中…" : "✨ 2K 高清重塑"}
-                    </button>
-                    <button
-                      type="button"
-                      className="result-viewer__btn result-viewer__btn--upscale"
-                      onClick={() => void handleUpscale("4K")}
-                      disabled={upscalingRes !== null}
-                      title="调用官方 SPrCad 将当前图片超清重塑为 4K（需 Ultra）"
-                    >
-                      {upscalingRes === "4K" ? "4K 处理中…" : "✨ 4K 超清重塑"}
-                    </button>
-                  </div>
+                  <>
+                    <div className="result-viewer__upscale-row">
+                      <button
+                        type="button"
+                        className="result-viewer__btn result-viewer__btn--upscale"
+                        onClick={() => void handleUpscale("2K")}
+                        disabled={upscalingRes !== null}
+                        title="调用官方 SPrCad 将当前图片高清重塑为 2K（Free 即可使用）"
+                      >
+                        {upscalingRes === "2K" ? "2K 处理中…" : "✨ 2K 高清重塑"}
+                      </button>
+                      <button
+                        type="button"
+                        className="result-viewer__btn result-viewer__btn--upscale"
+                        onClick={() => void handleUpscale("4K")}
+                        disabled={upscalingRes !== null}
+                        title="调用官方 SPrCad 将当前图片超清重塑为 4K（需 Ultra）"
+                      >
+                        {upscalingRes === "4K" ? "4K 处理中…" : "✨ 4K 超清重塑"}
+                      </button>
+                    </div>
+                    {data.type !== "Storyboard" && (
+                      <div className="result-viewer__upscale-row">
+                        <button
+                          type="button"
+                          className="result-viewer__btn"
+                          onClick={() => {
+                            closeResultViewer();
+                            void derivePrevScene(rfId);
+                          }}
+                          title="基于当前画面倒推 5 秒前镜头"
+                        >
+                          ⏮ 前一幕
+                        </button>
+                        <button
+                          type="button"
+                          className="result-viewer__btn"
+                          onClick={() => {
+                            closeResultViewer();
+                            void deriveNextScene(rfId);
+                          }}
+                          title="基于当前画面推演 3 秒后下一幕"
+                        >
+                          ⏭ 下一幕
+                        </button>
+                        <button
+                          type="button"
+                          className="result-viewer__btn"
+                          onClick={() => {
+                            closeResultViewer();
+                            window.dispatchEvent(
+                              new CustomEvent("flowboard:open-layer-editor", {
+                                detail: { rfId, tab: "inpaint" },
+                              }),
+                            );
+                          }}
+                          title="打开图层精修画板（局部涂抹重绘 / 消除笔 / 比例扩图）"
+                        >
+                          ❖ 局部精修
+                        </button>
+                      </div>
+                    )}
+                  </>
                 )
               ))}
             <button

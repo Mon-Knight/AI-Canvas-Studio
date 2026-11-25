@@ -1535,3 +1535,171 @@ async def test_check_async_keeps_synthetic_t2v_media_id_across_transient_as29s_n
     assert p2["operations"][0]["done"] is True
     assert p2["operations"][0]["media_entries"][0]["media_id"] == MEDIA
 
+
+# ── live Oct/Nov 2026 Flow wire-format regressions (null slot 3 / payload[3]) ─
+
+
+def _modern_gen_record(wf_id: str, proj_id: str, listing_id: str, outcome: int,
+                       *, error_pair=None, prompt: str = "在跳舞"):
+    status_cell = [outcome] if error_pair is None else [outcome, list(error_pair), [error_pair[1]]]
+    details = [
+        [1795496113, 123456000],
+        prompt,
+        None,
+        None,
+        None,
+        None,
+        [None, [["veo_3_1_i2v_lite", 1, None, None, 2, 1]], [[None, None, [[[prompt]]]]], None, 1],
+        None,
+        status_cell,
+        1,
+    ]
+    return [wf_id, proj_id, listing_id, None, None, details, None, [[None, 123, None, None, None, None, None, prompt, None]]]
+
+
+@pytest.mark.asyncio
+async def test_eb1hjf_modern_submit_extracts_workflow_id_and_polls_outcome3_directly():
+    """Live eb1hJf submit returns listing stub at [2] and generation record at [3].
+
+    Reading payload[2][0][0] grabbed the listing id instead of the workflow id,
+    which made jwpduf answer "Media not found." forever. Extracting wf_id from
+    payload[3] and recognising outcome==3 (with slot 3 == null) resolves the
+    clip directly via as29s without downloading Zzl0ze.
+    """
+    listing_id = "2d26bb29-dfe4-4c39-a31a-ea34813ee976"
+    wf_id = "77777777-8888-4999-aaaa-bbbbbbbbbbbb"
+    submit_payload = [
+        None,
+        881,
+        [[listing_id, None, None, ["在跳舞", [1795496113, 0], None, None, wf_id, "CLIENT-UUID", [1795496113, 0]], PID]],
+        [[_modern_gen_record(wf_id, PID, listing_id, fb.OUTCOME_SUBMITTED)]],
+    ]
+    rec = BatchRecorder(responses={
+        fb.RPC_GEN_VIDEO: [batch_envelope(fb.RPC_GEN_VIDEO, submit_payload)],
+        fb.RPC_OPERATION: [
+            batch_envelope(fb.RPC_OPERATION, [None, None, [[_modern_gen_record(wf_id, PID, listing_id, fb.OUTCOME_RUNNING)]]]),
+            batch_envelope(fb.RPC_OPERATION, [None, None, [[_modern_gen_record(wf_id, PID, listing_id, fb.OUTCOME_OK)]]]),
+        ],
+        fb.RPC_MEDIA: [
+            batch_envelope(fb.RPC_MEDIA, media_urls_payload(wf_id, video=True, image=True)),
+        ],
+    })
+    sdk = FlowSDK(client=rec)  # type: ignore[arg-type]
+    submitted = await sdk.gen_video(
+        prompt="在跳舞",
+        project_id=PID,
+        start_media_id=MEDIA,
+        aspect_ratio="VIDEO_ASPECT_RATIO_LANDSCAPE",
+        paygate_tier=TIER,
+        video_quality="lite",
+    )
+    assert submitted.get("error") is None
+    assert submitted["operation_names"] == [wf_id]
+    assert sdk._operation_submit_media[wf_id] == wf_id
+
+    # Round 1: jwpduf reports outcome 2 (running), slot 3 is null -> PENDING
+    p1 = await sdk.check_async([wf_id])
+    assert p1["operations"][0]["done"] is False
+    assert rec.rpcs(fb.RPC_PROJECT_MEDIA) == []
+    assert rec.rpcs(fb.RPC_MEDIA) == []
+
+    # Round 2: jwpduf reports outcome 3 (done), slot 3 is null -> direct as29s -> SUCCESSFUL
+    p2 = await sdk.check_async([wf_id])
+    assert p2["operations"][0]["done"] is True
+    assert p2["operations"][0]["status"] == "MEDIA_GENERATION_STATUS_SUCCESSFUL"
+    assert p2["operations"][0]["media_entries"][0]["media_id"] == wf_id
+    assert "/video/" in p2["operations"][0]["media_entries"][0]["url"]
+    assert rec.rpcs(fb.RPC_PROJECT_MEDIA) == []
+
+
+def test_read_operation_extracts_workflow_id_from_listing_stub_without_payload3():
+    """Even if a submit omits payload[3], extract wf_id from listing stub detail[4]."""
+    listing_id = "2d26bb29-dfe4-4c39-a31a-ea34813ee976"
+    wf_id = "77777777-8888-4999-aaaa-bbbbbbbbbbbb"
+    stub_only = [
+        None,
+        881,
+        [[listing_id, None, None, ["在跳舞", [1, 2], None, None, wf_id, "CLIENT-UUID", [1, 2]], PID]],
+    ]
+    op = fb.read_operation(stub_only)
+    assert op.operation_id == wf_id
+    assert op.project_id == PID
+    assert op.media_id == wf_id
+
+
+def test_find_media_id_extracts_wf_id_from_null_slot3_generation_record_and_detail5():
+    """Zzl0ze generation records carry [wfId, projId, listingId, null, null, [details...]].
+
+    Because slot 3 changed from "CAE" to null, listingId is followed by
+    `",null,null,[` just like a listing stub, while details[4] is null. Both
+    find_media_id_in_text and find_media_id must extract wfId at slot 0.
+    """
+    import json
+
+    listing_id = "2d26bb29-dfe4-4c39-a31a-ea34813ee976"
+    wf_id = "77777777-8888-4999-aaaa-bbbbbbbbbbbb"
+    gen_rec = _modern_gen_record(wf_id, PID, listing_id, fb.OUTCOME_OK)
+    wrb = json.dumps([["wrb.fr", fb.RPC_PROJECT_MEDIA, json.dumps([[gen_rec]]), None, None, None, "generic"]])
+
+    assert fb.find_media_id_in_text(wrb, listing_id) == wf_id
+    assert fb.find_media_id([[gen_rec]], listing_id) == wf_id
+
+    # Also handle upstream flowkit's detail[5] == opId -> detail[4] == mediaId shape
+    asset_id = "aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb"
+    op_slot5 = "cccccccc-1111-4222-8333-dddddddddddd"
+    stub_detail5 = [[asset_id, None, None, ["title", [1, 2], True, None, wf_id, op_slot5, True], PID]]
+    wrb_detail5 = json.dumps([["wrb.fr", fb.RPC_PROJECT_MEDIA, json.dumps(stub_detail5), None, None, None, "generic"]])
+    assert fb.find_media_id_in_text(wrb_detail5, op_slot5) == wf_id
+    assert fb.find_media_id(stub_detail5, op_slot5) == wf_id
+
+
+@pytest.mark.asyncio
+async def test_check_async_fails_fast_on_flow_status4_job_failed_message():
+    """gflow-cli #1111: status 4 with gRPC code 13 'Generation job finished with state: FAILED' fails fast."""
+    listing_id = "2d26bb29-dfe4-4c39-a31a-ea34813ee976"
+    wf_id = "77777777-8888-4999-aaaa-bbbbbbbbbbbb"
+    failed_rec = _modern_gen_record(
+        wf_id, PID, listing_id, fb.OUTCOME_COMPLAINT,
+        error_pair=(13, "Generation job finished with state: FAILED"),
+    )
+    rec = BatchRecorder(responses={
+        fb.RPC_OPERATION: [
+            batch_envelope(fb.RPC_OPERATION, [None, None, [[failed_rec]]]),
+            batch_envelope(fb.RPC_OPERATION, [None, None, [[failed_rec]]]),
+        ],
+        fb.RPC_PROJECT_MEDIA: ["", ""],
+    })
+    sdk = FlowSDK(client=rec)  # type: ignore[arg-type]
+    p1 = await sdk.check_async([wf_id])
+    assert p1["operations"][0]["done"] is False
+    p2 = await sdk.check_async([wf_id])
+    assert p2["operations"][0]["done"] is True
+    assert p2["operations"][0]["status"] == "MEDIA_GENERATION_STATUS_FAILED"
+    assert "FAILED" in p2["operations"][0]["error"]
+
+
+@pytest.mark.asyncio
+async def test_check_async_direct_hint_falls_back_to_zzl0ze_on_as29s_not_found():
+    """If a direct submit/outcome==3 hint returns as29s [5], immediately fall back to Zzl0ze."""
+    wf_id = "77777777-8888-4999-aaaa-bbbbbbbbbbbb"
+    listing_id = "2d26bb29-dfe4-4c39-a31a-ea34813ee976"
+    real_mid = "eeeeeeee-1111-4222-8333-ffffffffffff"
+    done_rec = _modern_gen_record(wf_id, PID, listing_id, fb.OUTCOME_OK)
+    rec = BatchRecorder(responses={
+        fb.RPC_OPERATION: [batch_envelope(fb.RPC_OPERATION, [None, None, [[done_rec]]])],
+        fb.RPC_PROJECT_MEDIA: [listing_payload_text(wf_id, real_mid)],
+        fb.RPC_MEDIA: [
+            batch_error_envelope(fb.RPC_MEDIA, code=[5]),
+            batch_envelope(fb.RPC_MEDIA, media_urls_payload(real_mid, video=True)),
+        ],
+    })
+    sdk = FlowSDK(client=rec)  # type: ignore[arg-type]
+    sdk._remember_operation(wf_id, PID, media_id=wf_id)
+
+    out = await sdk.check_async([wf_id])
+    assert out["operations"][0]["done"] is True
+    assert out["operations"][0]["media_entries"][0]["media_id"] == real_mid
+    assert wf_id not in sdk._operation_submit_media
+    assert sdk._operation_media[wf_id] == real_mid
+
+

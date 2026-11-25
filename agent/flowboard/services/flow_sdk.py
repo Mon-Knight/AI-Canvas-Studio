@@ -470,6 +470,8 @@ class FlowSDK(FlowSDKVideoMixin):
         self._operation_projects: dict[str, str] = {}
         #: operation id -> media id, once as29s or jwpduf has confirmed it
         self._operation_media: dict[str, str] = {}
+        #: operation id -> candidate as29s media id returned directly on submit
+        self._operation_submit_media: dict[str, str] = {}
         #: operation id -> how many rounds we have polled it
         self._operation_polls: dict[str, int] = {}
         #: operation id -> consecutive policy/safety complaint count on jwpduf
@@ -524,16 +526,25 @@ class FlowSDK(FlowSDKVideoMixin):
             return pinned
         raise fb.FlowBatchError(NO_FLOW_PROJECT)
 
-    def _remember_operation(self, operation_id: str, project_id: str) -> None:
-        """Note which project an operation belongs to, for the listing lookup."""
+    def _remember_operation(
+        self,
+        operation_id: str,
+        project_id: str,
+        *,
+        media_id: Optional[str] = None,
+    ) -> None:
+        """Note which project (and optional submit-time media id) an operation belongs to."""
         if not operation_id:
             return
         if len(self._operation_projects) > self._CACHE_LIMIT:
             self._operation_projects.clear()
             self._operation_media.clear()
+            self._operation_submit_media.clear()
             self._operation_polls.clear()
             self._operation_policy_strikes.clear()
         self._operation_projects[operation_id] = project_id
+        if media_id:
+            self._operation_submit_media[operation_id] = media_id
 
     # ── project listing / creation (both unported) ─────────────────────────
     async def search_user_projects(
