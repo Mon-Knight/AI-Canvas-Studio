@@ -49,6 +49,12 @@ from flowboard.worker.video_handlers import (
     _maybe_upscale_video_slots,
     _poll_and_ingest_video_ops,
 )
+from flowboard.worker.music_handlers import (
+    _handle_edit_music,
+    _handle_effect_music,
+    _handle_gen_music,
+    _handle_split_stems,
+)
 from flowboard.worker.settlement import (
     _commit_settlement,
     _expects_media,
@@ -119,6 +125,10 @@ _DEFAULT_HANDLERS: dict[str, Handler] = {
     "gen_video_first_last": _handle_gen_video_first_last,
     "gen_video_text": _handle_gen_video_text,
     "edit_image": _handle_edit_image,
+    "gen_music": _handle_gen_music,
+    "edit_music": _handle_edit_music,
+    "split_stems": _handle_split_stems,
+    "effect_music": _handle_effect_music,
 }
 
 

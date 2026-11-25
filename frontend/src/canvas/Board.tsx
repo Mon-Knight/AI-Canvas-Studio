@@ -23,6 +23,7 @@ import { useBoardStore, type FlowNode, type NodeType } from "../store/board";
 import { useReferencesStore } from "../store/references";
 import { SequencePlayerModal } from "../components/SequencePlayerModal";
 import { GenerationComposer } from "../components/GenerationDialog";
+import { MusicComposerPanel } from "../components/generation/MusicComposerPanel";
 import { NodeCard } from "./NodeCard";
 import { SelectionActionBar } from "./SelectionActionBar";
 import { SnapGuidesOverlay } from "./SnapGuidesOverlay";
@@ -36,11 +37,13 @@ import {
 } from "../lib/smartSnapGuides";
 import { useGenerationStore } from "../store/generation";
 import { patchNode, uploadImage } from "../api/client";
+import { uploadAudioFile } from "../api/music";
 import { requestAutoBrief } from "../api/autoBrief";
 import { pickImageFiles } from "../lib/filePicker";
 import { STARTER_RECIPES } from "../constants/starterTemplates";
 import {
   IconAssetLibrary,
+  IconAudio,
   IconImage,
   IconNote,
   IconStoryboard,
@@ -57,6 +60,7 @@ const nodeTypes = {
   character: NodeCard,
   image: NodeCard,
   video: NodeCard,
+  audio: NodeCard,
   prompt: NodeCard,
   note: NodeCard,
   visual_asset: NodeCard,
@@ -88,6 +92,7 @@ const PANE_CREATE_ITEMS: Array<{
   { type: "prompt", label: "文本", desc: "编写脚本与提示词", renderIcon: () => <IconText size={15} /> },
   { type: "image", label: "图片", desc: "文生图 / 多参考合成", renderIcon: () => <IconImage size={15} /> },
   { type: "video", label: "视频", desc: "图生视频 / 多镜头动态", renderIcon: () => <IconVideo size={15} /> },
+  { type: "audio", label: "音频", desc: "Flow Music 配乐 / 歌曲 / 分轨", renderIcon: () => <IconAudio size={15} /> },
   { type: "character", label: "主体", desc: "动漫 / 真人 / 3D / 萌宠设定", renderIcon: () => <IconSubject size={15} /> },
   { type: "visual_asset", label: "物品素材", desc: "商品/道具参考与精修", renderIcon: () => <IconVisualAsset size={15} /> },
   { type: "Storyboard", label: "故事板", desc: "连续分镜宫格生成", renderIcon: () => <IconStoryboard size={15} /> },
@@ -101,6 +106,7 @@ const EDGE_DROP_ITEMS: Array<{
 }> = [
   { type: "image", label: "生成图片", renderIcon: () => <IconImage size={15} /> },
   { type: "video", label: "生成视频", renderIcon: () => <IconVideo size={15} /> },
+  { type: "audio", label: "生成配乐/音频", renderIcon: () => <IconAudio size={15} /> },
   { type: "character", label: "生成主体", renderIcon: () => <IconSubject size={15} /> },
   { type: "Storyboard", label: "生成故事板", renderIcon: () => <IconStoryboard size={15} /> },
 ];
@@ -316,7 +322,20 @@ function AnchoredNodeDropdownInner({ rfId, prompt }: { rfId: string; prompt: str
 function AnchoredNodeDropdown() {
   const rfId = useGenerationStore((s) => s.openDialog.rfId);
   const prompt = useGenerationStore((s) => s.openDialog.prompt);
+  const closeGenerationDialog = useGenerationStore((s) => s.closeGenerationDialog);
+  const targetType = useBoardStore((s) => (rfId ? s.nodes.find((n) => n.id === rfId)?.data.type : undefined));
   if (rfId === null) return null;
+  if (targetType === "audio") {
+    return createPortal(
+      <MusicComposerPanel
+        key={rfId}
+        rfId={rfId}
+        initialPrompt={prompt}
+        onClose={closeGenerationDialog}
+      />,
+      document.body,
+    );
+  }
   return <AnchoredNodeDropdownInner key={rfId} rfId={rfId} prompt={prompt} />;
 }
 
@@ -504,6 +523,57 @@ export function Board() {
     [addNodeOfType],
   );
 
+  const uploadAudiosAtPosition = useCallback(
+    async (files: File[], baseFlowPos: { x: number; y: number }) => {
+      if (files.length === 0) return;
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const flowPos = { x: baseFlowPos.x + i * 36, y: baseFlowPos.y + i * 36 };
+        const rfId = await addNodeOfType("audio", flowPos);
+        if (!rfId) continue;
+        const dbId = parseInt(rfId, 10);
+        const cleanTitle = file.name.replace(/\.[^.]+$/, "") || "音频素材";
+        useBoardStore.getState().updateNodeData(rfId, {
+          title: cleanTitle,
+          musicTitle: cleanTitle,
+          status: "running",
+        });
+        try {
+          const resp = await uploadAudioFile(file, isNaN(dbId) ? undefined : dbId);
+          const nowIso = new Date().toISOString();
+          useBoardStore.getState().updateNodeData(rfId, {
+            title: cleanTitle,
+            musicTitle: cleanTitle,
+            mediaId: resp.media_id,
+            mediaIds: [resp.media_id],
+            variantCount: 1,
+            status: "done",
+            renderedAt: nowIso,
+          });
+          if (!isNaN(dbId)) {
+            await patchNode(dbId, {
+              status: "done",
+              data: {
+                title: cleanTitle,
+                musicTitle: cleanTitle,
+                mediaId: resp.media_id,
+                mediaIds: [resp.media_id],
+                variantCount: 1,
+                renderedAt: nowIso,
+              },
+            }).catch(() => {});
+          }
+        } catch (err) {
+          useBoardStore.getState().updateNodeData(rfId, {
+            status: "error",
+            error: err instanceof Error ? err.message : "上传音频失败",
+          });
+        }
+      }
+    },
+    [addNodeOfType],
+  );
+
   const onCanvasDrop = useCallback(
     async (e: React.DragEvent) => {
       dragDepthRef.current = 0;
@@ -543,15 +613,28 @@ export function Board() {
         return;
       }
 
-      // 3. 本地图片文件直接拖入空白画布自动创建节点
-      const droppedFiles = allFiles.filter((f) => f.type.startsWith("image/"));
-      if (droppedFiles.length === 0) return;
+      // 3. 本地图片 / 音频文件直接拖入空白画布自动创建节点
+      const droppedImages = allFiles.filter((f) => f.type.startsWith("image/"));
+      const droppedAudios = allFiles.filter(
+        (f) =>
+          f.type.startsWith("audio/") ||
+          /\.(mp3|wav|m4a|ogg|aac)$/i.test(f.name),
+      );
+      if (droppedImages.length === 0 && droppedAudios.length === 0) return;
       e.preventDefault();
       e.stopPropagation();
       const flowPos = screenToFlowPosition({ x: e.clientX, y: e.clientY });
-      await uploadImagesAtPosition(droppedFiles, flowPos);
+      if (droppedImages.length > 0) {
+        await uploadImagesAtPosition(droppedImages, flowPos);
+      }
+      if (droppedAudios.length > 0) {
+        await uploadAudiosAtPosition(droppedAudios, {
+          x: flowPos.x + droppedImages.length * 40,
+          y: flowPos.y,
+        });
+      }
     },
-    [screenToFlowPosition, uploadImagesAtPosition, importHuabuFile, fitView],
+    [screenToFlowPosition, uploadImagesAtPosition, uploadAudiosAtPosition, importHuabuFile, fitView],
   );
 
   const onNodesChange = useCallback(
@@ -772,10 +855,11 @@ export function Board() {
   const onNodeDoubleClick = useCallback(
     (event: React.MouseEvent, node: FlowNode) => {
       const target = event.target as Element | null;
-      if (target?.closest("button,input,select,textarea")) return;
+      if (target?.closest("button,input,select,textarea,audio,a")) return;
       const isGenerable = [
         "image",
         "video",
+        "audio",
         "visual_asset",
         "character",
         "Storyboard",
@@ -855,7 +939,7 @@ export function Board() {
         .nodes.filter(
           (n) =>
             n.selected &&
-            ["image", "prompt", "video", "character", "Storyboard", "visual_asset"].includes(
+            ["image", "prompt", "video", "audio", "character", "Storyboard", "visual_asset"].includes(
               n.data.type,
             ),
         );
@@ -926,7 +1010,7 @@ export function Board() {
         <div className="jm-drop-hint" aria-live="polite">
           <div className="jm-drop-hint__card">
             <JimengPrismLogo size={22} />
-            <span>松开鼠标 · 导入 .huabu 创作配方或上传图片素材</span>
+            <span>松开鼠标 · 导入 .huabu 创作配方、图片或本地音频素材</span>
           </div>
         </div>
       )}

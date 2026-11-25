@@ -92,6 +92,18 @@ export function humanizeBackendError(token: string): string | null {
   if (t.includes("rpcerror:") && t.includes("failed: [3]")) {
     return "Flow 接口拒绝了当前生成参数组合（错误码 [3]：例如 Veo 3.1 不支持 360p 草稿分辨率，仅支持 720p 起），请切换为 720p 标准清晰度后重试。";
   }
+  if (t.includes("flowmusic_not_logged_in")) {
+    return "当前账号尚未登录 Google Flow Music。请点击「开启 Flow Music 通道」在 Chrome 中完成一次 Google 登录即可使用个人音乐积分。";
+  }
+  if (t.includes("flowmusic_auth_expired")) {
+    return "Flow Music 登录态已过期，请刷新 Chrome 中的 flowmusic.app 标签页后重试。";
+  }
+  if (t.includes("flowmusic_out_of_credits")) {
+    return "当前账号的 Flow Music 音乐积分余额不足（生成一首约消耗 5 积分，分轨与裁剪免费）。";
+  }
+  if (t.includes("flowmusic_extension_disconnected")) {
+    return "尚未检测到当前账号的 Chrome 扩展连接，请先在右上角确认托管 Chrome 与扩展在线。";
+  }
   return null;
 }
 
@@ -152,7 +164,7 @@ export function getHealth() {
 
 // ── DTOs ────────────────────────────────────────────────────────────────────
 
-export type NodeType = "character" | "image" | "video" | "prompt" | "note" | "visual_asset" | "Storyboard" | "merge";
+export type NodeType = "character" | "image" | "video" | "audio" | "prompt" | "note" | "visual_asset" | "Storyboard" | "merge";
 export type NodeStatus = "idle" | "queued" | "running" | "done" | "error";
 
 export interface Board {
@@ -1023,7 +1035,7 @@ export interface ReferenceItem {
   // exists purely as a re-ingest hint when the file goes missing.
   url: string | null;
   label: string;
-  kind: "image" | "character" | "visual_asset" | "storyboard_shot";
+  kind: "image" | "character" | "visual_asset" | "storyboard_shot" | "audio";
   // Snapshot of the source node's aiBrief at save time; lets cross-board
   // spawn skip the re-vision call entirely.
   aiBrief: string | null;
@@ -1083,6 +1095,7 @@ function mapReferenceRow(row: ReferenceRowWire): ReferenceItem {
     "character",
     "visual_asset",
     "storyboard_shot",
+    "audio",
   ];
   const kind: ReferenceItem["kind"] = (allowed as string[]).includes(row.kind)
     ? (row.kind as ReferenceItem["kind"])

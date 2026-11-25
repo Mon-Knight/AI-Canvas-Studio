@@ -24,6 +24,7 @@ let pendingPair = null;
 let presenceVersion = 0;
 let presenceTimer = null;
 let lastFlowTabOpen = null;
+let lastMusicTabOpen = null;
 let lastProjectId = null;
 let lastCreditsSyncAt = 0;
 let creditsSyncInFlight = false;
@@ -48,8 +49,19 @@ const flowUrls = [
 ];
 
 const managedFlowUrls = ['https://flow.google.com/*'];
+const FLOWMUSIC_ORIGIN = 'https://www.flowmusic.app';
+const flowMusicUrls = [
+  'https://www.flowmusic.app/*',
+  'https://flowmusic.app/*',
+];
+
 async function queryFlowTabs() {
   const tabs = await chrome.tabs.query({ url: profileId ? managedFlowUrls : flowUrls });
+  return tabs.filter((tab) => !tab.incognito);
+}
+
+async function queryFlowMusicTabs() {
+  const tabs = await chrome.tabs.query({ url: flowMusicUrls });
   return tabs.filter((tab) => !tab.incognito);
 }
 
@@ -212,6 +224,7 @@ function connectToAgent() {
     socket.send(JSON.stringify({ type: 'profile_hello', profile_id: profileId, profile_token: profileToken }));
     profileHelloSocket = socket;
     lastFlowTabOpen = null;
+    lastMusicTabOpen = null;
     lastProjectId = null;
     clearInterval(socketKeepalive);
     socketKeepalive = setInterval(keepAlive, 20000);
@@ -242,6 +255,7 @@ function connectToAgent() {
         if (socket !== ws) return;
         profileId = msg.profile_id;
         lastFlowTabOpen = null;
+        lastMusicTabOpen = null;
         lastProjectId = null;
         sendExtensionReady(socket);
         queuePresenceUpdate();
@@ -290,6 +304,14 @@ function connectToAgent() {
         await handleApiRequest(msg);
       } else if (msg.method === 'trpc_request') {
         await handleTrpcRequest(msg);
+      } else if (msg.method === 'flowmusic_open') {
+        await handleFlowMusicOpen(msg);
+      } else if (msg.method === 'flowmusic_get_token') {
+        await handleFlowMusicGetToken(msg);
+      } else if (msg.method === 'flowmusic_refresh_session') {
+        await handleFlowMusicRefreshSession(msg);
+      } else if (msg.method === 'flowmusic_fetch') {
+        await handleFlowMusicFetch(msg);
       } else if (msg.method === 'get_status') {
         sendToAgent({
           id: msg.id,
@@ -314,6 +336,7 @@ function connectToAgent() {
     profileHelloSocket = null;
     callbackSocket = null;
     lastFlowTabOpen = null;
+    lastMusicTabOpen = null;
     lastProjectId = null;
     finishPair({ error: '扩展与本地服务的连接已断开，请重试。' });
     setState('off');
@@ -394,17 +417,29 @@ function queuePresenceUpdate() {
   presenceTimer = setTimeout(async () => {
     const socket = profileHelloSocket;
     if (!socket || socket !== ws || socket.readyState !== WebSocket.OPEN) return;
-    const tabs = await queryFlowTabs().catch(() => null);
+    const [tabs, musicTabs] = await Promise.all([
+      queryFlowTabs().catch(() => null),
+      queryFlowMusicTabs().catch(() => []),
+    ]);
     if (version !== presenceVersion || socket !== ws || socket.readyState !== WebSocket.OPEN || !tabs) return;
     const flowTabOpen = tabs.length > 0;
+    const musicTabOpen = Array.isArray(musicTabs) && musicTabs.length > 0;
     const detectedProjectId = extractProjectIdFromTabs(tabs);
-    if (flowTabOpen === lastFlowTabOpen && detectedProjectId === lastProjectId) return;
+    if (
+      flowTabOpen === lastFlowTabOpen &&
+      musicTabOpen === lastMusicTabOpen &&
+      detectedProjectId === lastProjectId
+    ) {
+      return;
+    }
     socket.send(JSON.stringify({
       type: 'profile_presence',
       flow_tab_open: flowTabOpen,
+      music_tab_open: musicTabOpen,
       project_id: detectedProjectId,
     }));
     lastFlowTabOpen = flowTabOpen;
+    lastMusicTabOpen = musicTabOpen;
     lastProjectId = detectedProjectId;
     if (flowTabOpen) {
       void syncCreditsFromFlowTab(true);
@@ -1102,6 +1137,312 @@ async function handleTrpcRequest(msg) {
   } finally {
     setState('idle');
   }
+}
+
+// ─── Google Flow Music Bridge (Personal Credits Channel) ────
+
+function decodeBase64UrlToUtf8(b64) {
+  let norm = b64.replace(/-/g, '+').replace(/_/g, '/');
+  const pad = norm.length % 4;
+  if (pad) norm += '='.repeat(4 - pad);
+  const bin = atob(norm);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder('utf-8').decode(bytes);
+}
+
+function parseJwtExpiry(accessToken) {
+  try {
+    const parts = String(accessToken).split('.');
+    if (parts.length < 2) return null;
+    const payload = JSON.parse(decodeBase64UrlToUtf8(parts[1]));
+    return typeof payload?.exp === 'number' ? payload.exp : null;
+  } catch {
+    return null;
+  }
+}
+
+function extractSafeFlowMusicSession(rawText) {
+  if (!rawText || typeof rawText !== 'string') return null;
+  let text = rawText.trim();
+  try {
+    text = decodeURIComponent(text);
+  } catch {
+    // keep raw text when not percent-encoded
+  }
+  if (text.startsWith('base64-')) {
+    text = decodeBase64UrlToUtf8(text.slice(7));
+  }
+  const parsed = JSON.parse(text);
+  const obj = Array.isArray(parsed)
+    ? { access_token: parsed[0] }
+    : (parsed && typeof parsed === 'object' ? parsed : null);
+  if (!obj || typeof obj.access_token !== 'string' || !obj.access_token) return null;
+  if (obj.user?.is_anonymous) return null;
+  const expiresAt = typeof obj.expires_at === 'number'
+    ? obj.expires_at
+    : parseJwtExpiry(obj.access_token);
+  // Deliberately NEVER forward refresh_token: only the browser's own Supabase
+  // client rotates single-use refresh tokens so tabs and agent never collide.
+  return {
+    access_token: obj.access_token,
+    expires_at: expiresAt,
+    user_id: typeof obj.user?.id === 'string' ? obj.user.id : null,
+    email: typeof obj.user?.email === 'string' ? obj.user.email : null,
+  };
+}
+
+async function readFlowMusicSessionFromCookies() {
+  if (!chrome.cookies?.getAll) return null;
+  const seen = new Map();
+  for (const query of [{ url: FLOWMUSIC_ORIGIN + '/' }, { domain: 'flowmusic.app' }]) {
+    const list = await chrome.cookies.getAll(query).catch(() => []);
+    for (const c of list || []) {
+      if (c?.name && !seen.has(c.name)) seen.set(c.name, c.value || '');
+    }
+  }
+  // Collect either exact `sb-*-auth-token` or chunked `sb-*-auth-token.0/.1...`
+  const groups = new Map();
+  for (const [name, value] of seen.entries()) {
+    const m = name.match(/^(sb-[^.]+-auth-token)(?:\.(\d+))?$/);
+    if (!m) continue;
+    const base = m[1];
+    const idx = m[2] !== undefined ? Number(m[2]) : -1;
+    if (!groups.has(base)) groups.set(base, []);
+    groups.get(base).push([idx, value]);
+  }
+  for (const chunks of groups.values()) {
+    chunks.sort((a, b) => a[0] - b[0]);
+    const joined = chunks.map(([, val]) => val).join('');
+    try {
+      const session = extractSafeFlowMusicSession(joined);
+      if (session) return session;
+    } catch {
+      // try next cookie group
+    }
+  }
+  return null;
+}
+
+async function readFlowMusicSessionFromTab(tabId) {
+  try {
+    const [res] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: () => {
+        try {
+          for (let i = 0; i < localStorage.length; i++) {
+            const k = localStorage.key(i);
+            if (k && /^sb-.+-auth-token$/.test(k)) {
+              return localStorage.getItem(k);
+            }
+          }
+        } catch {}
+        return null;
+      },
+    });
+    if (typeof res?.result === 'string' && res.result) {
+      return extractSafeFlowMusicSession(res.result);
+    }
+  } catch {
+    // non-fatal
+  }
+  return null;
+}
+
+async function waitForTabComplete(tabId, timeoutMs = 15000) {
+  const existing = await chrome.tabs.get(tabId).catch(() => null);
+  if (existing?.status === 'complete') return;
+  await new Promise((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      clearTimeout(timer);
+      resolve();
+    };
+    const onUpdated = (id, info) => {
+      if (id === tabId && info.status === 'complete') done();
+    };
+    const timer = setTimeout(done, timeoutMs);
+    chrome.tabs.onUpdated.addListener(onUpdated);
+  });
+}
+
+async function ensureFlowMusicTab(active = false) {
+  const tabs = await queryFlowMusicTabs();
+  const live = tabs.find((t) => !t.discarded) || tabs[0];
+  if (live?.id) {
+    if (active) {
+      await chrome.tabs.update(live.id, { active: true }).catch(() => {});
+      if (live.windowId) {
+        await chrome.windows.update(live.windowId, { focused: true }).catch(() => {});
+      }
+    }
+    return live;
+  }
+  const win = await chrome.windows.getLastFocused({ windowTypes: ['normal'] }).catch(() => null);
+  const tab = win?.id
+    ? await chrome.tabs.create({ windowId: win.id, url: FLOWMUSIC_ORIGIN + '/', active })
+    : await chrome.tabs.create({ url: FLOWMUSIC_ORIGIN + '/', active });
+  if (tab?.id) {
+    await waitForTabComplete(tab.id, 15000);
+  }
+  queuePresenceUpdate();
+  return tab;
+}
+
+async function readFlowMusicAccessToken({ allowTabFallback = true } = {}) {
+  const fromCookie = await readFlowMusicSessionFromCookies();
+  if (fromCookie) return fromCookie;
+  if (!allowTabFallback) return null;
+  const tabs = await queryFlowMusicTabs();
+  const live = tabs.find((t) => !t.discarded && t.id) || tabs[0];
+  if (live?.id) {
+    return await readFlowMusicSessionFromTab(live.id);
+  }
+  return null;
+}
+
+async function handleFlowMusicOpen(msg) {
+  const { id, params = {} } = msg;
+  try {
+    const active = params.active !== false;
+    const tab = await ensureFlowMusicTab(active);
+    const session = await readFlowMusicAccessToken({ allowTabFallback: true });
+    sendToAgent({
+      id,
+      ok: true,
+      tab_id: tab?.id || null,
+      music_tab_open: true,
+      signed_in: !!session,
+      email: session?.email || null,
+    });
+  } catch (e) {
+    sendToAgent({ id, error: e?.message || 'FLOWMUSIC_OPEN_FAILED' });
+  }
+}
+
+async function handleFlowMusicGetToken(msg) {
+  const { id, params = {} } = msg;
+  try {
+    let session = await readFlowMusicAccessToken({ allowTabFallback: true });
+    const nowSec = Math.floor(Date.now() / 1000);
+    const expired = session && typeof session.expires_at === 'number' && session.expires_at <= nowSec + 60;
+    if ((!session || expired) && params.refreshIfExpired) {
+      const refreshed = await refreshFlowMusicSessionInBrowser(false);
+      if (refreshed) session = refreshed;
+    }
+    if (!session) {
+      sendToAgent({ id, error: 'FLOWMUSIC_NOT_LOGGED_IN' });
+      return;
+    }
+    sendToAgent({ id, ok: true, ...session });
+  } catch (e) {
+    sendToAgent({ id, error: e?.message || 'FLOWMUSIC_TOKEN_FAILED' });
+  }
+}
+
+async function refreshFlowMusicSessionInBrowser(active = false) {
+  const tab = await ensureFlowMusicTab(active);
+  if (!tab?.id) return null;
+  await chrome.tabs.reload(tab.id).catch(() => {});
+  await waitForTabComplete(tab.id, 15000);
+  // Give Supabase JS client a short window to rotate and persist the refreshed cookie.
+  const deadline = Date.now() + 8000;
+  const nowSec = Math.floor(Date.now() / 1000);
+  while (Date.now() < deadline) {
+    const session = await readFlowMusicAccessToken({ allowTabFallback: true });
+    if (session && (!session.expires_at || session.expires_at > nowSec + 60)) {
+      return session;
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return await readFlowMusicAccessToken({ allowTabFallback: true });
+}
+
+async function handleFlowMusicRefreshSession(msg) {
+  const { id, params = {} } = msg;
+  try {
+    const session = await refreshFlowMusicSessionInBrowser(Boolean(params.active));
+    if (!session) {
+      sendToAgent({ id, error: 'FLOWMUSIC_NOT_LOGGED_IN' });
+      return;
+    }
+    sendToAgent({ id, ok: true, ...session });
+  } catch (e) {
+    sendToAgent({ id, error: e?.message || 'FLOWMUSIC_REFRESH_FAILED' });
+  }
+}
+
+async function handleFlowMusicFetch(msg) {
+  const { id, params = {} } = msg;
+  const path = typeof params.path === 'string' ? params.path : '';
+  const method = (typeof params.method === 'string' ? params.method : 'GET').toUpperCase();
+  if (!path.startsWith('/__api/')) {
+    sendToAgent({ id, status: 400, error: 'INVALID_FLOWMUSIC_PATH' });
+    return;
+  }
+  try {
+    const tab = await ensureFlowMusicTab(false);
+    if (!tab?.id) {
+      sendToAgent({ id, status: 502, error: 'NO_FLOWMUSIC_TAB' });
+      return;
+    }
+    const session = await readFlowMusicAccessToken({ allowTabFallback: true });
+    if (!session?.access_token) {
+      sendToAgent({ id, status: 401, error: 'FLOWMUSIC_NOT_LOGGED_IN' });
+      return;
+    }
+    const [executed] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      world: 'MAIN',
+      args: [path, method, session.access_token, params.body ?? null, Boolean(params.asText)],
+      func: async (reqPath, reqMethod, token, reqBody, asText) => {
+        try {
+          const headers = {
+            Authorization: `Bearer ${token}`,
+            Accept: asText ? 'text/event-stream, application/json, */*' : 'application/json',
+          };
+          let body;
+          if (reqBody !== null && reqBody !== undefined && reqMethod !== 'GET' && reqMethod !== 'HEAD') {
+            headers['Content-Type'] = 'application/json';
+            body = typeof reqBody === 'string' ? reqBody : JSON.stringify(reqBody);
+          }
+          const resp = await fetch(reqPath, {
+            method: reqMethod,
+            headers,
+            body,
+            credentials: 'include',
+          });
+          const text = await resp.text();
+          if (asText) {
+            return { status: resp.status, text };
+          }
+          let data = null;
+          try { data = JSON.parse(text); } catch { data = text; }
+          return { status: resp.status, data };
+        } catch (err) {
+          return { error: err?.message || 'FLOWMUSIC_PAGE_FETCH_FAILED' };
+        }
+      },
+    });
+    const out = executed?.result || { error: 'EMPTY_FLOWMUSIC_FETCH' };
+    sendToAgent({ id, ...out });
+  } catch (e) {
+    sendToAgent({ id, error: e?.message || 'FLOWMUSIC_FETCH_FAILED' });
+  }
+}
+
+if (chrome.cookies?.onChanged) {
+  chrome.cookies.onChanged.addListener((changeInfo) => {
+    const dom = changeInfo?.cookie?.domain || '';
+    const name = changeInfo?.cookie?.name || '';
+    if (dom.includes('flowmusic.app') && name.includes('auth-token')) {
+      queuePresenceUpdate();
+    }
+  });
 }
 
 // ─── State & Badge ──────────────────────────────────────────

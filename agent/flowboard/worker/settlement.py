@@ -178,6 +178,38 @@ def _node_completion_patch(
     elif req.type == "gen_video_text":
         dur = patch.get("durationSeconds") or 4
         patch["videoQuality"] = f"t2v_{dur}s"
+    elif req.type in ("gen_music", "edit_music", "effect_music", "split_stems"):
+        if req.type == "split_stems" and result.get("preserve_primary_media"):
+            stems = result.get("stems")
+            stem_patch: dict = {"error": None}
+            if isinstance(stems, dict) and stems:
+                stem_patch["musicStems"] = stems
+            return stem_patch
+        if isinstance(result.get("clip_id"), str) and result["clip_id"]:
+            patch["musicClipId"] = result["clip_id"]
+        if isinstance(result.get("clip_ids"), list) and result["clip_ids"]:
+            patch["musicClipIds"] = result["clip_ids"]
+        if isinstance(result.get("cover_media_id"), str) and result["cover_media_id"]:
+            patch["musicCoverMediaId"] = result["cover_media_id"]
+        if isinstance(result.get("music_title"), str) and result["music_title"]:
+            patch["musicTitle"] = result["music_title"]
+            patch["title"] = result["music_title"]
+        if isinstance(result.get("music_lyrics"), str):
+            patch["musicLyrics"] = result["music_lyrics"]
+        if isinstance(result.get("music_duration_s"), (int, float)):
+            patch["musicDurationSec"] = float(result["music_duration_s"])
+        if isinstance(result.get("music_bpm"), int):
+            patch["musicBpm"] = result["music_bpm"]
+        if isinstance(result.get("music_instrumental"), bool):
+            patch["musicInstrumental"] = result["music_instrumental"]
+        if isinstance(result.get("music_model"), str) and result["music_model"]:
+            patch["musicModel"] = result["music_model"]
+        if isinstance(result.get("music_edit_mode"), str) and result["music_edit_mode"]:
+            patch["musicEditMode"] = result["music_edit_mode"]
+        if isinstance(result.get("conversation_id"), str) and result["conversation_id"]:
+            patch["musicConversationId"] = result["conversation_id"]
+        # Clear stems from an earlier song version when regenerating a fresh track
+        patch["musicStems"] = None
 
     # Append non-destructive per-node version history (keeps up to last 10 versions).
     if media_id:

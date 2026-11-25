@@ -578,3 +578,78 @@ export function estimateVideoCreditCost(params: {
     breakdown: `${modelLabel} · Ultra ${ultraRate} / Pro ${proRate} 积分/条 × ${safeCount} 条 · 8秒 · ${resNote}（连接账号并同步积分后显示精确档位）`,
   };
 }
+
+// ── Google Flow Music (Lyria 3.5 / 3 Pro · 个人独立音乐积分) ──────────────────
+
+export interface MusicModelCatalogEntry {
+  id: string;
+  label: string;
+  badge: string;
+  creditCost: number;
+  summary: string;
+}
+
+export const MUSIC_MODEL_CATALOG: readonly MusicModelCatalogEntry[] = [
+  {
+    id: "Lyria 3.5",
+    label: "Lyria 3.5",
+    badge: "旗舰推荐",
+    creditCost: 5,
+    summary: "最新一代音乐模型，旋律自然、人声咬字与时长/BPM 控制最佳（最长 3 分钟）",
+  },
+  {
+    id: "Lyria 3 Pro",
+    label: "Lyria 3 Pro",
+    badge: "经典专业版",
+    creditCost: 5,
+    summary: "经典完整编曲模型，适合对照抽卡或特定复古曲风风格",
+  },
+] as const;
+
+export const MUSIC_DURATION_PRESETS = [
+  { seconds: 60, label: "60 秒" },
+  { seconds: 90, label: "90 秒" },
+  { seconds: 120, label: "2 分钟" },
+  { seconds: 180, label: "3 分钟" },
+] as const;
+
+export const MUSIC_STEM_META: Record<string, { label: string; icon: string }> = {
+  vocals: { label: "人声轨", icon: "🎤" },
+  drums: { label: "鼓点节奏", icon: "🥁" },
+  bass: { label: "贝斯低音", icon: "🎸" },
+  other: { label: "纯伴奏 / 旋律", icon: "🎹" },
+};
+
+export function estimateMusicCreditCost(
+  kind: "gen_music" | "edit_music" | "split_stems" | "effect_music" | "lyrics",
+): CreditEstimate {
+  if (kind === "split_stems") {
+    return {
+      perUnit: 0,
+      count: 1,
+      total: 0,
+      isZero: true,
+      displayText: "0 音乐积分",
+      breakdown: "Flow Music 四轨分轨（人声/鼓/贝斯/伴奏）消耗 0 积分",
+    };
+  }
+  if (kind === "effect_music" || kind === "lyrics") {
+    return {
+      perUnit: 0,
+      count: 1,
+      total: 0,
+      isZero: true,
+      displayText: "0 音乐积分",
+      breakdown: "Flow Music 裁剪变速与 AI 作词消耗 0 积分",
+    };
+  }
+  const label = kind === "edit_music" ? "音乐衍生编辑（续写/翻唱/替换）" : "Flow Music 完整歌曲/配乐";
+  return {
+    perUnit: 5,
+    count: 1,
+    total: 5,
+    isZero: false,
+    displayText: "消耗 5 音乐积分",
+    breakdown: `${label} · 从账号独立 Flow Music 积分池扣除，不消耗视频积分`,
+  };
+}

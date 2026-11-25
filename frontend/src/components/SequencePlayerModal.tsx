@@ -37,10 +37,13 @@ export function SequencePlayerModal({ open, onClose }: SequencePlayerModalProps)
   const boardName = useBoardStore((s) => s.boardName);
   const bgmName = useTimelineAudioStore((s) => s.bgmName);
   const bgmUrl = useTimelineAudioStore((s) => s.bgmUrl);
+  const bgmMediaId = useTimelineAudioStore((s) => s.bgmMediaId);
   const bgmVolume = useTimelineAudioStore((s) => s.bgmVolume);
+  const bgmFadeOutSec = useTimelineAudioStore((s) => s.bgmFadeOutSec);
   const videoAudioMuted = useTimelineAudioStore((s) => s.videoAudioMuted);
   const shotOverrides = useTimelineAudioStore((s) => s.shotOverrides);
   const customOrderKeys = useTimelineAudioStore((s) => s.customOrderKeys);
+  const setBgmMediaAsset = useTimelineAudioStore((s) => s.setBgmMediaAsset);
   const toggleShotExcluded = useTimelineAudioStore((s) => s.toggleShotExcluded);
   const setShotImageDuration = useTimelineAudioStore((s) => s.setShotImageDuration);
   const moveShotKey = useTimelineAudioStore((s) => s.moveShotKey);
@@ -55,6 +58,26 @@ export function SequencePlayerModal({ open, onClose }: SequencePlayerModalProps)
   const bgmAudioRef = useRef<HTMLAudioElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
+  const canvasAudioOptions = useMemo(() => {
+    const out: Array<{ mediaId: string; label: string }> = [];
+    for (const node of nodes) {
+      if (node.data.type !== "audio") continue;
+      const baseTitle = node.data.musicTitle || displayNodeTitle(node.data.title, "audio");
+      const mid = node.data.mediaId || node.data.mediaIds?.find(Boolean);
+      if (mid) {
+        out.push({ mediaId: mid, label: `${baseTitle} (#${node.data.shortId})` });
+      }
+      if (node.data.musicStems && typeof node.data.musicStems === "object") {
+        for (const [stemKey, stemMid] of Object.entries(node.data.musicStems)) {
+          if (typeof stemMid === "string" && stemMid) {
+            out.push({ mediaId: stemMid, label: `${baseTitle} · ${stemKey}` });
+          }
+        }
+      }
+    }
+    return out;
+  }, [nodes]);
+
   const rawShots = useMemo<SequenceShot[]>(() => {
     const ordered = [...nodes].sort((a, b) => {
       if (a.position.x !== b.position.x) return a.position.x - b.position.x;
@@ -62,7 +85,13 @@ export function SequencePlayerModal({ open, onClose }: SequencePlayerModalProps)
     });
     const list: SequenceShot[] = [];
     for (const node of ordered) {
-      if (node.data.type === "prompt" || node.data.type === "note") continue;
+      if (
+        node.data.type === "prompt" ||
+        node.data.type === "note" ||
+        node.data.type === "audio"
+      ) {
+        continue;
+      }
       const fromArray = (node.data.mediaIds ?? []).filter(
         (m): m is string => typeof m === "string" && m.length > 0,
       );
@@ -214,6 +243,7 @@ export function SequencePlayerModal({ open, onClose }: SequencePlayerModalProps)
         })),
         bgmUrl,
         bgmVolume,
+        bgmFadeOutSec,
         videoAudioMuted,
         signal: ctrl.signal,
         onProgress: (p) => setExportProgress(p),
@@ -274,12 +304,42 @@ export function SequencePlayerModal({ open, onClose }: SequencePlayerModalProps)
           </div>
 
           <div className="jm-seq-header-actions">
+            {canvasAudioOptions.length > 0 && (
+              <select
+                className="jm-seq-bgm-select"
+                aria-label="快捷切换画布配乐轨"
+                disabled={exporting}
+                value={bgmMediaId ?? ""}
+                onChange={(e) => {
+                  const chosenId = e.target.value;
+                  if (!chosenId) {
+                    setBgmMediaAsset(null);
+                    return;
+                  }
+                  const hit = canvasAudioOptions.find((o) => o.mediaId === chosenId);
+                  if (hit) {
+                    setBgmMediaAsset({
+                      mediaId: hit.mediaId,
+                      name: hit.label,
+                      url: mediaUrl(hit.mediaId),
+                    });
+                  }
+                }}
+              >
+                <option value="">{bgmName && !bgmMediaId ? `自定义：${bgmName.slice(0, 12)}` : "无全局配乐"}</option>
+                {canvasAudioOptions.map((opt) => (
+                  <option key={opt.mediaId} value={opt.mediaId}>
+                    🎵 {opt.label}
+                  </option>
+                ))}
+              </select>
+            )}
             <button
               type="button"
               className="jm-seq-ctrl-btn"
               disabled={exporting}
               onClick={handleOpenBgmSettings}
-              title="挂载或调节全局配乐/旁白音轨"
+              title="挂载、AI 生成或调节全局配乐/旁白音轨"
             >
               🎵 {bgmName ? `配乐：${bgmName.slice(0, 14)}` : "配乐轨"}
             </button>

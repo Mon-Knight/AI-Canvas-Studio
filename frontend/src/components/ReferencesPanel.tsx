@@ -8,7 +8,7 @@ import { collectOccupiedBoxes, findFreeCanvasPosition, type CanvasBox } from "..
 import { filterReferences, useReferencesStore } from "../store/references";
 import { IconFilter, IconSearch, IconSortOrder } from "./JimengIcons";
 
-type AssetSubTab = "all" | "image" | "video" | "storyboard_shot";
+type AssetSubTab = "all" | "image" | "video" | "audio" | "storyboard_shot";
 
 /**
  * 即梦风格居中大圆角「资产库」模态框（参考图 03-asset-library-modal.png）：
@@ -68,6 +68,8 @@ export function ReferencesPanel() {
       );
     } else if (subTab === "image") {
       list = list.filter((item) => item.kind === "image" || item.kind === "visual_asset");
+    } else if (subTab === "audio") {
+      list = list.filter((item) => item.kind === "audio");
     } else if (subTab === "storyboard_shot") {
       list = list.filter((item) => item.kind === "storyboard_shot");
     }
@@ -268,6 +270,13 @@ export function ReferencesPanel() {
                       onClick={() => setSubTab("video")}
                     >
                       视频
+                    </button>
+                    <button
+                      type="button"
+                      className={`jm-asset-modal__subtab${subTab === "audio" ? " jm-asset-modal__subtab--active" : ""}`}
+                      onClick={() => setSubTab("audio")}
+                    >
+                      音频
                     </button>
                     <button
                       type="button"
@@ -497,16 +506,28 @@ function AssetGridTile({
     e.dataTransfer.effectAllowed = "copy";
   }
 
+  const isAudio = item.kind === "audio";
+
   return (
     <div
-      className={`jm-asset-tile${checked ? " jm-asset-tile--checked" : ""}`}
+      className={`jm-asset-tile${isAudio ? " jm-asset-tile--audio" : ""}${checked ? " jm-asset-tile--checked" : ""}`}
       draggable
       onDragStart={handleDragStart}
       onClick={onToggle}
       onDoubleClick={onDoubleClick}
       title={`${item.label}${item.aiBrief ? `\n\n${item.aiBrief}` : ""}\n（单击勾选 · 双击或拖拽直接上画布）`}
     >
-      {!broken ? (
+      {isAudio ? (
+        <div className="jm-asset-tile__audio-box" onClick={(e) => e.stopPropagation()}>
+          <span className="jm-asset-tile__audio-icon" aria-hidden="true">ılı</span>
+          <audio
+            className="jm-asset-tile__audio-player"
+            src={mediaUrl(item.mediaId)}
+            controls
+            preload="none"
+          />
+        </div>
+      ) : !broken ? (
         <img
           src={mediaUrl(item.mediaId)}
           alt={item.label}

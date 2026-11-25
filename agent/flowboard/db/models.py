@@ -40,6 +40,9 @@ class FlowAccount(SQLModel, table=True):
     project_id: Optional[str] = None
     credits: Optional[int] = None
     credits_updated_at: Optional[datetime] = None
+    music_credits: Optional[int] = None
+    music_credits_updated_at: Optional[datetime] = None
+    music_plan: Optional[str] = None
     pair_digest: Optional[str] = None
     paygate_tier: Optional[str] = None
 

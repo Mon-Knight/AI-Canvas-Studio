@@ -11,8 +11,12 @@ export interface FlowAccount {
   paired?: boolean;
   connected: boolean;
   flow_tab_open: boolean;
+  music_tab_open?: boolean;
   credits: number | null;
   credits_updated_at: string | null;
+  music_credits?: number | null;
+  music_plan?: string | null;
+  music_credits_updated_at?: string | null;
 }
 
 export interface FlowAccountSnapshot {

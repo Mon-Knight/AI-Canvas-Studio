@@ -38,6 +38,7 @@ _MEDIA_ID_RE = re.compile(r"^[0-9a-fA-F-]{1,64}$")
 # `data.media[].image.generatedImage.fifeUrl`.
 _ALLOWED_URL_PREFIXES: tuple[str, ...] = (
     "https://flow-content.google/",
+    "https://storage.googleapis.com/producer-app-public/",
 )
 
 
@@ -51,6 +52,15 @@ _EXT_BY_MIME = {
     "image/gif": ".gif",
     "video/mp4": ".mp4",
     "video/webm": ".webm",
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/wave": ".wav",
+    "audio/mp4": ".m4a",
+    "audio/x-m4a": ".m4a",
+    "audio/aac": ".aac",
+    "audio/ogg": ".ogg",
 }
 
 
@@ -201,9 +211,9 @@ async def fetch_and_cache(media_id: str) -> Optional[tuple[bytes, str, Path]]:
         return None
 
     mime = resp.headers.get("content-type", "application/octet-stream").split(";")[0].strip()
-    # Whitelist served mime — block any injected content-type that isn't image/video
+    # Whitelist served mime — block any injected content-type that isn't image/video/audio
     # from being cached and served back to the browser.
-    if not (mime.startswith("image/") or mime.startswith("video/")):
+    if not (mime.startswith("image/") or mime.startswith("video/") or mime.startswith("audio/")):
         logger.warning("refusing non-media mime from GCS: %s (media_id=%s)", mime, media_id)
         return None
     ext = _EXT_BY_MIME.get(mime, ".bin")

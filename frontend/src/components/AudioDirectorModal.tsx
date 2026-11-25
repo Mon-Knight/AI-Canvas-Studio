@@ -1,10 +1,13 @@
 /**
- * 左栏「ılı 音频」声画导演工作舱（即梦深空毛玻璃居中浮窗）：
+ * 左栏「ılı 音频 → 🎙 声画导演」工作舱（即梦深空毛玻璃居中浮窗）：
  * - Tab 1: 🎙️ 视频声画台词与音效编排（人声音色 + 口型台词 + 动作音效 + 环境声场 -> 写入 Flow 视频节点）
- * - Tab 2: 🎵 时间线全局配乐 / 旁白音轨（本地导入 .mp3/.wav/.m4a/.ogg -> 实时试听与混音进入时间线导出成片）
+ * - Tab 2: 🎵 时间线全局配乐 / 旁白音轨（一键挂载画布音频/分轨节点或持久化上传本地音轨 + 尾段淡出控制）
+ * - Tab 3: ✨ Flow Music AI 配乐（个人 Flow Music 积分通道直连 Lyria 3.5 / 3 Pro 作曲）
  */
 import { useEffect, useMemo, useRef, useState } from "react";
-import { patchNode } from "../api/client";
+import { mediaUrl, patchNode } from "../api/client";
+import { uploadAudioFile } from "../api/music";
+import { MUSIC_STEM_META } from "../constants/models";
 import { displayNodeTitle } from "../constants/nodeLabels";
 import { useBoardStore } from "../store/board";
 import { useGenerationStore } from "../store/generation";
@@ -14,12 +17,19 @@ import {
   composeAudioDirective,
   useTimelineAudioStore,
 } from "../store/timelineAudio";
+import { MusicComposerPanel } from "./generation/MusicComposerPanel";
 
-export type AudioDirectorTab = "voice" | "bgm";
+export type AudioDirectorTab = "voice" | "bgm" | "ai_music";
 
 interface OpenAudioDirectorDetail {
   tab?: AudioDirectorTab;
   rfId?: string;
+}
+
+interface CanvasAudioChoice {
+  mediaId: string;
+  label: string;
+  tag: string;
 }
 
 function mergeAudioDirectiveIntoPrompt(existingPrompt: string | undefined, directive: string): string {
@@ -40,6 +50,7 @@ export function AudioDirectorModal() {
   const [dialogue, setDialogue] = useState("");
   const [sfx, setSfx] = useState("");
   const [saving, setSaving] = useState(false);
+  const [uploadingBgm, setUploadingBgm] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -47,16 +58,49 @@ export function AudioDirectorModal() {
 
   const bgmName = useTimelineAudioStore((s) => s.bgmName);
   const bgmUrl = useTimelineAudioStore((s) => s.bgmUrl);
+  const bgmMediaId = useTimelineAudioStore((s) => s.bgmMediaId);
   const bgmVolume = useTimelineAudioStore((s) => s.bgmVolume);
+  const bgmFadeOutSec = useTimelineAudioStore((s) => s.bgmFadeOutSec);
   const videoAudioMuted = useTimelineAudioStore((s) => s.videoAudioMuted);
   const setBgmFile = useTimelineAudioStore((s) => s.setBgmFile);
+  const setBgmMediaAsset = useTimelineAudioStore((s) => s.setBgmMediaAsset);
   const setBgmVolume = useTimelineAudioStore((s) => s.setBgmVolume);
+  const setBgmFadeOutSec = useTimelineAudioStore((s) => s.setBgmFadeOutSec);
   const setVideoAudioMuted = useTimelineAudioStore((s) => s.setVideoAudioMuted);
 
   const videoNodes = useMemo(
     () => nodes.filter((n) => n.data.type === "video"),
     [nodes],
   );
+
+  // 收集当前画布所有已生成的音频节点及分轨，便于一键挂载为时间线 BGM
+  const canvasAudioChoices = useMemo<CanvasAudioChoice[]>(() => {
+    const out: CanvasAudioChoice[] = [];
+    for (const n of nodes) {
+      if (n.data.type !== "audio") continue;
+      const baseTitle = n.data.musicTitle || displayNodeTitle(n.data.title, "audio");
+      const mid = n.data.mediaId || n.data.mediaIds?.find(Boolean);
+      if (mid) {
+        out.push({
+          mediaId: mid,
+          label: `${baseTitle} (#${n.data.shortId})`,
+          tag: n.data.musicModel || "完整音轨",
+        });
+      }
+      if (n.data.musicStems && typeof n.data.musicStems === "object") {
+        for (const [stemKey, stemMid] of Object.entries(n.data.musicStems)) {
+          if (typeof stemMid !== "string" || !stemMid) continue;
+          const meta = MUSIC_STEM_META[stemKey] ?? { label: stemKey, icon: "🎵" };
+          out.push({
+            mediaId: stemMid,
+            label: `${baseTitle} · ${meta.label}`,
+            tag: `${meta.icon} 分轨`,
+          });
+        }
+      }
+    }
+    return out;
+  }, [nodes]);
 
   const targetVideo = useMemo(
     () => videoNodes.find((n) => n.id === targetRfId) ?? videoNodes[0] ?? null,
@@ -163,6 +207,28 @@ export function AudioDirectorModal() {
     }
   }
 
+  async function handleUploadPersistentBgm(file: File) {
+    if (uploadingBgm) return;
+    setUploadingBgm(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const uploaded = await uploadAudioFile(file);
+      const cleanName = file.name.replace(/\.[^.]+$/, "") || file.name;
+      setBgmMediaAsset({
+        mediaId: uploaded.media_id,
+        name: cleanName,
+        url: mediaUrl(uploaded.media_id),
+      });
+      setNotice("✓ 已上传并持久化挂载为时间线全局配乐，刷新页面后依然保留。");
+    } catch {
+      // 若本地服务暂不可用则回退为会话内 Blob URL
+      setBgmFile(file);
+    } finally {
+      setUploadingBgm(false);
+    }
+  }
+
   function handleGoTimeline() {
     setOpen(false);
     window.dispatchEvent(new Event("flowboard:open-sequence-player"));
@@ -186,9 +252,9 @@ export function AudioDirectorModal() {
       >
         <div className="gen-dialog__header">
           <div>
-            <h2 className="gen-dialog__title">ılı 声画导演 · 台词音效编排与配乐轨</h2>
+            <h2 className="gen-dialog__title">ılı 声画导演 · 台词音效与 Flow Music 配乐中心</h2>
             <span className="gen-dialog__subtitle">
-              原生驱动 Veo 3.1 / Omni 口型台词音效生成，并为「时间线成片合成导出」叠加配乐旁白音轨
+              驱动 Veo / Omni 口型台词音效、通过个人 Flow Music 通道 AI 作曲，并为时间线成片混音全局 BGM
             </span>
           </div>
           <button
@@ -209,7 +275,7 @@ export function AudioDirectorModal() {
             className={`aspect-chip${tab === "voice" ? " aspect-chip--active" : ""}`}
             onClick={() => setTab("voice")}
           >
-            🎙️ 视频声画台词与音效编排
+            🎙️ 视频声画台词与音效
           </button>
           <button
             type="button"
@@ -218,7 +284,16 @@ export function AudioDirectorModal() {
             className={`aspect-chip${tab === "bgm" ? " aspect-chip--active" : ""}`}
             onClick={() => setTab("bgm")}
           >
-            🎵 时间线全局配乐 / 旁白音轨
+            🎵 时间线全局配乐轨
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={tab === "ai_music"}
+            className={`aspect-chip${tab === "ai_music" ? " aspect-chip--active" : ""}`}
+            onClick={() => setTab("ai_music")}
+          >
+            ✨ Flow Music AI 配乐
           </button>
         </div>
 
@@ -337,7 +412,7 @@ export function AudioDirectorModal() {
                 </button>
               </div>
             </>
-          ) : (
+          ) : tab === "bgm" ? (
             <>
               <input
                 ref={audioFileRef}
@@ -346,33 +421,74 @@ export function AudioDirectorModal() {
                 style={{ display: "none" }}
                 onChange={(e) => {
                   const file = e.target.files?.[0] ?? null;
-                  if (file) setBgmFile(file);
+                  if (file) void handleUploadPersistentBgm(file);
                   e.target.value = "";
                 }}
               />
 
+              {canvasAudioChoices.length > 0 && (
+                <div className="gen-dialog__field">
+                  <span className="gen-dialog__label">从当前画布音频节点 / 分轨一键挂载</span>
+                  <div className="jm-audio-canvas-picks">
+                    {canvasAudioChoices.map((choice) => {
+                      const active = bgmMediaId === choice.mediaId;
+                      return (
+                        <button
+                          key={choice.mediaId}
+                          type="button"
+                          className={`jm-audio-canvas-pick${active ? " jm-audio-canvas-pick--active" : ""}`}
+                          onClick={() =>
+                            setBgmMediaAsset({
+                              mediaId: choice.mediaId,
+                              name: choice.label,
+                              url: mediaUrl(choice.mediaId),
+                            })
+                          }
+                        >
+                          <span className="jm-audio-canvas-pick__name">
+                            {active ? "✓ " : "🎵 "}
+                            {choice.label}
+                          </span>
+                          <span className="jm-audio-canvas-pick__tag">{choice.tag}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               <div className="jm-audio-bgm-card">
                 <div>
                   <strong className="jm-audio-bgm-card__title">
-                    {bgmName ? `当前配乐轨：${bgmName}` : "尚未挂载本地配乐 / 旁白音频文件"}
+                    {bgmName ? `当前配乐轨：${bgmName}` : "尚未挂载配乐 / 旁白音频文件"}
                   </strong>
                   <p className="jm-audio-bgm-card__desc">
-                    支持 MP3、WAV、M4A、OGG、AAC 格式，仅保存在本地浏览器会话中并在「时间线」预览与导出成片时自动混音。
+                    支持 MP3、WAV、M4A、OGG、AAC 格式，上传后自动缓存至本地媒体库并在「时间线」预览与导出成片时自动混音。
                   </p>
                 </div>
                 <div className="jm-layer-mini-actions">
                   <button
                     type="button"
                     className="gen-dialog__cta"
+                    disabled={uploadingBgm}
                     onClick={() => audioFileRef.current?.click()}
                   >
-                    🎵 {bgmName ? "更换配乐文件" : "选择本地配乐 / 旁白"}
+                    {uploadingBgm
+                      ? "上传缓存中…"
+                      : `🎵 ${bgmName ? "上传更换配乐" : "上传本地配乐 / 旁白"}`}
+                  </button>
+                  <button
+                    type="button"
+                    className="jm-seq-ctrl-btn jm-seq-ctrl-btn--cyan"
+                    onClick={() => setTab("ai_music")}
+                  >
+                    ✨ 用 Flow Music AI 作曲
                   </button>
                   {bgmName && (
                     <button
                       type="button"
                       className="jm-seq-ctrl-btn"
-                      onClick={() => setBgmFile(null)}
+                      onClick={() => setBgmMediaAsset(null)}
                     >
                       ✕ 移除音轨
                     </button>
@@ -400,6 +516,18 @@ export function AudioDirectorModal() {
                   />
                 </label>
 
+                <label className="jm-layer-slider">
+                  <span>成片结尾配乐自然淡出：{bgmFadeOutSec.toFixed(1)} 秒</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={6}
+                    step={0.5}
+                    value={bgmFadeOutSec}
+                    onChange={(e) => setBgmFadeOutSec(Number(e.target.value))}
+                  />
+                </label>
+
                 <label className="jm-audio-toggle-row">
                   <input
                     type="checkbox"
@@ -409,6 +537,8 @@ export function AudioDirectorModal() {
                   <span>导出与连播时保留各视频镜头原生环境声与台词（推荐开启）</span>
                 </label>
               </div>
+
+              {notice && <p className="jm-audio-success-msg">{notice}</p>}
 
               <div className="jm-audio-actions">
                 <button
@@ -420,6 +550,13 @@ export function AudioDirectorModal() {
                 </button>
               </div>
             </>
+          ) : (
+            <MusicComposerPanel
+              embedded
+              onDispatched={() => {
+                // 保持弹窗开启让用户看到入队提示，或可点击前往画布/时间线
+              }}
+            />
           )}
         </div>
       </div>

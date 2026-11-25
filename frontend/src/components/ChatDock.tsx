@@ -709,6 +709,15 @@ function BoardChat({ boardId }: { boardId: number }) {
       );
       return;
     }
+    if (skill.action.kind === "open_audio_director") {
+      setText("");
+      window.dispatchEvent(
+        new CustomEvent("flowboard:open-audio-director", {
+          detail: { tab: skill.action.tab },
+        }),
+      );
+      return;
+    }
     setText(skill.action.preferredChatPrompt);
     requestAnimationFrame(() => textareaRef.current?.focus());
   }

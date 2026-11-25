@@ -11,6 +11,10 @@ export const ACTIVITY_TYPE_META: Record<
   gen_video:         { label: "生成视频",           group: "gen" },
   gen_video_omni:    { label: "多参考视频生成",     group: "gen" },
   edit_image:        { label: "图像局部精修",       group: "gen" },
+  gen_music:         { label: "AI 音乐生成",        group: "gen" },
+  edit_music:        { label: "AI 音乐衍生编辑",    group: "gen" },
+  split_stems:       { label: "四轨分轨 (0积分)",   group: "gen" },
+  effect_music:      { label: "音频裁剪变速 (0积分)", group: "gen" },
   upload:            { label: "本地文件上传",       group: "upload" },
   upload_url:        { label: "网络链接导入",       group: "upload" },
 };

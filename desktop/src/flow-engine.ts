@@ -1153,9 +1153,12 @@ export class FlowEngineManager {
       });
     } else if (method === "trpc_request") {
       await this.handleTrpcRequest(msg);
+    } else if (method === "flowmusic_open") {
+      await this.handleFlowMusicOpen(accountId, msg);
+    } else if (method === "flowmusic_get_token" || method === "flowmusic_refresh_session") {
+      await this.handleFlowMusicGetToken(accountId, msg);
     }
 
-    void accountId;
     void socket;
   }
 
@@ -1533,5 +1536,102 @@ export class FlowEngineManager {
     if (this.state.standaloneWindowOpen) {
       this.updateState({ standaloneWindowOpen: false });
     }
+  }
+
+  private async readFlowMusicTokenFromPartition(accountId: string): Promise<{
+    access_token: string;
+    expires_at: number | null;
+    user_id: string | null;
+    email: string | null;
+  } | null> {
+    try {
+      const ses = this.preparePartitionSession(accountId);
+      const cookies = await ses.cookies.get({ url: "https://www.flowmusic.app/" });
+      const groups = new Map<string, Array<[number, string]>>();
+      for (const c of cookies) {
+        const m = c.name.match(/^(sb-[^.]+-auth-token)(?:\.(\d+))?$/);
+        if (!m) continue;
+        const base = m[1];
+        const idx = m[2] !== undefined ? Number(m[2]) : -1;
+        const arr = groups.get(base) ?? [];
+        arr.push([idx, c.value]);
+        groups.set(base, arr);
+      }
+      for (const chunks of groups.values()) {
+        chunks.sort((a, b) => a[0] - b[0]);
+        let raw = chunks.map(([, v]) => v).join("").trim();
+        try {
+          raw = decodeURIComponent(raw);
+        } catch {
+          // keep raw
+        }
+        if (raw.startsWith("base64-")) {
+          raw = Buffer.from(raw.slice(7), "base64url").toString("utf8");
+        }
+        const parsed = JSON.parse(raw) as Record<string, unknown>;
+        const token = typeof parsed?.access_token === "string" ? parsed.access_token : "";
+        const user = (parsed?.user && typeof parsed.user === "object"
+          ? parsed.user
+          : null) as Record<string, unknown> | null;
+        if (!token || user?.is_anonymous === true) continue;
+        const expiresAt = typeof parsed?.expires_at === "number" ? parsed.expires_at : null;
+        return {
+          access_token: token,
+          expires_at: expiresAt,
+          user_id: typeof user?.id === "string" ? user.id : null,
+          email: typeof user?.email === "string" ? user.email : null,
+        };
+      }
+    } catch {
+      // ignore cookie decode error
+    }
+    return null;
+  }
+
+  private async handleFlowMusicOpen(accountId: string, msg: Record<string, unknown>): Promise<void> {
+    const id = msg.id as string | undefined;
+    if (!id) return;
+    try {
+      const ses = this.preparePartitionSession(accountId);
+      const win = new BrowserWindow({
+        parent: this.mainWindow,
+        width: 1100,
+        height: 760,
+        autoHideMenuBar: true,
+        backgroundColor: "#09090b",
+        title: "Google Flow Music（登录后即可关闭）",
+        webPreferences: {
+          session: ses,
+          contextIsolation: true,
+          sandbox: true,
+        },
+      });
+      win.webContents.setUserAgent(this.cleanUserAgent);
+      await win.loadURL("https://www.flowmusic.app/");
+      const token = await this.readFlowMusicTokenFromPartition(accountId);
+      await this.sendResponseToAgent({
+        id,
+        ok: true,
+        music_tab_open: true,
+        signed_in: Boolean(token),
+        email: token?.email ?? null,
+      });
+    } catch (err) {
+      await this.sendResponseToAgent({
+        id,
+        error: err instanceof Error ? err.message : "FLOWMUSIC_OPEN_FAILED",
+      });
+    }
+  }
+
+  private async handleFlowMusicGetToken(accountId: string, msg: Record<string, unknown>): Promise<void> {
+    const id = msg.id as string | undefined;
+    if (!id) return;
+    const token = await this.readFlowMusicTokenFromPartition(accountId);
+    if (!token) {
+      await this.sendResponseToAgent({ id, error: "FLOWMUSIC_NOT_LOGGED_IN" });
+      return;
+    }
+    await this.sendResponseToAgent({ id, ok: true, ...token });
   }
 }

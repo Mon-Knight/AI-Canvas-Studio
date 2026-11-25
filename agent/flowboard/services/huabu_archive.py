@@ -43,6 +43,7 @@ ALLOWED_NODE_TYPES = {
     "character",
     "image",
     "video",
+    "audio",
     "prompt",
     "note",
     "merge",
@@ -83,6 +84,15 @@ _SAFE_DATA_KEYS = {
     "mediaIds",
     "history",
     "renderedAt",
+    "musicTitle",
+    "musicModel",
+    "musicLyrics",
+    "musicBpm",
+    "musicDurationSec",
+    "musicInstrumental",
+    "musicEditMode",
+    "musicCoverMediaId",
+    "musicStems",
 }
 
 _EXT_MIME = {
@@ -93,6 +103,11 @@ _EXT_MIME = {
     ".gif": "image/gif",
     ".mp4": "video/mp4",
     ".webm": "video/webm",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".m4a": "audio/mp4",
+    ".aac": "audio/aac",
+    ".ogg": "audio/ogg",
 }
 
 
@@ -121,9 +136,20 @@ def _sniff_media_mime(data: bytes) -> Optional[str]:
         return "image/jpeg"
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "image/webp"
+    if data[:4] == b"RIFF" and data[8:12] == b"WAVE":
+        return "audio/wav"
     if data[:6] in (b"GIF87a", b"GIF89a"):
         return "image/gif"
+    if data[:4] == b"OggS":
+        return "audio/ogg"
+    if data[:3] == b"ID3" or (data[0] == 0xFF and (data[1] & 0xE0) == 0xE0):
+        return "audio/mpeg"
     if data[4:8] == b"ftyp":
+        brand = data[8:12]
+        if brand in (b"M4A ", b"M4B ", b"mp42", b"isom"):
+            # Distinguish audio-only M4A brands from MP4 video when explicitly M4A/M4B
+            if brand in (b"M4A ", b"M4B "):
+                return "audio/mp4"
         return "video/mp4"
     if data[:4] == b"\x1a\x45\xdf\xa3":
         return "video/webm"
@@ -341,6 +367,10 @@ def export_board_huabu(
                 raw_mids.append(data["mediaId"])
             if isinstance(data.get("mediaIds"), list):
                 raw_mids.extend(data["mediaIds"])
+            if isinstance(data.get("musicCoverMediaId"), str):
+                raw_mids.append(data["musicCoverMediaId"])
+            if isinstance(data.get("musicStems"), dict):
+                raw_mids.extend(data["musicStems"].values())
             for mid in raw_mids:
                 if (
                     isinstance(mid, str)
@@ -362,7 +392,11 @@ def export_board_huabu(
                 continue
             ext = cached.suffix.lower()
             mime = _EXT_MIME.get(ext, "application/octet-stream")
-            kind = "video" if mime.startswith("video/") else "image"
+            kind = (
+                "audio"
+                if mime.startswith("audio/")
+                else ("video" if mime.startswith("video/") else "image")
+            )
             bundled_media[mid] = (cached, mime, kind)
             total_media_bytes += size
 
@@ -395,6 +429,22 @@ def export_board_huabu(
             clean_data["mediaIds"] = kept_mids
         else:
             clean_data.pop("mediaIds", None)
+
+        cover_mid = clean_data.get("musicCoverMediaId")
+        if not (isinstance(cover_mid, str) and cover_mid in bundled_media):
+            clean_data.pop("musicCoverMediaId", None)
+
+        raw_stems = clean_data.get("musicStems")
+        if isinstance(raw_stems, dict):
+            kept_stems = {
+                str(k): v
+                for k, v in raw_stems.items()
+                if isinstance(v, str) and v in bundled_media
+            }
+            if kept_stems:
+                clean_data["musicStems"] = kept_stems
+            else:
+                clean_data.pop("musicStems", None)
 
         has_bundled_media = bool(kept_mid) or bool(kept_mids)
         if not has_bundled_media:
@@ -539,8 +589,14 @@ def import_board_huabu(
                 sniffed_mime = _sniff_media_mime(raw_bytes)
                 if not sniffed_mime:
                     continue
+                if sniffed_mime == "video/mp4" and archive_path.lower().endswith(".m4a"):
+                    sniffed_mime = "audio/mp4"
                 if media_service.cached_path(mid) is None:
-                    kind = "video" if sniffed_mime.startswith("video/") else "image"
+                    kind = (
+                        "audio"
+                        if sniffed_mime.startswith("audio/")
+                        else ("video" if sniffed_mime.startswith("video/") else "image")
+                    )
                     if media_service.ingest_inline_bytes(mid, raw_bytes, kind=kind, mime=sniffed_mime):
                         ingested_media += 1
 

@@ -16,6 +16,7 @@ import {
   type ScriptBreakdownResponse,
 } from "../api/client";
 import { requestAutoBrief } from "../api/autoBrief";
+import { analyzeCachedAudio, uploadAudioFile } from "../api/music";
 import { useBoardStore, type FlowNode } from "../store/board";
 import { useGenerationStore } from "../store/generation";
 
@@ -110,6 +111,7 @@ export function DirectorStageModal() {
   const [scriptText, setScriptText] = useState("");
   const [shotCount, setShotCount] = useState(4);
   const [aspectRatio, setAspectRatio] = useState("IMAGE_ASPECT_RATIO_LANDSCAPE");
+  const [appendMusicNode, setAppendMusicNode] = useState(true);
   const [planBusy, setPlanBusy] = useState(false);
   const [planError, setPlanError] = useState<string | null>(null);
   const [plan, setPlan] = useState<ScriptBreakdownResponse | null>(null);
@@ -122,11 +124,14 @@ export function DirectorStageModal() {
   const [remakeCharacterPrompt, setRemakeCharacterPrompt] = useState(
     "高还原度全新主角设定：保留参考原片节奏与构图，替换为主角服装与五官特征",
   );
+  const [remakeAudioFile, setRemakeAudioFile] = useState<File | null>(null);
+  const [analyzeRemakeAudio, setAnalyzeRemakeAudio] = useState(true);
   const [extractBusy, setExtractBusy] = useState(false);
   const [remakeBusy, setRemakeBusy] = useState(false);
   const [remakeProgress, setRemakeProgress] = useState<string | null>(null);
   const [remakeError, setRemakeError] = useState<string | null>(null);
   const videoInputRef = useRef<HTMLInputElement>(null);
+  const remakeAudioInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const onOpen = (e: Event) => {
@@ -233,6 +238,34 @@ export function DirectorStageModal() {
         recipeEdges.push({ source_key: "subject", target_key: imgKey });
         recipeEdges.push({ source_key: imgKey, target_key: vidKey });
       });
+
+      if (appendMusicNode) {
+        const moodSummary = [
+          plan.title ? `主题：${plan.title}` : "",
+          scriptText.trim().slice(0, 140),
+        ]
+          .filter(Boolean)
+          .join("；");
+        recipeNodes.push({
+          key: "theme_bgm",
+          type: "audio",
+          x: 1140,
+          y: Math.max(80, Math.round((plan.shots.length - 1) * 140)),
+          data: {
+            title: `${groupTitle} · 主题配乐`,
+            musicTitle: `${groupTitle} · 主题配乐`,
+            prompt: `电影级原声配乐（纯音乐 BGM），情绪贴合剧本：${moodSummary}`,
+            musicInstrumental: true,
+            musicDurationSec: Math.min(180, Math.max(30, plan.shots.length * 10)),
+            musicModel: "Lyria 3.5",
+            groupId,
+            groupTitle,
+          },
+        });
+        if (plan.shots.length > 0) {
+          recipeEdges.push({ source_key: "shot_vid_1", target_key: "theme_bgm" });
+        }
+      }
 
       await instantiateBoardRecipe({
         name: groupTitle,
@@ -455,6 +488,75 @@ export function DirectorStageModal() {
         requestAutoBrief(String(refDto.id), up.media_id);
       }
 
+      // 3. 可选：上传原片参考音轨并调用 0 积分 Flow Music 解析曲风（解锁换风翻唱/分轨）
+      if (remakeAudioFile) {
+        setRemakeProgress("正在上传参考音轨并解析曲风（0 积分）…");
+        const audioTitle = remakeAudioFile.name.replace(/\.[^.]+$/, "") || "原片参考音轨";
+        const audioDto = await createNode({
+          board_id: boardId,
+          type: "audio",
+          x: Math.round(baseX + 1360),
+          y: Math.round(Math.max(80, (remakeFrames.length - 1) * 140)),
+          data: {
+            title: `${audioTitle} · 参考音轨`,
+            musicTitle: `${audioTitle} · 参考音轨`,
+            groupId,
+            groupTitle,
+          },
+        });
+        const uploadedAudio = await uploadAudioFile(remakeAudioFile, audioDto.id);
+        let clipId: string | undefined;
+        let caption: string | undefined;
+        let lyrics: string | undefined;
+        if (analyzeRemakeAudio) {
+          try {
+            const analyzed = await analyzeCachedAudio({
+              mediaId: uploadedAudio.media_id,
+              nodeId: audioDto.id,
+            });
+            clipId = analyzed.clip_id || undefined;
+            caption = analyzed.caption || undefined;
+            lyrics = analyzed.lyrics || undefined;
+          } catch {
+            // 若用户未登录 Flow Music，仍保留已上传的本地音频节点
+          }
+        }
+        await patchNode(audioDto.id, {
+          status: "done",
+          data: {
+            mediaId: uploadedAudio.media_id,
+            mediaIds: [uploadedAudio.media_id],
+            variantCount: 1,
+            renderedAt: nowIso,
+            ...(clipId ? { musicClipId: clipId, musicClipIds: [clipId] } : {}),
+            ...(caption ? { aiBrief: caption, prompt: caption } : {}),
+            ...(lyrics ? { musicLyrics: lyrics } : {}),
+          },
+        }).catch(() => {});
+
+        addedNodes.push({
+          id: String(audioDto.id),
+          type: "audio",
+          position: { x: audioDto.x, y: audioDto.y },
+          data: {
+            type: "audio",
+            shortId: audioDto.short_id,
+            title: `${audioTitle} · 参考音轨`,
+            musicTitle: `${audioTitle} · 参考音轨`,
+            status: "done",
+            mediaId: uploadedAudio.media_id,
+            mediaIds: [uploadedAudio.media_id],
+            variantCount: 1,
+            renderedAt: nowIso,
+            ...(clipId ? { musicClipId: clipId, musicClipIds: [clipId] } : {}),
+            ...(caption ? { aiBrief: caption, prompt: caption } : {}),
+            ...(lyrics ? { musicLyrics: lyrics } : {}),
+            groupId,
+            groupTitle,
+          },
+        });
+      }
+
       useBoardStore.setState((s) => ({
         nodes: [...s.nodes, ...addedNodes],
         edges: [...s.edges, ...addedEdges],
@@ -574,6 +676,15 @@ export function DirectorStageModal() {
                 </button>
               </div>
 
+              <label className="jm-audio-toggle-row" style={{ marginTop: 4 }}>
+                <input
+                  type="checkbox"
+                  checked={appendMusicNode}
+                  onChange={(e) => setAppendMusicNode(e.target.checked)}
+                />
+                <span>🎵 同步在分镜组末端追加 Flow Music 主题配乐节点（预填氛围词，待人工确认后再扣分生成）</span>
+              </label>
+
               {planError && <p className="visual-asset__error" role="alert">{planError}</p>}
 
               {plan && (
@@ -662,6 +773,47 @@ export function DirectorStageModal() {
                 </button>
               </div>
 
+              {/* 可选：同步挂载原片参考音轨（0 积分 Flow Music 解析曲风） */}
+              <div className="jm-director-modal__controls" style={{ marginTop: 4 }}>
+                <input
+                  ref={remakeAudioInputRef}
+                  type="file"
+                  accept="audio/*,.mp3,.wav,.m4a,.ogg,.aac"
+                  hidden
+                  onChange={(e) => {
+                    const f = e.target.files?.[0] ?? null;
+                    e.target.value = "";
+                    setRemakeAudioFile(f);
+                  }}
+                />
+                <button
+                  type="button"
+                  className="jm-seq-ctrl-btn"
+                  onClick={() => remakeAudioInputRef.current?.click()}
+                >
+                  🎵 {remakeAudioFile ? `已选参考音轨：${remakeAudioFile.name.slice(0, 18)}` : "附加原片参考音轨（可选）"}
+                </button>
+                {remakeAudioFile && (
+                  <>
+                    <label className="jm-audio-toggle-row" style={{ margin: 0 }}>
+                      <input
+                        type="checkbox"
+                        checked={analyzeRemakeAudio}
+                        onChange={(e) => setAnalyzeRemakeAudio(e.target.checked)}
+                      />
+                      <span>自动调用 Flow Music 免费解析曲风 (0 积分)</span>
+                    </label>
+                    <button
+                      type="button"
+                      className="jm-seq-ctrl-btn"
+                      onClick={() => setRemakeAudioFile(null)}
+                    >
+                      移除
+                    </button>
+                  </>
+                )}
+              </div>
+
               {remakeError && <p className="visual-asset__error" role="alert">{remakeError}</p>}
               {remakeProgress && (
                 <p className="gen-dialog__hint" role="status">{remakeProgress}</p>
@@ -694,7 +846,9 @@ export function DirectorStageModal() {
         <div className="gen-dialog__footer">
           <span className="gen-dialog__board-ctx">
             {tab === "script"
-              ? "将创建「主角设定 → 分镜画面 → 动态视频」联动分镜组"
+              ? appendMusicNode
+                ? "将创建「主角设定 → 分镜画面 → 动态视频 + 主题配乐」联动分镜组"
+                : "将创建「主角设定 → 分镜画面 → 动态视频」联动分镜组"
               : "所有抽帧均注册为 Flow 官方 mediaId（0 积分），铺流后可自由抽卡替换"}
           </span>
           {tab === "script" ? (

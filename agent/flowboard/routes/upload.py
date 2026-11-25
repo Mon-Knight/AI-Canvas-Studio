@@ -347,3 +347,96 @@ async def upload_image_from_url(body: UrlUploadBody):
         out["media_id"], size, mime, parsed.netloc,
     )
     return out
+
+
+MAX_AUDIO_UPLOAD_BYTES = 35 * 1024 * 1024  # 35 MB
+
+_AUDIO_EXT_BY_MIME = {
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/wave": ".wav",
+    "audio/mp4": ".m4a",
+    "audio/x-m4a": ".m4a",
+    "audio/aac": ".aac",
+    "audio/ogg": ".ogg",
+}
+
+
+def _sniff_audio_mime(raw: bytes, filename: str = "") -> Optional[str]:
+    if len(raw) < 12:
+        return None
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WAVE":
+        return "audio/wav"
+    if raw[:4] == b"OggS":
+        return "audio/ogg"
+    if raw[:3] == b"ID3" or (raw[0] == 0xFF and (raw[1] & 0xE0) == 0xE0):
+        return "audio/mpeg"
+    if raw[4:8] == b"ftyp":
+        return "audio/mp4"
+    # Fallback ADTS AAC sync header (0xFFF1 / 0xFFF9)
+    if raw[0] == 0xFF and (raw[1] & 0xF6) == 0xF0:
+        return "audio/aac"
+    ext = (filename.rsplit(".", 1)[-1].lower() if "." in filename else "")
+    if ext == "mp3":
+        return "audio/mpeg"
+    if ext == "wav":
+        return "audio/wav"
+    if ext == "m4a":
+        return "audio/mp4"
+    if ext == "ogg":
+        return "audio/ogg"
+    if ext == "aac":
+        return "audio/aac"
+    return None
+
+
+@router.post("/upload-audio")
+async def upload_audio_file(
+    file: UploadFile = File(...),
+    node_id: Optional[int] = Form(default=None),
+):
+    """Persist a local audio file (MP3/WAV/M4A/OGG/AAC) into the local /media cache."""
+    import uuid
+
+    raw = await file.read(MAX_AUDIO_UPLOAD_BYTES + 1)
+    size = len(raw)
+    if size == 0:
+        raise HTTPException(status_code=400, detail="音频文件为空")
+    if size > MAX_AUDIO_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"音频文件超过 35 MB 上限（当前 {size // (1024 * 1024)} MB）",
+        )
+
+    filename = file.filename or "audio.mp3"
+    sniffed = _sniff_audio_mime(raw, filename)
+    content_type = (file.content_type or "").lower().split(";")[0].strip()
+    mime = sniffed or (content_type if content_type in _AUDIO_EXT_BY_MIME else None)
+    if not mime:
+        raise HTTPException(
+            status_code=415,
+            detail="仅支持 MP3、WAV、M4A、OGG、AAC 格式的音频文件",
+        )
+
+    media_id = str(uuid.uuid4())
+    ok = media_service.ingest_inline_bytes(media_id, raw, kind="audio", mime=mime)
+    if not ok:
+        raise HTTPException(status_code=500, detail="写入本地音频缓存失败")
+
+    if node_id is not None:
+        with get_session() as s:
+            row = s.exec(select(Asset).where(Asset.uuid_media_id == media_id)).first()
+            if row is not None:
+                row.node_id = node_id
+                s.add(row)
+                s.commit()
+
+    logger.info("upload-audio: media_id=%s size=%d mime=%s", media_id, size, mime)
+    return {
+        "media_id": media_id,
+        "mime": mime,
+        "size": size,
+        "filename": filename,
+    }

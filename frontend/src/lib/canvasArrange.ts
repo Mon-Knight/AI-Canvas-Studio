@@ -249,7 +249,7 @@ export function collectSelectedMediaDownloads(nodes: FlowNode[]): MediaDownloadI
           : [];
     const ids = rawIds.filter((m): m is string => typeof m === "string" && m.length > 0);
     const safeTitle = (data.title || data.type).replace(/[^A-Za-z0-9\u4e00-\u9fa5_-]+/g, "_");
-    const ext = data.type === "video" ? "mp4" : "png";
+    const ext = data.type === "video" ? "mp4" : data.type === "audio" ? "m4a" : "png";
     ids.forEach((mid, i) => {
       if (seen.has(mid)) return;
       seen.add(mid);

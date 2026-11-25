@@ -20,7 +20,7 @@ router = APIRouter(prefix="/api/references", tags=["references"])
 
 
 # Valid kinds — matches the source node types that can be saved.
-_ALLOWED_KINDS = {"image", "character", "visual_asset", "storyboard_shot"}
+_ALLOWED_KINDS = {"image", "character", "visual_asset", "storyboard_shot", "audio"}
 
 
 class ReferenceCreate(BaseModel):

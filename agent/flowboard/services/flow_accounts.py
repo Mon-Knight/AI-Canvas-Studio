@@ -208,3 +208,54 @@ async def sync_active_credits(force: bool = False) -> dict | None:
             )
             return res
     return None
+
+
+FLOWMUSIC_URL = "https://www.flowmusic.app/"
+
+
+def launch_music(account: FlowAccount) -> None:
+    """Open Flow Music inside the account's existing managed Chrome profile."""
+    if not re.fullmatch(r"[0-9a-f]{32}", account.id):
+        raise ValueError("无效的浏览器配置编号。")
+    if os.getenv("FLOWBOARD_EMBEDDED_BROWSER") == "1":
+        return
+    chrome = _chrome()
+    if not chrome:
+        raise OSError("找不到 Google Chrome，请先安装后再打开 Flow Music。")
+    directory = (STORAGE_DIR / "flow-browser-profiles" / account.id).resolve()
+    directory.mkdir(parents=True, exist_ok=True)
+    subprocess.Popen(
+        [chrome, f"--user-data-dir={directory}", FLOWMUSIC_URL],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def record_account_music_credits(
+    profile_id: str | None,
+    credits: int | None,
+    plan: str | None = None,
+) -> None:
+    """Persist the latest Flow Music credit balance & plan onto the account row."""
+    if not profile_id:
+        return
+    valid_credits = (
+        credits
+        if isinstance(credits, int) and not isinstance(credits, bool) and 0 <= credits <= 1_000_000_000
+        else None
+    )
+    clean_plan = plan.strip()[:64] if isinstance(plan, str) and plan.strip() else None
+    if valid_credits is None and clean_plan is None:
+        return
+    with get_session() as session:
+        row = session.get(FlowAccount, profile_id)
+        if row is None:
+            return
+        if valid_credits is not None:
+            row.music_credits = valid_credits
+            row.music_credits_updated_at = datetime.now(timezone.utc)
+        if clean_plan is not None:
+            row.music_plan = clean_plan
+        session.add(row)
+        session.commit()

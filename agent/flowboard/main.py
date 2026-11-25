@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from flowboard.config import EXTENSION_WS_PORT, ROOT, WS_HOST
 from flowboard.db import get_session, init_db
 from flowboard.db.models import Node, PipelineRun, Request
-from flowboard.routes import activity, auth, boards, chat, edges, flow_projects, llm, media, nodes, plans, projects, prompt, system, upload, vision
+from flowboard.routes import activity, auth, boards, chat, edges, flow_projects, llm, media, music, nodes, plans, projects, prompt, system, upload, vision
 from flowboard.routes import flow_accounts as flow_accounts_route
 from flowboard.routes.local_only import EXTENSION_ORIGIN_REGEX, allowed_ui_origins, local_origin
 from flowboard.routes import provider_jobs as provider_jobs_route
@@ -161,7 +161,7 @@ def _resolve_agent_version() -> str:
                     return ver.strip()
             except Exception:  # noqa: BLE001
                 pass
-    return "1.1.6"
+    return "1.1.7"
 
 
 APP_VERSION = _resolve_agent_version()
@@ -193,6 +193,7 @@ app.include_router(references_route.router, dependencies=_LOCAL_DEPS)
 app.include_router(requests_route.router, dependencies=_LOCAL_DEPS)
 app.include_router(media.bytes_router, dependencies=_LOCAL_DEPS)
 app.include_router(media.api_router, dependencies=_LOCAL_DEPS)
+app.include_router(music.router, dependencies=_LOCAL_DEPS)
 app.include_router(upload.router, dependencies=_LOCAL_DEPS)
 app.include_router(plans.router, dependencies=_LOCAL_DEPS)
 app.include_router(vision.router, dependencies=_LOCAL_DEPS)

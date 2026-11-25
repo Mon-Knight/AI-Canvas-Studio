@@ -126,11 +126,20 @@ export async function exportTimelineSequenceVideo(opts: {
   shots: TimelineExportShotInput[];
   bgmUrl?: string | null;
   bgmVolume?: number;
+  bgmFadeOutSec?: number;
   videoAudioMuted?: boolean;
   signal?: AbortSignal;
   onProgress?: (p: TimelineExportProgress) => void;
 }): Promise<{ blob: Blob; ext: "mp4" | "webm"; mimeType: string }> {
-  const { shots, bgmUrl, bgmVolume = 0.65, videoAudioMuted = false, signal, onProgress } = opts;
+  const {
+    shots,
+    bgmUrl,
+    bgmVolume = 0.65,
+    bgmFadeOutSec = 2,
+    videoAudioMuted = false,
+    signal,
+    onProgress,
+  } = opts;
   if (shots.length === 0) {
     throw new Error("没有可导出的启用镜头");
   }
@@ -166,6 +175,7 @@ export async function exportTimelineSequenceVideo(opts: {
   }
 
   let bgmEl: HTMLAudioElement | null = null;
+  let bgmGain: GainNode | null = null;
   if (bgmUrl && audioCtx && audioDest) {
     bgmEl = document.createElement("audio");
     bgmEl.crossOrigin = "anonymous";
@@ -185,7 +195,7 @@ export async function exportTimelineSequenceVideo(opts: {
     });
     try {
       const bgmSource = audioCtx.createMediaElementSource(bgmEl);
-      const bgmGain = audioCtx.createGain();
+      bgmGain = audioCtx.createGain();
       bgmGain.gain.value = Math.max(0, Math.min(1, bgmVolume));
       bgmSource.connect(bgmGain);
       bgmGain.connect(audioDest);
@@ -340,6 +350,18 @@ export async function exportTimelineSequenceVideo(opts: {
       percent: 100,
       label: "正在封装导出视频文件…",
     });
+    if (bgmGain && audioCtx && bgmFadeOutSec > 0 && !signal?.aborted) {
+      const fadeDur = Math.min(2.0, Math.max(0.25, bgmFadeOutSec));
+      const now = audioCtx.currentTime;
+      try {
+        bgmGain.gain.cancelScheduledValues(now);
+        bgmGain.gain.setValueAtTime(bgmGain.gain.value, now);
+        bgmGain.gain.linearRampToValueAtTime(0.0001, now + fadeDur);
+        await new Promise((r) => window.setTimeout(r, Math.round(fadeDur * 1000)));
+      } catch {
+        // non-fatal fade ramp fallback
+      }
+    }
   } finally {
     if (bgmEl) {
       bgmEl.pause();

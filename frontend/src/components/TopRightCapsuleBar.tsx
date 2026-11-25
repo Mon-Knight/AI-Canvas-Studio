@@ -1034,6 +1034,9 @@ export function TopRightCapsuleBar() {
                 <span>Flow 账号与积分</span>
                 <span className="jm-more-menu__sub" title={`当前视频档位来源：${tierSourceNote}`}>
                   ✦ {tierLabel}
+                  {typeof activeAccount?.music_credits === "number"
+                    ? ` · 🎵 ${activeAccount.music_credits}`
+                    : ""}
                 </span>
                 <svg className="jm-account-popover__chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden="true"><path d="m9 6 6 6-6 6" /></svg>
               </button>

@@ -20,7 +20,12 @@ from flowboard.services import flow_accounts as accounts
 from flowboard.services import flow_google_oauth as google
 from flowboard.services.flow_client import flow_client
 from flowboard.services.flow_project import normalize_project_id
-from flowboard.services.ws_server import profile_presence, route_lock, refresh_route_locked
+from flowboard.services.ws_server import (
+    profile_music_presence,
+    profile_presence,
+    route_lock,
+    refresh_route_locked,
+)
 from .local_only import local_origin
 
 
@@ -83,12 +88,18 @@ async def list_accounts() -> dict:
         result = []
         for row in rows:
             connected, tab = profile_presence(row.id)
+            _, music_tab = profile_music_presence(row.id)
             updated = row.credits_updated_at
+            music_updated = row.music_credits_updated_at
             result.append({"id": row.id, "label": row.label, "project_id": row.project_id,
                            "paygate_tier": row.paygate_tier, "paired": bool(row.pair_digest),
-                           "connected": connected, "flow_tab_open": tab, "credits": row.credits,
+                           "connected": connected, "flow_tab_open": tab, "music_tab_open": music_tab,
+                           "credits": row.credits,
+                           "music_credits": row.music_credits,
+                           "music_plan": row.music_plan,
                            "google_email": identities.get(row.id),
-                           "credits_updated_at": updated.replace(tzinfo=timezone.utc).isoformat() if updated else None})
+                           "credits_updated_at": updated.replace(tzinfo=timezone.utc).isoformat() if updated else None,
+                           "music_credits_updated_at": music_updated.replace(tzinfo=timezone.utc).isoformat() if music_updated else None})
         return {"active_account_id": active.value if active else None,
                 "accounts": result, "extension_path": str(accounts.EXTENSION_PATH),
                 "embedded_browser": os.getenv("FLOWBOARD_EMBEDDED_BROWSER") == "1"}

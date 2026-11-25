@@ -14,6 +14,7 @@ NodeType = Literal[
     "character",
     "image",
     "video",
+    "audio",
     "prompt",
     "note",
     "merge",

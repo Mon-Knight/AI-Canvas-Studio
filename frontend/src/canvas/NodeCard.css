@@ -560,3 +560,238 @@
   color: #fde68a;
 }
 
+/* ── Flow Music 音频画布节点（即梦 Obsidian 纯黑灰毛玻璃风） ──────────────── */
+.node-card.jm-node-card.node-card--audio {
+  width: 286px;
+}
+
+.node-body--audio {
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-2);
+}
+
+.jm-audio-empty {
+  min-height: 112px;
+  gap: 8px;
+}
+
+.jm-audio-empty__cta {
+  background: #f4f4f6 !important;
+  color: #09090b !important;
+  border-color: transparent !important;
+  font-weight: 600;
+}
+
+.jm-audio-empty__cta:hover:not(:disabled) {
+  background: #ffffff !important;
+}
+
+.jm-audio-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+}
+
+.jm-audio-card__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.jm-audio-card__cover,
+.jm-audio-card__disc {
+  width: 44px;
+  height: 44px;
+  border-radius: 9px;
+  flex: none;
+  object-fit: cover;
+  border: 1px solid var(--border-subtle);
+}
+
+.jm-audio-card__disc {
+  display: grid;
+  place-items: center;
+  background: #141417;
+  color: var(--brand-cyan);
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.jm-audio-card__meta {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.jm-audio-card__title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.jm-audio-card__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.jm-audio-tag {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.jm-audio-ab-row {
+  display: flex;
+  gap: 5px;
+}
+
+.jm-audio-ab-btn {
+  flex: 1;
+  padding: 3px 8px;
+  border-radius: 7px;
+  border: 1px solid var(--border-subtle);
+  background: #141417;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.jm-audio-ab-btn--active {
+  background: rgba(56, 189, 248, 0.14);
+  border-color: rgba(56, 189, 248, 0.45);
+  color: #bae6fd;
+  font-weight: 600;
+}
+
+.jm-audio-player {
+  width: 100%;
+  height: 32px;
+  border-radius: 8px;
+  accent-color: var(--brand-cyan);
+}
+
+.jm-audio-actions-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.jm-audio-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #141417;
+  color: #e4e4e7;
+  font-size: 11px;
+  line-height: 1.4;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.jm-audio-chip:hover:not(:disabled) {
+  background: #27272c;
+  color: #ffffff;
+}
+
+.jm-audio-chip--cyan {
+  border-color: rgba(56, 189, 248, 0.45);
+  background: rgba(56, 189, 248, 0.14);
+  color: #7dd3fc;
+}
+
+.jm-audio-stems {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 8px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: #141417;
+}
+
+.jm-audio-stem-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.jm-audio-stem-row__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11px;
+  color: #e4e4e7;
+}
+
+.jm-audio-stem-row__btns {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.jm-audio-mini-btn {
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #1c1c20;
+  color: #d4d4d8;
+  font-size: 10px;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.jm-audio-mini-btn:hover {
+  background: #27272c;
+  color: #ffffff;
+}
+
+.jm-audio-mini-btn--active {
+  border-color: rgba(56, 189, 248, 0.5);
+  background: rgba(56, 189, 248, 0.16);
+  color: #7dd3fc;
+}
+
+.jm-audio-stem-player {
+  width: 100%;
+  height: 26px;
+}
+
+.jm-audio-stems__split-btn {
+  width: 100%;
+  font-size: 11px;
+  text-align: center;
+  margin-top: 2px;
+}
+
+.jm-audio-lyrics {
+  margin: 0;
+  padding: 8px;
+  max-height: 140px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: #141417;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.5;
+}
+

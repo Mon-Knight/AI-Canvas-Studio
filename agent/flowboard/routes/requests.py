@@ -62,11 +62,15 @@ async def create_request(body: RequestCreate, request: HTTPRequest):
             raise HTTPException(409, str(exc)) from None
     account_id, project_id = active_binding()
     managed = account_id is not None
+    music_types = ("gen_music", "edit_music", "split_stems", "effect_music")
+    is_music = body.type in music_types
     uses_flow = not video and body.type in ("gen_image", "edit_image", "create_project") and _media_provider_of(params) != "muse"
     if managed and body.type == "proxy":
         raise HTTPException(409, "独立账号模式仅支持画布内的 Flow 生成与上传。")
     if uses_flow and (managed or body.flow_account_id is not None) and body.flow_account_id != account_id:
         raise HTTPException(409, "Flow 账号已切换，请重新提交任务。")
+    if is_music and body.flow_account_id is not None and body.flow_account_id != account_id:
+        raise HTTPException(409, "Google 账号已切换，请重新提交音乐任务。")
     if managed and uses_flow:
         if not project_id or not flow_client.connected:
             raise HTTPException(409, "请先绑定项目，并在当前账号窗口打开 Flow、连接扩展。")
@@ -88,6 +92,17 @@ async def create_request(body: RequestCreate, request: HTTPRequest):
                     raise HTTPException(409, "该节点已有视频任务，请等待完成后再提交。")
                 # Persist queue state in the same transaction as the request;
                 # another tab/reload can show it before the worker starts.
+                node.status = "queued"
+                s.add(node)
+            elif is_music:
+                if node.type != "audio":
+                    raise HTTPException(422, "请选择音频节点提交音乐生成或编辑任务。")
+                pending_music = s.exec(select(Request.id).where(
+                    Request.node_id == node.id, Request.type.in_(music_types),
+                    Request.status.in_(("queued", "running")),
+                ).limit(1)).first()
+                if pending_music is not None:
+                    raise HTTPException(409, "该音频节点已有音乐任务在运行，请等待完成后再提交。")
                 node.status = "queued"
                 s.add(node)
         req = Request(

@@ -23,6 +23,10 @@ import {
 } from "../components/JimengIcons";
 import "./LeftFloatingDock.css";
 
+type DockSubAction =
+  | { kind: "node"; label: string; type: NodeType }
+  | { kind: "audio_director"; label: string };
+
 type DockToolItem =
   | {
       id: string;
@@ -32,7 +36,7 @@ type DockToolItem =
       renderIcon: () => JSX.Element;
       dot?: boolean;
       beta?: boolean;
-      subAction?: { label: string; type: NodeType };
+      subAction?: DockSubAction;
     }
   | {
       id: string;
@@ -67,9 +71,11 @@ const CREATION_TOOLS: DockToolItem[] = [
   },
   {
     id: "audio",
-    action: "audio",
+    action: "node",
+    type: "audio",
     label: "音频",
     renderIcon: () => <IconAudio size={18} />,
+    subAction: { kind: "audio_director", label: "声画导演" },
   },
   {
     id: "timeline",
@@ -83,7 +89,7 @@ const CREATION_TOOLS: DockToolItem[] = [
     type: "character",
     label: "主体",
     renderIcon: () => <IconSubject size={18} />,
-    subAction: { label: "物品素材", type: "visual_asset" },
+    subAction: { kind: "node", label: "物品素材", type: "visual_asset" },
   },
   {
     id: "storyboard",
@@ -250,10 +256,21 @@ export function LeftFloatingDock() {
         n.data.mediaId &&
         n.data.type !== "prompt" &&
         n.data.type !== "note" &&
-        n.data.type !== "video",
+        n.data.type !== "video" &&
+        n.data.type !== "audio",
     );
     window.dispatchEvent(
       new CustomEvent("flowboard:open-layer-editor", { detail: { rfId: selected?.id } }),
+    );
+  }
+
+  function handleOpenAudioDirector(tab: "voice" | "bgm" | "ai_music" = "voice") {
+    const { nodes } = useBoardStore.getState();
+    const selectedVid = nodes.find((n) => n.selected && n.data.type === "video");
+    window.dispatchEvent(
+      new CustomEvent("flowboard:open-audio-director", {
+        detail: { tab, rfId: selectedVid?.id },
+      }),
     );
   }
 
@@ -263,13 +280,7 @@ export function LeftFloatingDock() {
       return;
     }
     if (item.action === "audio") {
-      const { nodes } = useBoardStore.getState();
-      const selectedVid = nodes.find((n) => n.selected && n.data.type === "video");
-      window.dispatchEvent(
-        new CustomEvent("flowboard:open-audio-director", {
-          detail: { tab: "voice", rfId: selectedVid?.id },
-        }),
-      );
+      handleOpenAudioDirector("voice");
       return;
     }
     if (item.action === "timeline") {
@@ -393,11 +404,25 @@ export function LeftFloatingDock() {
                   <button
                     type="button"
                     className="jm-left-dock__sub-chip jm-dock-action__secondary"
-                    aria-label={`添加${subAction.label}节点`}
-                    aria-busy={pending.has(subAction.type) || undefined}
-                    onClick={() => void handleSpawn(subAction.type, subAction.label)}
+                    aria-label={
+                      subAction.kind === "node"
+                        ? `添加${subAction.label}节点`
+                        : `打开${subAction.label}`
+                    }
+                    aria-busy={
+                      subAction.kind === "node" && pending.has(subAction.type)
+                        ? true
+                        : undefined
+                    }
+                    onClick={() => {
+                      if (subAction.kind === "node") {
+                        void handleSpawn(subAction.type, subAction.label);
+                      } else {
+                        handleOpenAudioDirector("voice");
+                      }
+                    }}
                   >
-                    + {subAction.label}
+                    {subAction.kind === "node" ? `+ ${subAction.label}` : `🎙 ${subAction.label}`}
                   </button>
                 )}
               </div>

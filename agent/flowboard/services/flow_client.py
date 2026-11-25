@@ -56,6 +56,7 @@ class FlowClient:
 
     def __init__(self) -> None:
         self._ws: Optional[Any] = None
+        self._music_ws: Optional[Any] = None
         self._pending: dict[str, asyncio.Future] = {}
         self._callback_secret: str = secrets.token_urlsafe(32)
 
@@ -93,12 +94,20 @@ class FlowClient:
         return self._ws is not None
 
     @property
+    def music_connected(self) -> bool:
+        return (self._music_ws or self._ws) is not None
+
+    @property
     def callback_secret(self) -> str:
         return self._callback_secret
 
     @property
     def extension_socket(self) -> Any:
         return self._ws
+
+    @property
+    def music_socket(self) -> Any:
+        return self._music_ws or self._ws
 
     @property
     def has_pending_calls(self) -> bool:
@@ -110,8 +119,17 @@ class FlowClient:
     def set_extension(self, ws: Any) -> None:
         self._ws = ws
 
+    def set_music_extension(self, ws: Any) -> None:
+        self._music_ws = ws
+
+    def clear_music_extension(self) -> None:
+        self._music_ws = None
+
     def clear_extension(self) -> None:
+        old = self._ws
         self._ws = None
+        if self._music_ws is old:
+            self._music_ws = None
         self._flow_key_present = False
         self._flow_key = None
         # Drop the cached identity + tier — next reconnect will replay.
@@ -424,6 +442,42 @@ class FlowClient:
             {"url": url, "method": method, "headers": headers or {}, "body": body},
             timeout=timeout,
         )
+
+    async def music_rpc(
+        self,
+        method: str,
+        params: Optional[dict[str, Any]] = None,
+        timeout: Optional[float] = 45.0,
+    ) -> dict:
+        """Send a Flow Music RPC over the active account's connected extension socket."""
+        ws = self.music_socket
+        if ws is None:
+            return {"error": "extension_disconnected"}
+
+        req_id = str(uuid.uuid4())
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending[req_id] = fut
+        self._request_count += 1
+
+        payload = {"id": req_id, "method": method, "params": params or {}}
+        try:
+            await ws.send(json.dumps(payload))
+            return await asyncio.wait_for(fut, timeout=timeout or 45.0)
+        except asyncio.TimeoutError:
+            self._pending.pop(req_id, None)
+            self._failed_count += 1
+            self._last_error = "timeout"
+            return {"error": "timeout"}
+        except ConnectionError as exc:
+            self._pending.pop(req_id, None)
+            self._failed_count += 1
+            self._last_error = str(exc)
+            return {"error": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            self._pending.pop(req_id, None)
+            self._failed_count += 1
+            self._last_error = str(exc)
+            return {"error": str(exc)}
 
     # ── observability ─────────────────────────────────────────────────────
     @property

@@ -30,6 +30,10 @@ MEDIA_PRODUCING_TYPES: frozenset[str] = frozenset(
         "gen_video_first_last",
         "gen_video_text",
         "edit_image",
+        "gen_music",
+        "edit_music",
+        "split_stems",
+        "effect_music",
     }
 )
 

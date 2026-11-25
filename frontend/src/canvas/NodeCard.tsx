@@ -20,14 +20,16 @@ import {
 } from "../constants/characterVoice";
 
 import {
-  IconImage, IconNote, IconStoryboard, IconSubject, IconText, IconVideo, IconVisualAsset,
+  IconAudio, IconImage, IconNote, IconStoryboard, IconSubject, IconText, IconVideo, IconVisualAsset,
 } from "../components/JimengIcons";
+import { AudioNodeBody } from "./AudioNodeBody";
 import "./NodeCard.css";
 
 const NODE_ICONS = {
   character: IconSubject,
   image: IconImage,
   video: IconVideo,
+  audio: IconAudio,
   prompt: IconText,
   note: IconNote,
   visual_asset: IconVisualAsset,
@@ -99,12 +101,13 @@ function CharacterBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }
 // of the board, so we use the "storyboard_shot" kind there to leave
 // room for shot-specific UX in the library later (e.g. surfacing the
 // shot index, or grouping by parent storyboard).
-type ReferenceKind = "image" | "character" | "visual_asset" | "storyboard_shot";
+type ReferenceKind = "image" | "character" | "visual_asset" | "storyboard_shot" | "audio";
 
 function referenceKindFor(nodeType: string): ReferenceKind {
   if (nodeType === "Storyboard") return "storyboard_shot";
   if (nodeType === "character") return "character";
   if (nodeType === "visual_asset") return "visual_asset";
+  if (nodeType === "audio") return "audio";
   return "image";
 }
 
@@ -1203,6 +1206,8 @@ function NodeBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }) {
       return <ImageBody rfId={rfId} data={data} />;
     case "video":
       return <VideoBody rfId={rfId} data={data} />;
+    case "audio":
+      return <AudioNodeBody rfId={rfId} data={data} />;
     case "prompt":
       return <EditableTextBody rfId={rfId} data={data} variant="prompt" />;
     case "note":
@@ -1216,19 +1221,21 @@ function NodeBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }) {
 
 function downloadExt(type: string): string {
   if (type === "video") return "mp4";
+  if (type === "audio") return "m4a";
   return "png";
 }
 
 export function NodeCard(props: NodeProps<FlowNode>) {
   const data = props.data;
   const isNote = data.type === "note";
-  const isGenerable = ["image", "prompt", "video", "visual_asset", "character", "Storyboard"].includes(data.type);
+  const isGenerable = ["image", "prompt", "video", "audio", "visual_asset", "character", "Storyboard"].includes(data.type);
   const status = data.status ?? "idle";
   const isProcessing = status === "queued" || status === "running";
   const NodeIcon = NODE_ICONS[data.type];
   const title = displayNodeTitle(data.title, data.type);
   const llmBusy = isLLMBusy(data);
   const downloadable = !!data.mediaId && data.type !== "prompt" && data.type !== "note";
+  const previewable = downloadable && data.type !== "audio";
   const historyList = Array.isArray(data.history) ? data.history : [];
   const activeHistoryIdx = data.mediaId
     ? Math.max(0, historyList.findIndex((h) => h.mediaId === data.mediaId))
@@ -1245,7 +1252,7 @@ export function NodeCard(props: NodeProps<FlowNode>) {
 
   function handleOpenSettings(e: React.MouseEvent) {
     e.stopPropagation();
-    if (data.type === "prompt") {
+    if (data.type === "prompt" || data.type === "audio") {
       if (llmBusy) return;
       useGenerationStore.getState().openGenerationDialog(props.id, data.prompt ?? "");
       return;
@@ -1257,7 +1264,7 @@ export function NodeCard(props: NodeProps<FlowNode>) {
 
   function handlePreview(e: React.MouseEvent) {
     e.stopPropagation();
-    if (!downloadable) return;
+    if (!previewable) return;
     useGenerationStore.getState().openResultViewer(props.id, 0, "history");
   }
 
@@ -1294,6 +1301,8 @@ export function NodeCard(props: NodeProps<FlowNode>) {
   return (
     <div
       className={`node-card jm-node-card${isNote ? " node-card--note" : ""}${
+        data.type === "audio" ? " node-card--audio" : ""
+      }${
         props.selected ? " node-card--selected" : ""
       }${hasCustomSize ? " node-card--resized" : ""}${
         llmBusy ? " node-card--llm-busy" : ""
@@ -1389,7 +1398,7 @@ export function NodeCard(props: NodeProps<FlowNode>) {
                 </svg>
               </button>
             )}
-            {downloadable && (
+            {previewable && (
               <button
                 type="button"
                 className="node-header__btn"

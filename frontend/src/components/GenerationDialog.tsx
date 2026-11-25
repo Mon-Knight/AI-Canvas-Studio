@@ -76,6 +76,7 @@ import {
 import { SubjectTemplatesPanel } from "./generation/SubjectTemplatesPanel";
 import { UpstreamReferencesSection } from "./generation/UpstreamReferencesSection";
 import { ModalParameterControls } from "./generation/ModalParameterControls";
+import { MusicComposerPanel } from "./generation/MusicComposerPanel";
 
 const REF_SOURCE_TYPES = new Set([
   "character",
@@ -107,7 +108,12 @@ export type GenerationComposerVariant = "dropdown" | "sidebar" | "modal";
 export function GenerationDialog() {
   const { rfId, prompt } = useGenerationStore((s) => s.openDialog);
   const close = useGenerationStore((s) => s.closeGenerationDialog);
-  return rfId === null ? null : <GenerationComposer key={rfId} rfId={rfId} initialPrompt={prompt} onClose={close} variant="modal" />;
+  const targetNode = useBoardStore((s) => (rfId ? s.nodes.find((n) => n.id === rfId) : undefined));
+  if (rfId === null) return null;
+  if (targetNode?.data.type === "audio") {
+    return <MusicComposerPanel key={rfId} rfId={rfId} initialPrompt={prompt} onClose={close} />;
+  }
+  return <GenerationComposer key={rfId} rfId={rfId} initialPrompt={prompt} onClose={close} variant="modal" />;
 }
 
 export function GenerationComposer({
@@ -1265,6 +1271,16 @@ export function GenerationComposer({
       setPrompt("");
       window.dispatchEvent(
         new CustomEvent("flowboard:open-director-stage", {
+          detail: { tab: skill.action.tab },
+        }),
+      );
+      return;
+    }
+    if (skill.action.kind === "open_audio_director") {
+      setPrompt("");
+      onClose?.();
+      window.dispatchEvent(
+        new CustomEvent("flowboard:open-audio-director", {
           detail: { tab: skill.action.tab },
         }),
       );

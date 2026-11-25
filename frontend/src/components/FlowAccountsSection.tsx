@@ -13,6 +13,7 @@ import {
   type FlowPaygateTier,
   type GoogleFlowLoginConfig,
 } from "../api/flowAccounts";
+import { connectFlowMusic, syncMusicCredits } from "../api/music";
 import { useFlowAccounts } from "../store/flowAccounts";
 import { useDesktopFlowStore } from "../store/desktopFlow";
 
@@ -466,6 +467,66 @@ export function FlowAccountsSection({ compact = false }: { compact?: boolean } =
                   <button className="settings-panel__project-btn" type="button" disabled={pending !== null}
                     onClick={() => activate(account, active)}>{pending === `activate:${account.id}` ? "正在处理…" : active ? activeActionLabel : embeddedMode ? "切换至此账号" : "切换并打开"}</button>
                 </div>
+                {active && (
+                  <div className="jm-flow-music-row">
+                    <div className="jm-flow-music-row__info">
+                      <span
+                        className={`jm-conn-dot jm-conn-dot--${
+                          account.music_tab_open ? "ok" : account.connected ? "warn" : "off"
+                        }`}
+                        aria-hidden="true"
+                      />
+                      <span>
+                        🎵 Flow Music：
+                        {account.music_tab_open ? "已打开" : "未开启"}
+                        {typeof account.music_credits === "number"
+                          ? ` · ${creditsFormat.format(account.music_credits)} 音乐积分`
+                          : ""}
+                        {account.music_plan ? ` (${account.music_plan})` : ""}
+                      </span>
+                    </div>
+                    <div className="jm-flow-music-row__btns">
+                      <button
+                        className="flow-accounts__button"
+                        type="button"
+                        disabled={pending !== null}
+                        onClick={() =>
+                          void perform(`music-open:${account.id}`, async () => {
+                            const res = await connectFlowMusic(true);
+                            await refresh();
+                            setNotice(
+                              res.signed_in
+                                ? "Flow Music 个人通道已就绪。"
+                                : "已打开 flowmusic.app，登录 Google 账号后点击「刷新音乐积分」。",
+                            );
+                          })
+                        }
+                      >
+                        {pending === `music-open:${account.id}` ? "打开中…" : "开启 Flow Music"}
+                      </button>
+                      <button
+                        className="flow-accounts__button"
+                        type="button"
+                        disabled={pending !== null}
+                        onClick={() =>
+                          void perform(`music-sync:${account.id}`, async () => {
+                            const st = await syncMusicCredits();
+                            await refresh();
+                            setNotice(
+                              st.signed_in
+                                ? st.music_credits !== null
+                                  ? `已同步最新音乐积分：${st.music_credits} 积分`
+                                  : "已确认 Flow Music 登录状态。"
+                                : "尚未检测到 Flow Music 登录态，请先点击「开启 Flow Music」登录。",
+                            );
+                          })
+                        }
+                      >
+                        {pending === `music-sync:${account.id}` ? "同步中…" : "刷新音乐积分"}
+                      </button>
+                    </div>
+                  </div>
+                )}
                 {!embeddedMode && active && pair?.accountId === account.id && (
                   <div className="flow-accounts__code" role="status">
                     <span>在此账号的 Chrome 窗口中打开扩展，填入配对码：</span>

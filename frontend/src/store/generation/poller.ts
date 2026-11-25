@@ -24,6 +24,10 @@ export const MEDIA_PRODUCING_TYPES = new Set([
   "gen_video_first_last",
   "gen_video_text",
   "edit_image",
+  "gen_music",
+  "edit_music",
+  "split_stems",
+  "effect_music",
 ]);
 
 export function sidecarStatusPatch(
@@ -202,6 +206,82 @@ export function createGenerationPollers<S extends PollerStoreSlice>(
                       : {}),
                   }
                 : {};
+            const isMusicReqType =
+              req.type === "gen_music" ||
+              req.type === "edit_music" ||
+              req.type === "split_stems" ||
+              req.type === "effect_music";
+            const isStemOnly =
+              req.type === "split_stems" && Boolean(req.result["preserve_primary_media"]);
+
+            if (isStemOnly) {
+              const stemsRaw = req.result["stems"];
+              const stemsMap =
+                stemsRaw && typeof stemsRaw === "object"
+                  ? (stemsRaw as Record<string, string>)
+                  : undefined;
+              useBoardStore.getState().updateNodeData(rfId, {
+                status: "done",
+                error: undefined,
+                ...(stemsMap ? { musicStems: stemsMap } : {}),
+              });
+              const dbId = parseInt(rfId, 10);
+              if (!isNaN(dbId) && stemsMap) {
+                patchNode(dbId, {
+                  status: "done",
+                  data: { musicStems: stemsMap, error: null },
+                }).catch(() => {});
+              }
+              setState((s) => {
+                const next = { ...s.active };
+                delete next[rfId];
+                return { active: next } as Partial<S>;
+              });
+              return;
+            }
+
+            const musicMetadata: Partial<FlowboardNodeData> = isMusicReqType
+              ? {
+                  ...(typeof req.result["clip_id"] === "string"
+                    ? { musicClipId: req.result["clip_id"] as string }
+                    : {}),
+                  ...(Array.isArray(req.result["clip_ids"])
+                    ? { musicClipIds: req.result["clip_ids"] as string[] }
+                    : {}),
+                  ...(typeof req.result["cover_media_id"] === "string"
+                    ? { musicCoverMediaId: req.result["cover_media_id"] as string }
+                    : {}),
+                  ...(typeof req.result["music_title"] === "string" && req.result["music_title"]
+                    ? {
+                        musicTitle: req.result["music_title"] as string,
+                        title: req.result["music_title"] as string,
+                      }
+                    : {}),
+                  ...(typeof req.result["music_lyrics"] === "string"
+                    ? { musicLyrics: req.result["music_lyrics"] as string }
+                    : {}),
+                  ...(typeof req.result["music_duration_s"] === "number"
+                    ? { musicDurationSec: req.result["music_duration_s"] as number }
+                    : {}),
+                  ...(typeof req.result["music_bpm"] === "number"
+                    ? { musicBpm: req.result["music_bpm"] as number }
+                    : {}),
+                  ...(typeof req.result["music_instrumental"] === "boolean"
+                    ? { musicInstrumental: req.result["music_instrumental"] as boolean }
+                    : {}),
+                  ...(typeof req.result["music_model"] === "string"
+                    ? { musicModel: req.result["music_model"] as string }
+                    : {}),
+                  ...(typeof req.result["music_edit_mode"] === "string"
+                    ? { musicEditMode: req.result["music_edit_mode"] as string }
+                    : {}),
+                  ...(typeof req.result["conversation_id"] === "string"
+                    ? { musicConversationId: req.result["conversation_id"] as string }
+                    : {}),
+                  musicStems: undefined,
+                }
+              : {};
+
             const renderedAt = new Date().toISOString();
             const nextHistory =
               producesMedia && mediaId
@@ -224,7 +304,8 @@ export function createGenerationPollers<S extends PollerStoreSlice>(
               status: "done",
               ...videoMetadata,
               ...imageMeta,
-              ...(req.type.startsWith("gen_video") && mediaIds.length
+              ...musicMetadata,
+              ...((req.type.startsWith("gen_video") || isMusicReqType) && mediaIds.length
                 ? { variantCount: mediaIds.length }
                 : {}),
               ...(producesMedia
@@ -251,13 +332,16 @@ export function createGenerationPollers<S extends PollerStoreSlice>(
                 status: "done",
                 data: {
                   ...(opts.prompt ? { prompt: opts.prompt } : {}),
+                  ...musicMetadata,
+                  ...(isMusicReqType ? { musicStems: null } : {}),
                   mediaId,
                   mediaIds,
                   ...(nextHistory ? { history: nextHistory } : {}),
                   slotErrors: slotErrors ?? null,
-                  variantCount: req.type.startsWith("gen_video")
-                    ? mediaIds.length
-                    : d?.variantCount ?? mediaIds.length,
+                  variantCount:
+                    req.type.startsWith("gen_video") || isMusicReqType
+                      ? mediaIds.length
+                      : d?.variantCount ?? mediaIds.length,
                   aiBrief: null,
                   ...(opts.aspectRatio ? { aspectRatio: opts.aspectRatio } : {}),
                   renderedAt,

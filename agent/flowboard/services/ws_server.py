@@ -38,6 +38,7 @@ class Connection:
     profile_id: str | None = None
     legacy: bool = False
     flow_tab_open: bool = False
+    music_tab_open: bool = False
 
 
 _connections: dict = {}
@@ -49,10 +50,36 @@ def profile_presence(profile_id: str) -> tuple[bool, bool]:
     return bool(peers), any(peer.flow_tab_open for peer in peers)
 
 
+def profile_music_presence(profile_id: str | None) -> tuple[bool, bool]:
+    if profile_id:
+        peers = [peer for peer in _connections.values() if peer.profile_id == profile_id]
+    else:
+        peers = [peer for peer in _connections.values() if peer.legacy]
+    return bool(peers), any(peer.music_tab_open for peer in peers)
+
+
 def selected_tab_connected(profile_id: str) -> bool:
     """Check the routed socket, not merely the presence of some open tab."""
     routed = _connections.get(flow_client.extension_socket)
     return bool(routed and routed.profile_id == profile_id and routed.flow_tab_open)
+
+
+async def _send_callback_secret(ws) -> bool:
+    http_port = os.getenv("FLOWBOARD_HTTP_PORT", "8434").strip() or "8434"
+    callback_url = f"http://127.0.0.1:{http_port}/api/ext/callback"
+    try:
+        await ws.send(
+            json.dumps(
+                {
+                    "type": "callback_secret",
+                    "secret": flow_client.callback_secret,
+                    "callback_url": callback_url,
+                }
+            )
+        )
+        return True
+    except websockets.ConnectionClosed:
+        return False
 
 
 async def refresh_route_locked() -> None:
@@ -62,28 +89,33 @@ async def refresh_route_locked() -> None:
     def eligible(peer: Connection) -> bool:
         return peer.profile_id == selected and peer.flow_tab_open if selected else peer.legacy
 
-    if current in _connections and eligible(_connections[current]):
-        return
-    if current is not None:
-        flow_client.clear_extension()
-        flow_client.rotate_callback_secret()
-    chosen = next((ws for ws, peer in _connections.items() if eligible(peer)), None)
-    if chosen is not None:
-        http_port = os.getenv("FLOWBOARD_HTTP_PORT", "8434").strip() or "8434"
-        callback_url = f"http://127.0.0.1:{http_port}/api/ext/callback"
-        try:
-            await chosen.send(
-                json.dumps(
-                    {
-                        "type": "callback_secret",
-                        "secret": flow_client.callback_secret,
-                        "callback_url": callback_url,
-                    }
-                )
-            )
-        except websockets.ConnectionClosed:
-            return
-        flow_client.set_extension(chosen)
+    def music_eligible(peer: Connection) -> bool:
+        return peer.profile_id == selected if selected else peer.legacy
+
+    if not (current in _connections and eligible(_connections[current])):
+        if current is not None:
+            flow_client.clear_extension()
+            flow_client.rotate_callback_secret()
+        chosen = next((ws for ws, peer in _connections.items() if eligible(peer)), None)
+        if chosen is not None:
+            if await _send_callback_secret(chosen):
+                flow_client.set_extension(chosen)
+
+    # Independently route Flow Music WS RPCs to the active profile's connected
+    # extension (preferring a peer with a live flowmusic.app tab, but falling
+    # back to any connected peer for that profile so `flowmusic_open` works).
+    # Flow Music RPCs reply directly over WS and never require callback_secret.
+    music_chosen = next(
+        (ws for ws, peer in _connections.items() if music_eligible(peer) and peer.music_tab_open),
+        None,
+    ) or next(
+        (ws for ws, peer in _connections.items() if music_eligible(peer)),
+        None,
+    )
+    if music_chosen is None:
+        flow_client.clear_music_extension()
+    else:
+        flow_client.set_music_extension(music_chosen)
 
 
 async def refresh_route() -> None:
@@ -136,11 +168,14 @@ async def _handler(websocket) -> None:
                     peer.legacy = False
                     # Wait for a new presence report after Chrome stores the profile.
                     peer.flow_tab_open = False
+                    peer.music_tab_open = False
                     greeted = True
                     await refresh_route_locked()
                     await websocket.send(json.dumps({"type": "profile_paired", "profile_id": profile_id, "profile_token": token}))
             elif kind == "profile_presence" and greeted:
                 peer.flow_tab_open = data.get("flow_tab_open") is True
+                if "music_tab_open" in data:
+                    peer.music_tab_open = data.get("music_tab_open") is True
                 raw_project = data.get("project_id")
                 if peer.profile_id and isinstance(raw_project, str):
                     detected = normalize_project_id(raw_project)
@@ -167,7 +202,11 @@ async def _handler(websocket) -> None:
                 if not greeted and kind == "extension_ready":
                     greeted = peer.legacy = True
                     await refresh_route()
-                if flow_client.extension_socket is websocket and (peer.legacy or data.get("id")):
+                routed_here = (
+                    flow_client.extension_socket is websocket
+                    or flow_client.music_socket is websocket
+                )
+                if routed_here and (peer.legacy or data.get("id")):
                     await flow_client.handle_message(data)
     except websockets.ConnectionClosed:
         pass

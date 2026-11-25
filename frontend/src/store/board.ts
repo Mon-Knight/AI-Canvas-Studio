@@ -129,6 +129,19 @@ export interface FlowboardNodeData extends Record<string, unknown> {
   audioPrompt?: string;
   /** 视频节点「生成静音视频」开关（开启后抑制对白、配乐与环境音效，并屏蔽上游角色音色） */
   silentVideo?: boolean;
+  /** Google Flow Music (Lyria 3.5 / 3 Pro) 音频节点元数据 */
+  musicClipId?: string;
+  musicClipIds?: string[];
+  musicCoverMediaId?: string;
+  musicTitle?: string;
+  musicLyrics?: string;
+  musicDurationSec?: number;
+  musicBpm?: number;
+  musicInstrumental?: boolean;
+  musicModel?: string;
+  musicEditMode?: string;
+  musicConversationId?: string;
+  musicStems?: Record<string, string>;
   history?: NodeHistoryEntry[];
   groupId?: string;
   groupTitle?: string;
@@ -203,6 +216,7 @@ const TYPE_TITLE: Record<NodeType, string> = {
   character: "角色主体",
   image: "图片",
   video: "视频",
+  audio: "音频",
   prompt: "文本",
   note: "便签",
   visual_asset: "物品素材",
@@ -264,6 +278,29 @@ function nodeFromDto(n: NodeDTO): FlowNode {
       silentVideo:
         typeof n.data["silentVideo"] === "boolean"
           ? (n.data["silentVideo"] as boolean)
+          : undefined,
+      musicClipId: n.data["musicClipId"] as string | undefined,
+      musicClipIds: Array.isArray(n.data["musicClipIds"])
+        ? (n.data["musicClipIds"] as string[])
+        : undefined,
+      musicCoverMediaId: n.data["musicCoverMediaId"] as string | undefined,
+      musicTitle: n.data["musicTitle"] as string | undefined,
+      musicLyrics: n.data["musicLyrics"] as string | undefined,
+      musicDurationSec: typeof n.data["musicDurationSec"] === "number"
+        ? (n.data["musicDurationSec"] as number)
+        : undefined,
+      musicBpm: typeof n.data["musicBpm"] === "number"
+        ? (n.data["musicBpm"] as number)
+        : undefined,
+      musicInstrumental: typeof n.data["musicInstrumental"] === "boolean"
+        ? (n.data["musicInstrumental"] as boolean)
+        : undefined,
+      musicModel: n.data["musicModel"] as string | undefined,
+      musicEditMode: n.data["musicEditMode"] as string | undefined,
+      musicConversationId: n.data["musicConversationId"] as string | undefined,
+      musicStems:
+        n.data["musicStems"] && typeof n.data["musicStems"] === "object"
+          ? (n.data["musicStems"] as Record<string, string>)
           : undefined,
       history: Array.isArray(n.data["history"])
         ? (n.data["history"] as NodeHistoryEntry[])
@@ -590,25 +627,26 @@ export const useBoardStore = create<BoardState>((set, get) => ({
   async addReferenceNode(ref, position) {
     const { boardId } = get();
     if (boardId === null) return null;
-    const title = ref.label || "参考素材";
+    const isAudio = ref.kind === "audio";
+    const title = ref.label || (isAudio ? "音频素材" : "参考素材");
+    const spawnType: NodeType = isAudio ? "audio" : "visual_asset";
     try {
       const dto = await createNode({
         board_id: boardId,
-        type: "visual_asset",
+        type: spawnType,
         x: Math.round(position.x),
         y: Math.round(position.y),
         data: {
           title,
           mediaId: ref.mediaId,
+          mediaIds: [ref.mediaId],
+          ...(isAudio ? { musicTitle: title } : {}),
           aiBrief: ref.aiBrief ?? undefined,
           aspectRatio: ref.aspectRatio ?? undefined,
           status: "done",
           renderedAt: new Date().toISOString(),
         },
       });
-      // Mirror addNodeOfType's local-state insertion, but propagate the
-      // rich data fields so the visual_asset body renders the thumbnail
-      // straight away (instead of falling into the empty-state CTA).
       const node: FlowNode = {
         id: String(dto.id),
         type: dto.type,
@@ -619,6 +657,8 @@ export const useBoardStore = create<BoardState>((set, get) => ({
           title: (dto.data["title"] as string | undefined) ?? title,
           status: "done",
           mediaId: ref.mediaId,
+          mediaIds: [ref.mediaId],
+          ...(isAudio ? { musicTitle: title } : {}),
           aiBrief: ref.aiBrief ?? undefined,
           aspectRatio: ref.aspectRatio ?? undefined,
           renderedAt: new Date().toISOString(),

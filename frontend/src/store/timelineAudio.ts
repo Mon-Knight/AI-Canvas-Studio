@@ -116,16 +116,62 @@ export function resolveOrderedTimelineShots<T extends { key: string }>(
   });
 }
 
+const BGM_STORAGE_KEY = "flowboard.timelineBgm.v1";
+
+interface PersistedBgm {
+  mediaId: string | null;
+  name: string;
+  url: string;
+  volume?: number;
+}
+
+function loadPersistedBgm(): PersistedBgm | null {
+  try {
+    if (typeof localStorage === "undefined") return null;
+    const raw = localStorage.getItem(BGM_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PersistedBgm>;
+    if (typeof parsed.url === "string" && parsed.url && !parsed.url.startsWith("blob:")) {
+      return {
+        mediaId: typeof parsed.mediaId === "string" ? parsed.mediaId : null,
+        name: typeof parsed.name === "string" && parsed.name ? parsed.name : "画布配乐轨",
+        url: parsed.url,
+        volume: typeof parsed.volume === "number" ? parsed.volume : undefined,
+      };
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return null;
+}
+
+function persistBgm(entry: PersistedBgm | null): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    if (!entry || entry.url.startsWith("blob:")) {
+      localStorage.removeItem(BGM_STORAGE_KEY);
+    } else {
+      localStorage.setItem(BGM_STORAGE_KEY, JSON.stringify(entry));
+    }
+  } catch {
+    // non-fatal
+  }
+}
+
 interface TimelineAudioState {
   bgmName: string | null;
   bgmUrl: string | null;
+  bgmMediaId: string | null;
   bgmVolume: number;
+  bgmFadeOutSec: number;
   videoAudioMuted: boolean;
   shotOverrides: Record<string, TimelineShotOverride>;
   customOrderKeys: string[];
 
   setBgmFile(file: File | null): void;
+  setBgmMediaAsset(asset: { mediaId: string; name: string; url: string } | null): void;
   setBgmVolume(volume: number): void;
+  setBgmFadeOutSec(sec: number): void;
   setVideoAudioMuted(muted: boolean): void;
   toggleShotExcluded(key: string): void;
   setShotImageDuration(key: string, sec: number): void;
@@ -133,17 +179,21 @@ interface TimelineAudioState {
   resetTimelineOverrides(): void;
 }
 
+const initialBgm = loadPersistedBgm();
+
 export const useTimelineAudioStore = create<TimelineAudioState>((set, get) => ({
-  bgmName: null,
-  bgmUrl: null,
-  bgmVolume: 0.65,
+  bgmName: initialBgm?.name ?? null,
+  bgmUrl: initialBgm?.url ?? null,
+  bgmMediaId: initialBgm?.mediaId ?? null,
+  bgmVolume: initialBgm?.volume ?? 0.65,
+  bgmFadeOutSec: 2,
   videoAudioMuted: false,
   shotOverrides: {},
   customOrderKeys: [],
 
   setBgmFile(file) {
     const prevUrl = get().bgmUrl;
-    if (prevUrl && typeof URL !== "undefined" && typeof URL.revokeObjectURL === "function") {
+    if (prevUrl && prevUrl.startsWith("blob:") && typeof URL !== "undefined" && typeof URL.revokeObjectURL === "function") {
       try {
         URL.revokeObjectURL(prevUrl);
       } catch {
@@ -151,18 +201,61 @@ export const useTimelineAudioStore = create<TimelineAudioState>((set, get) => ({
       }
     }
     if (!file) {
-      set({ bgmName: null, bgmUrl: null });
+      persistBgm(null);
+      set({ bgmName: null, bgmUrl: null, bgmMediaId: null });
       return;
     }
     const nextUrl =
       typeof URL !== "undefined" && typeof URL.createObjectURL === "function"
         ? URL.createObjectURL(file)
         : null;
-    set({ bgmName: file.name, bgmUrl: nextUrl });
+    persistBgm(null);
+    set({ bgmName: file.name, bgmUrl: nextUrl, bgmMediaId: null });
+  },
+
+  setBgmMediaAsset(asset) {
+    const prevUrl = get().bgmUrl;
+    if (prevUrl && prevUrl.startsWith("blob:") && typeof URL !== "undefined" && typeof URL.revokeObjectURL === "function") {
+      try {
+        URL.revokeObjectURL(prevUrl);
+      } catch {
+        // non-fatal
+      }
+    }
+    if (!asset) {
+      persistBgm(null);
+      set({ bgmName: null, bgmUrl: null, bgmMediaId: null });
+      return;
+    }
+    persistBgm({
+      mediaId: asset.mediaId,
+      name: asset.name,
+      url: asset.url,
+      volume: get().bgmVolume,
+    });
+    set({
+      bgmName: asset.name,
+      bgmUrl: asset.url,
+      bgmMediaId: asset.mediaId,
+    });
   },
 
   setBgmVolume(volume) {
-    set({ bgmVolume: Math.max(0, Math.min(1, volume)) });
+    const clamped = Math.max(0, Math.min(1, volume));
+    const cur = get();
+    if (cur.bgmUrl && !cur.bgmUrl.startsWith("blob:") && cur.bgmName) {
+      persistBgm({
+        mediaId: cur.bgmMediaId,
+        name: cur.bgmName,
+        url: cur.bgmUrl,
+        volume: clamped,
+      });
+    }
+    set({ bgmVolume: clamped });
+  },
+
+  setBgmFadeOutSec(sec) {
+    set({ bgmFadeOutSec: Math.max(0, Math.min(6, Number(sec) || 0)) });
   },
 
   setVideoAudioMuted(muted) {

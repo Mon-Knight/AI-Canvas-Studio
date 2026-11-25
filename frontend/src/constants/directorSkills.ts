@@ -4,6 +4,7 @@
 
 export type DirectorSkillAction =
   | { kind: "open_director_stage"; tab: "script" | "remake" }
+  | { kind: "open_audio_director"; tab: "voice" | "bgm" | "ai_music" }
   | { kind: "insert_template"; snippet: string; preferredChatPrompt: string };
 
 export interface DirectorSkillEntry {
@@ -31,6 +32,26 @@ export const DIRECTOR_SKILLS: readonly DirectorSkillEntry[] = [
     badge: "导演台",
     desc: "上传本地参考短视频，自动抽关键帧并搭建「原片分镜 → 替换主角 → 复刻视频」节点流",
     action: { kind: "open_director_stage", tab: "remake" },
+  },
+  {
+    id: "auto_soundtrack",
+    slash: "/一键配乐",
+    title: "Flow Music 专属配乐生成",
+    badge: "Flow Music",
+    desc: "读取当前画布分镜情绪与时间线总时长，用个人 Flow Music 积分生成专属 BGM 或主题曲并直通时间线",
+    action: { kind: "open_audio_director", tab: "ai_music" },
+  },
+  {
+    id: "stem_separation",
+    slash: "/影视原声分轨",
+    title: "0 积分四轨分轨（人声/纯伴奏）",
+    badge: "Flow Music",
+    desc: "把已生成的歌曲 0 积分拆分为人声、鼓点、贝斯与纯伴奏四轨，方便对话镜头铺纯伴奏",
+    action: {
+      kind: "insert_template",
+      snippet: "电影级情绪配乐，先以舒缓钢琴与大提琴铺底，中段推入细腻脉冲鼓点与宽广弦乐高潮，留足人声对白空间",
+      preferredChatPrompt: "请根据当前画布镜头氛围帮我构思一段适配 Flow Music (Lyria 3.5) 的电影配乐提示词，并说明推荐 BPM 与情绪起伏。",
+    },
   },
   {
     id: "multicam_grid",

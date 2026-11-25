@@ -50,6 +50,27 @@ def init_db() -> None:
                 )
                 conn.commit()
 
+        if insp.has_table("flowaccount"):
+            acct_cols = {c["name"] for c in insp.get_columns("flowaccount")}
+            altered = False
+            if "music_credits" not in acct_cols:
+                conn.exec_driver_sql(
+                    "ALTER TABLE flowaccount ADD COLUMN music_credits INTEGER"
+                )
+                altered = True
+            if "music_credits_updated_at" not in acct_cols:
+                conn.exec_driver_sql(
+                    "ALTER TABLE flowaccount ADD COLUMN music_credits_updated_at DATETIME"
+                )
+                altered = True
+            if "music_plan" not in acct_cols:
+                conn.exec_driver_sql(
+                    "ALTER TABLE flowaccount ADD COLUMN music_plan VARCHAR"
+                )
+                altered = True
+            if altered:
+                conn.commit()
+
     SQLModel.metadata.create_all(engine)
 
 

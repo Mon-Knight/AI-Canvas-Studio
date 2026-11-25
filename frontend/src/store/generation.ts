@@ -123,6 +123,52 @@ interface GenerationState {
     },
   ): Promise<void>;
 
+  dispatchMusicGeneration(
+    rfId: string,
+    opts: {
+      prompt: string;
+      lyrics?: string;
+      instrumental?: boolean;
+      bpm?: number | null;
+      durationSeconds?: number | null;
+      musicModel?: string;
+      title?: string;
+      seed?: number | null;
+    },
+  ): Promise<void>;
+
+  dispatchMusicEdit(
+    rfId: string,
+    opts: {
+      sourceClipId: string;
+      action: "extend" | "cover" | "replace";
+      prompt?: string;
+      extendFromSec?: number | null;
+      extendSec?: number;
+      replaceStartSec?: number | null;
+      replaceEndSec?: number | null;
+      coverStrength?: number;
+      musicModel?: string;
+      title?: string;
+      seed?: number | null;
+    },
+  ): Promise<void>;
+
+  dispatchMusicSplitStems(rfId: string, clipId: string): Promise<void>;
+
+  dispatchMusicEffect(
+    rfId: string,
+    opts: {
+      sourceClipId: string;
+      effect: "trim" | "tempo";
+      startSec?: number;
+      endSec?: number;
+      speed?: number;
+      semitones?: number;
+      title?: string;
+    },
+  ): Promise<void>;
+
   resumeActiveRequests(boardId: number): Promise<void>;
   cancelGeneration(rfId: string): void;
   cancelSidecarPoll(rfId: string): void;
@@ -701,6 +747,173 @@ export const useGenerationStore = create<GenerationState>((set, get) => {
         prompt: opts.prompt,
         aspectRatio: opts.aspectRatio,
       });
+    },
+
+    async dispatchMusicGeneration(rfId, opts) {
+      const prompt = opts.prompt.trim();
+      if (!prompt) {
+        set({ error: "请输入音乐风格或氛围描述。" });
+        return;
+      }
+      const nodeDbId = parseInt(rfId, 10);
+      const snapshot = useFlowAccounts.getState().snapshot;
+      const activeAccountId = snapshot?.active_account_id ?? null;
+
+      get().cancelGeneration(rfId);
+      const preservedHistory = snapshotExistingHistory(rfId);
+      useBoardStore.getState().updateNodeData(rfId, {
+        status: "queued",
+        prompt,
+        error: undefined,
+        musicInstrumental: Boolean(opts.instrumental),
+        ...(opts.lyrics !== undefined ? { musicLyrics: opts.lyrics } : {}),
+        ...(typeof opts.bpm === "number" ? { musicBpm: opts.bpm } : {}),
+        ...(typeof opts.durationSeconds === "number"
+          ? { musicDurationSec: opts.durationSeconds }
+          : {}),
+        ...(opts.musicModel ? { musicModel: opts.musicModel } : {}),
+        ...(opts.title?.trim() ? { title: opts.title.trim(), musicTitle: opts.title.trim() } : {}),
+        ...(preservedHistory.length > 0 ? { history: preservedHistory } : {}),
+      });
+
+      try {
+        const reqDto = await createRequest({
+          type: "gen_music",
+          flow_account_id: activeAccountId,
+          node_id: isNaN(nodeDbId) ? undefined : nodeDbId,
+          params: {
+            prompt,
+            instrumental: Boolean(opts.instrumental),
+            ...(opts.lyrics ? { lyrics: opts.lyrics } : {}),
+            ...(typeof opts.bpm === "number" && opts.bpm > 0 ? { bpm: opts.bpm } : {}),
+            ...(typeof opts.durationSeconds === "number" && opts.durationSeconds > 0
+              ? { duration_s: opts.durationSeconds }
+              : {}),
+            music_model: opts.musicModel || "Lyria 3.5",
+            ...(opts.title?.trim() ? { title: opts.title.trim() } : {}),
+            ...(typeof opts.seed === "number" && !Number.isNaN(opts.seed)
+              ? { seed: opts.seed }
+              : {}),
+          },
+        });
+        pollers.attachPoll(rfId, reqDto.id, { prompt });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "提交 Flow Music 生成失败";
+        useBoardStore.getState().updateNodeData(rfId, { status: "error", error: msg });
+        set({ error: msg });
+      }
+    },
+
+    async dispatchMusicEdit(rfId, opts) {
+      const nodeDbId = parseInt(rfId, 10);
+      const snapshot = useFlowAccounts.getState().snapshot;
+      const activeAccountId = snapshot?.active_account_id ?? null;
+      const prompt = (opts.prompt ?? "").trim();
+
+      get().cancelGeneration(rfId);
+      const preservedHistory = snapshotExistingHistory(rfId);
+      useBoardStore.getState().updateNodeData(rfId, {
+        status: "queued",
+        error: undefined,
+        ...(prompt ? { prompt } : {}),
+        musicEditMode: opts.action,
+        ...(preservedHistory.length > 0 ? { history: preservedHistory } : {}),
+      });
+
+      try {
+        const reqDto = await createRequest({
+          type: "edit_music",
+          flow_account_id: activeAccountId,
+          node_id: isNaN(nodeDbId) ? undefined : nodeDbId,
+          params: {
+            source_clip_id: opts.sourceClipId,
+            action: opts.action,
+            prompt,
+            ...(typeof opts.extendFromSec === "number" ? { extend_from_s: opts.extendFromSec } : {}),
+            ...(typeof opts.extendSec === "number" ? { extend_s: opts.extendSec } : {}),
+            ...(typeof opts.replaceStartSec === "number" ? { replace_start_s: opts.replaceStartSec } : {}),
+            ...(typeof opts.replaceEndSec === "number" ? { replace_end_s: opts.replaceEndSec } : {}),
+            ...(typeof opts.coverStrength === "number" ? { cover_strength: opts.coverStrength } : {}),
+            music_model: opts.musicModel || "Lyria 3.5",
+            ...(opts.title?.trim() ? { title: opts.title.trim() } : {}),
+            ...(typeof opts.seed === "number" && !Number.isNaN(opts.seed)
+              ? { seed: opts.seed }
+              : {}),
+          },
+        });
+        pollers.attachPoll(rfId, reqDto.id, { prompt });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "提交音乐衍生编辑失败";
+        useBoardStore.getState().updateNodeData(rfId, { status: "error", error: msg });
+        set({ error: msg });
+      }
+    },
+
+    async dispatchMusicSplitStems(rfId, clipId) {
+      const node = useBoardStore.getState().nodes.find((n) => n.id === rfId);
+      const nodeDbId = parseInt(rfId, 10);
+      const snapshot = useFlowAccounts.getState().snapshot;
+      const activeAccountId = snapshot?.active_account_id ?? null;
+
+      get().cancelGeneration(rfId);
+      useBoardStore.getState().updateNodeData(rfId, {
+        status: "queued",
+        error: undefined,
+      });
+
+      try {
+        const reqDto = await createRequest({
+          type: "split_stems",
+          flow_account_id: activeAccountId,
+          node_id: isNaN(nodeDbId) ? undefined : nodeDbId,
+          params: {
+            clip_id: clipId,
+            media_id: node?.data.mediaId ?? "",
+          },
+        });
+        pollers.attachPoll(rfId, reqDto.id, { prompt: node?.data.prompt ?? "" });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "发起四轨分轨失败";
+        useBoardStore.getState().updateNodeData(rfId, { status: "error", error: msg });
+        set({ error: msg });
+      }
+    },
+
+    async dispatchMusicEffect(rfId, opts) {
+      const nodeDbId = parseInt(rfId, 10);
+      const snapshot = useFlowAccounts.getState().snapshot;
+      const activeAccountId = snapshot?.active_account_id ?? null;
+
+      get().cancelGeneration(rfId);
+      const preservedHistory = snapshotExistingHistory(rfId);
+      useBoardStore.getState().updateNodeData(rfId, {
+        status: "queued",
+        error: undefined,
+        musicEditMode: opts.effect,
+        ...(preservedHistory.length > 0 ? { history: preservedHistory } : {}),
+      });
+
+      try {
+        const reqDto = await createRequest({
+          type: "effect_music",
+          flow_account_id: activeAccountId,
+          node_id: isNaN(nodeDbId) ? undefined : nodeDbId,
+          params: {
+            source_clip_id: opts.sourceClipId,
+            effect: opts.effect,
+            ...(typeof opts.startSec === "number" ? { start_s: opts.startSec } : {}),
+            ...(typeof opts.endSec === "number" ? { end_s: opts.endSec } : {}),
+            ...(typeof opts.speed === "number" ? { speed: opts.speed } : {}),
+            ...(typeof opts.semitones === "number" ? { semitones: opts.semitones } : {}),
+            ...(opts.title?.trim() ? { title: opts.title.trim() } : {}),
+          },
+        });
+        pollers.attachPoll(rfId, reqDto.id, { prompt: opts.title ?? "" });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "提交音频裁剪/变速失败";
+        useBoardStore.getState().updateNodeData(rfId, { status: "error", error: msg });
+        set({ error: msg });
+      }
     },
 
     cancelGeneration(rfId) {
