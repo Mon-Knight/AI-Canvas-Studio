@@ -24,13 +24,13 @@ jobs:
     name: Package Windows x64 (Setup + Portable)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -64,7 +64,7 @@ jobs:
           pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows.ps1 -Version "$env:APP_VERSION" -PythonExe "$py"
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: AI-Canvas-Studio-v${{ env.APP_VERSION }}-win64
           path: |
@@ -75,7 +75,7 @@ jobs:
 
       - name: Publish GitHub Release
         if: ${{ github.event_name == 'push' || github.event.inputs.publish_release == true }}
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ env.APP_VERSION }}
           name: AI Canvas Studio v${{ env.APP_VERSION }}
