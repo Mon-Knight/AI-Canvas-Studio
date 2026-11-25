@@ -1546,42 +1546,129 @@ export class FlowEngineManager {
   } | null> {
     try {
       const ses = this.preparePartitionSession(accountId);
-      const cookies = await ses.cookies.get({ url: "https://www.flowmusic.app/" });
-      const groups = new Map<string, Array<[number, string]>>();
-      for (const c of cookies) {
-        const m = c.name.match(/^(sb-[^.]+-auth-token)(?:\.(\d+))?$/);
-        if (!m) continue;
-        const base = m[1];
-        const idx = m[2] !== undefined ? Number(m[2]) : -1;
-        const arr = groups.get(base) ?? [];
-        arr.push([idx, c.value]);
-        groups.set(base, arr);
+      const queries = [
+        { url: "https://www.flowmusic.app/" },
+        { url: "https://flowmusic.app/" },
+        { domain: "flowmusic.app" },
+      ];
+      const dedup = new Map<string, Electron.Cookie>();
+      for (const q of queries) {
+        const list = await ses.cookies.get(q).catch(() => [] as Electron.Cookie[]);
+        for (const c of list) {
+          const key = `${c.domain ?? ""}::${c.path ?? "/"}::${c.name}`;
+          if (!dedup.has(key)) dedup.set(key, c);
+        }
       }
-      for (const chunks of groups.values()) {
-        chunks.sort((a, b) => a[0] - b[0]);
-        let raw = chunks.map(([, v]) => v).join("").trim();
+
+      const groups = new Map<
+        string,
+        { unchunked: string[]; numbered: Array<[number, string]> }
+      >();
+      for (const c of dedup.values()) {
+        const m = c.name.match(/^((?:__(?:Secure|Host)-)?sb-.+?-auth-token)(?:\.(\d+))?$/);
+        if (!m) continue;
+        const groupKey = `${c.domain ?? ""}::${c.path ?? "/"}::${m[1]}`;
+        const g = groups.get(groupKey) ?? { unchunked: [], numbered: [] };
+        if (m[2] !== undefined) {
+          g.numbered.push([Number(m[2]), c.value]);
+        } else {
+          g.unchunked.push(c.value);
+        }
+        groups.set(groupKey, g);
+      }
+
+      const decodePayload = (rawInput: string) => {
+        let raw = rawInput.trim();
+        if (raw.length >= 2 && ((raw[0] === '"' && raw.endsWith('"')) || (raw[0] === "'" && raw.endsWith("'")))) {
+          raw = raw.slice(1, -1).trim();
+        }
         try {
           raw = decodeURIComponent(raw);
         } catch {
           // keep raw
         }
-        if (raw.startsWith("base64-")) {
-          raw = Buffer.from(raw.slice(7), "base64url").toString("utf8");
+        if (raw.length >= 2 && ((raw[0] === '"' && raw.endsWith('"')) || (raw[0] === "'" && raw.endsWith("'")))) {
+          raw = raw.slice(1, -1).trim();
         }
-        const parsed = JSON.parse(raw) as Record<string, unknown>;
-        const token = typeof parsed?.access_token === "string" ? parsed.access_token : "";
-        const user = (parsed?.user && typeof parsed.user === "object"
-          ? parsed.user
-          : null) as Record<string, unknown> | null;
-        if (!token || user?.is_anonymous === true) continue;
-        const expiresAt = typeof parsed?.expires_at === "number" ? parsed.expires_at : null;
-        return {
-          access_token: token,
-          expires_at: expiresAt,
-          user_id: typeof user?.id === "string" ? user.id : null,
-          email: typeof user?.email === "string" ? user.email : null,
-        };
+        if (raw.startsWith("base64-")) {
+          const b64 = raw.slice(7).replace(/\s+/g, "").replace(/-/g, "+").replace(/_/g, "/").replace(/=+$/g, "");
+          raw = Buffer.from(b64, "base64").toString("utf8");
+        }
+        let parsed: unknown = JSON.parse(raw);
+        if (typeof parsed === "string") {
+          parsed = JSON.parse(parsed);
+        }
+        const root = (parsed && typeof parsed === "object" ? parsed : null) as Record<string, unknown> | null;
+        if (!root) return null;
+        const candidates = [root, root.session, root.currentSession, (root.data as Record<string, unknown> | undefined)?.session, root.data];
+        for (const cand of candidates) {
+          if (!cand || typeof cand !== "object") continue;
+          const obj = cand as Record<string, unknown>;
+          const token = typeof obj.access_token === "string" ? obj.access_token.trim() : "";
+          if (token.length < 20) continue;
+          const user = (obj.user && typeof obj.user === "object" ? obj.user : root.user) as Record<string, unknown> | null;
+          if (user?.is_anonymous === true) continue;
+          let jwtPayload: Record<string, unknown> | null = null;
+          const parts = token.split(".");
+          if (parts.length >= 2) {
+            try {
+              const jb64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+              jwtPayload = JSON.parse(Buffer.from(jb64, "base64").toString("utf8")) as Record<string, unknown>;
+            } catch {
+              jwtPayload = null;
+            }
+          }
+          if (jwtPayload?.role === "anon" || jwtPayload?.is_anonymous === true) continue;
+          const rawExp = typeof obj.expires_at === "number" ? obj.expires_at : typeof jwtPayload?.exp === "number" ? jwtPayload.exp : null;
+          const expiresAt = rawExp !== null ? (rawExp > 1e12 ? Math.floor(rawExp / 1000) : Math.floor(rawExp)) : null;
+          const userMeta = (user?.user_metadata && typeof user.user_metadata === "object" ? user.user_metadata : null) as Record<string, unknown> | null;
+          const email =
+            (typeof user?.email === "string" && user.email) ||
+            (typeof userMeta?.email === "string" && userMeta.email) ||
+            (typeof jwtPayload?.email === "string" && jwtPayload.email) ||
+            null;
+          const userId =
+            (typeof user?.id === "string" && user.id) ||
+            (typeof jwtPayload?.sub === "string" && jwtPayload.sub) ||
+            null;
+          return { access_token: token, expires_at: expiresAt, user_id: userId, email };
+        }
+        return null;
+      };
+
+      const nowSec = Math.floor(Date.now() / 1000);
+      let fallbackExpired: { access_token: string; expires_at: number | null; user_id: string | null; email: string | null } | null = null;
+      for (const g of groups.values()) {
+        const attempts: string[] = [...g.unchunked];
+        if (g.numbered.length > 0) {
+          g.numbered.sort((a, b) => a[0] - b[0]);
+          attempts.push(g.numbered.map(([, v]) => v).join(""));
+          attempts.push(
+            g.numbered
+              .map(([, v]) => {
+                try {
+                  return decodeURIComponent(v);
+                } catch {
+                  return v;
+                }
+              })
+              .join(""),
+          );
+        }
+        for (const attempt of attempts) {
+          try {
+            const session = decodePayload(attempt);
+            if (!session) continue;
+            if (!session.expires_at || session.expires_at > nowSec + 30) {
+              return session;
+            }
+            fallbackExpired = session;
+          } catch {
+            // try next candidate
+          }
+        }
       }
+      return fallbackExpired;
     } catch {
       // ignore cookie decode error
     }

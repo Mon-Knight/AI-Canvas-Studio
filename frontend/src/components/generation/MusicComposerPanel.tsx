@@ -182,7 +182,16 @@ export function MusicComposerPanel({
     setStatusLoading(true);
     void getMusicStatus(false)
       .then((res) => {
-        if (alive) setStatus(res);
+        if (!alive) return;
+        setStatus(res);
+        if (
+          res.error &&
+          (res.signed_in ||
+            res.error.includes("chrome://extensions") ||
+            res.error.includes("连接 Flow Music 失败"))
+        ) {
+          setError(res.error);
+        }
       })
       .catch((err) => {
         if (alive) {
@@ -254,7 +263,13 @@ export function MusicComposerPanel({
       setStatus(next);
       void refreshFlowAccounts();
       if (res.signed_in || next.signed_in) {
-        setNotice("✓ Flow Music 个人通道已就绪，可直接创作或刷新音乐积分。");
+        setNotice(
+          next.music_credits !== null
+            ? `✓ Flow Music 个人通道已就绪，当前剩余 ${next.music_credits} 音乐积分。`
+            : "✓ Flow Music 个人通道已就绪，可直接创作或刷新音乐积分。",
+        );
+      } else if (next.error && next.error.includes("chrome://extensions")) {
+        setError(next.error);
       } else {
         setNotice("已在 Chrome 中打开 flowmusic.app，请使用 Google 账号登录后点击「刷新音乐积分」。");
       }
@@ -275,13 +290,19 @@ export function MusicComposerPanel({
       setStatus(next);
       void refreshFlowAccounts();
       if (next.signed_in) {
-        setNotice(
-          next.music_credits !== null
-            ? `✓ 已同步最新音乐积分：${next.music_credits} 积分`
-            : "✓ 已验证 Flow Music 登录态。",
-        );
+        if (next.music_credits !== null) {
+          setNotice(
+            `✓ 已同步最新音乐积分：${next.music_credits} 积分${next.music_plan ? `（${next.music_plan}）` : ""}`,
+          );
+        } else if (next.error) {
+          setError(next.error);
+        } else {
+          setNotice("✓ 已验证 Flow Music 登录态。");
+        }
       } else {
-        setError("尚未检测到 Flow Music 登录态，请先点击「开启 Flow Music 通道」并在浏览器登录。");
+        setError(
+          next.error || "尚未检测到 Flow Music 登录态，请先点击「开启 Flow Music 通道」并在浏览器登录。",
+        );
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "刷新音乐积分失败");

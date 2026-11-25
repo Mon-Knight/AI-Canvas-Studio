@@ -6,6 +6,7 @@ import json
 import time
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
 from flowboard.db import get_session
@@ -15,6 +16,8 @@ from flowboard.services.flow_client import flow_client
 from flowboard.services.flowmusic_client import (
     FlowMusicClient,
     FlowMusicError,
+    _extract_credits_and_plan,
+    _extract_email_or_username,
     build_edit_recipe,
     build_effect_graph,
     compose_lyrics_payload,
@@ -305,3 +308,144 @@ def test_reference_library_accepts_audio_kind(client):
     )
     assert res.status_code == 200
     assert res.json()["kind"] == "audio"
+
+
+def test_extract_credits_and_plan_real_flowmusic_payload():
+    credits_payload = {
+        "data": {
+            "credits_remaining": 150.0,
+            "tokens_remaining": 150.0,
+        },
+        "add_token_transactions": [],
+    }
+    sub_payload = {
+        "data": {
+            "subscription_tier": "MEMBER",
+            "status": "active",
+        }
+    }
+    credits, plan = _extract_credits_and_plan(credits_payload, sub_payload)
+    assert credits == 150
+    assert plan == "MEMBER"
+
+    # Tokens-only fallback and string number coercion
+    credits2, plan2 = _extract_credits_and_plan({"data": {"tokens_remaining": "85"}}, None)
+    assert credits2 == 85
+    assert plan2 is None
+
+    # Nested /users/me identity fallback (email preferred, username fallback)
+    assert _extract_email_or_username({"data": {"email": "v@example.com", "username": "ValleyNexus4"}}) == "v@example.com"
+    assert _extract_email_or_username({"data": {"username": "ValleyNexus4"}}) == "ValleyNexus4"
+
+
+def test_get_status_probes_without_music_tab_and_auto_syncs_credits(client):
+    fm = FlowMusicClient()
+    fake_ws = object()
+    flow_client.set_music_extension(fake_ws)
+    try:
+        rpc_mock = AsyncMock(
+            return_value={
+                "ok": True,
+                "access_token": "jwt-live-token-for-status-test",
+                "expires_at": int(time.time()) + 3600,
+                "email": "valley@example.com",
+            }
+        )
+
+        async def fake_request_json(method, path, **kwargs):
+            if path == "/billing/credits":
+                return {"data": {"credits_remaining": 145, "tokens_remaining": 145}}
+            if path == "/billing/subscription":
+                return {"data": {"subscription_tier": "MEMBER"}}
+            if path == "/models":
+                return {"models": [{"name": "Lyria 3.5", "display_name": "Lyria 3.5"}]}
+            if path == "/users/me":
+                return {"data": {"username": "ValleyNexus4"}}
+            return {}
+
+        with patch.object(flow_client, "music_rpc", rpc_mock), patch.object(
+            fm, "request_json", side_effect=fake_request_json
+        ):
+            st = asyncio.run(fm.get_status(refresh_remote=False))
+            assert st["extension_connected"] is True
+            assert st["music_tab_open"] is False
+            assert st["signed_in"] is True
+            assert st["music_credits"] == 145
+            assert st["music_plan"] == "MEMBER"
+            assert st["email"] == "ValleyNexus4"
+            # Passive status poll must NOT force-reload the user's open Flow Music tab
+            rpc_mock.assert_awaited_once_with(
+                "flowmusic_get_token",
+                {"refreshIfExpired": False},
+                timeout=30.0,
+            )
+    finally:
+        flow_client.clear_music_extension()
+
+
+def test_request_json_auto_falls_back_to_extension_fetch_on_network_error_or_403():
+    fm = FlowMusicClient()
+    fake_ws = object()
+    flow_client.set_music_extension(fake_ws)
+    try:
+        fm._token_cache[fm._active_cache_key()] = {
+            "access_token": "jwt-cached-valid-token",
+            "expires_at": int(time.time()) + 3600,
+            "email": "user@example.com",
+        }
+        proxy_reply = {
+            "status": 200,
+            "data": {"data": {"credits_remaining": 200}},
+        }
+        rpc_mock = AsyncMock(return_value=proxy_reply)
+
+        # Case 1: direct httpx raises ConnectError (e.g., Chrome-only proxy on Windows)
+        with patch.object(
+            fm, "_httpx_request", side_effect=httpx.ConnectError("direct network blocked")
+        ), patch.object(flow_client, "music_rpc", rpc_mock):
+            out = asyncio.run(fm.request_json("GET", "/billing/credits", timeout=15.0))
+            assert out == {"data": {"credits_remaining": 200}}
+            rpc_mock.assert_awaited_once()
+            assert rpc_mock.await_args.args[0] == "flowmusic_fetch"
+
+        # Case 2: direct httpx returns HTTP 403 Cloudflare block
+        rpc_mock.reset_mock()
+        fake_403 = httpx.Response(403, text="Just a moment... Cloudflare")
+        with patch.object(
+            fm, "_httpx_request", AsyncMock(return_value=fake_403)
+        ), patch.object(flow_client, "music_rpc", rpc_mock):
+            out = asyncio.run(fm.request_json("GET", "/billing/credits", timeout=15.0))
+            assert out == {"data": {"credits_remaining": 200}}
+            rpc_mock.assert_awaited_once()
+    finally:
+        flow_client.clear_music_extension()
+
+
+def test_get_access_token_actionable_diagnostics():
+    fm = FlowMusicClient()
+    fake_ws = object()
+    flow_client.set_music_extension(fake_ws)
+    try:
+        with patch.object(flow_client, "music_rpc", AsyncMock(return_value={"error": "timeout"})):
+            with pytest.raises(FlowMusicError) as exc_info:
+                asyncio.run(fm.get_access_token())
+            assert exc_info.value.code == "FLOWMUSIC_EXTENSION_OUTDATED"
+            assert "chrome://extensions" in exc_info.value.message
+
+        with patch.object(
+            flow_client,
+            "music_rpc",
+            AsyncMock(
+                return_value={
+                    "error": "FLOWMUSIC_NOT_LOGGED_IN",
+                    "diag": {"has_cookies_api": False, "ext_version": "0.1.6", "tab_count": 1, "cookie_names": []},
+                }
+            ),
+        ):
+            with pytest.raises(FlowMusicError) as exc_info:
+                asyncio.run(fm.get_access_token())
+            assert exc_info.value.code == "FLOWMUSIC_EXTENSION_PERMISSION"
+            assert "chrome://extensions" in exc_info.value.message
+    finally:
+        flow_client.clear_music_extension()
+

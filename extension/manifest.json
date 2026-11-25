@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Flowboard Bridge",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Local bridge for Google Flow & Flow Music — runs batchexecute RPCs inside flow.google.com and borrows short-lived tokens for flowmusic.app.",
   "permissions": [
     "storage",
@@ -19,6 +19,7 @@
     "https://aisandbox-pa.googleapis.com/*",
     "https://www.flowmusic.app/*",
     "https://flowmusic.app/*",
+    "https://*.flowmusic.app/*",
     "http://127.0.0.1/*",
     "http://localhost/*",
     "http://127.0.0.1:8434/*",

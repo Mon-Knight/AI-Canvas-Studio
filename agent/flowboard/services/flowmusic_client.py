@@ -356,34 +356,99 @@ def extract_job_outcome(job_id: str, events: Iterable[SSEEvent]) -> ProducerJobO
     return out
 
 
+def _coerce_nonneg_int(val: Any) -> Optional[int]:
+    if isinstance(val, bool) or val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return int(val) if val >= 0 else None
+    if isinstance(val, str):
+        s = val.strip()
+        if not s:
+            return None
+        try:
+            num = float(s)
+            return int(num) if num >= 0 else None
+        except ValueError:
+            return None
+    return None
+
+
 def _extract_credits_and_plan(credits_payload: Any, sub_payload: Any = None) -> tuple[Optional[int], Optional[str]]:
     credits: Optional[int] = None
     plan: Optional[str] = None
+
+    credit_dicts: list[dict[str, Any]] = []
     if isinstance(credits_payload, dict):
-        for key in ("credits", "remaining_credits", "balance", "total_credits", "available_credits"):
-            val = credits_payload.get(key)
-            if isinstance(val, (int, float)) and not isinstance(val, bool) and val >= 0:
-                credits = int(val)
+        credit_dicts.append(credits_payload)
+        for nested_key in ("data", "wallet", "billing", "user"):
+            nested = credits_payload.get(nested_key)
+            if isinstance(nested, dict):
+                credit_dicts.append(nested)
+
+    for d in credit_dicts:
+        for key in (
+            "credits_remaining",
+            "credits",
+            "remaining_credits",
+            "tokens_remaining",
+            "balance",
+            "total_credits",
+            "available_credits",
+        ):
+            val = _coerce_nonneg_int(d.get(key))
+            if val is not None:
+                credits = val
                 break
-        if credits is None and isinstance(credits_payload.get("data"), dict):
-            inner = credits_payload["data"]
-            for key in ("credits", "remaining_credits", "balance"):
-                val = inner.get(key)
-                if isinstance(val, (int, float)) and not isinstance(val, bool) and val >= 0:
-                    credits = int(val)
-                    break
-        for pkey in ("plan", "tier", "plan_name", "subscription_tier"):
-            pv = credits_payload.get(pkey)
+        if credits is not None:
+            break
+
+    plan_dicts: list[dict[str, Any]] = []
+    if isinstance(sub_payload, dict):
+        plan_dicts.append(sub_payload)
+        for nested_key in ("data", "subscription"):
+            nested = sub_payload.get(nested_key)
+            if isinstance(nested, dict):
+                plan_dicts.append(nested)
+    plan_dicts.extend(credit_dicts)
+
+    for d in plan_dicts:
+        for pkey in ("subscription_tier", "plan", "tier", "plan_name", "name"):
+            pv = d.get(pkey)
             if isinstance(pv, str) and pv.strip():
                 plan = pv.strip()
                 break
-    if plan is None and isinstance(sub_payload, dict):
-        for pkey in ("plan", "tier", "plan_name", "name", "status"):
-            pv = sub_payload.get(pkey)
-            if isinstance(pv, str) and pv.strip():
+        if plan is not None:
+            break
+
+    if plan is None:
+        for d in plan_dicts:
+            pv = d.get("status")
+            if isinstance(pv, str) and pv.strip() and pv.strip().lower() not in {"ok", "success", "true", "error", "active"}:
                 plan = pv.strip()
                 break
+
     return credits, plan
+
+
+def _extract_email_or_username(me_payload: Any) -> Optional[str]:
+    if not isinstance(me_payload, dict):
+        return None
+    candidates: list[dict[str, Any]] = [me_payload]
+    for nested_key in ("data", "user", "profile"):
+        nested = me_payload.get(nested_key)
+        if isinstance(nested, dict):
+            candidates.append(nested)
+    for d in candidates:
+        for key in ("email",):
+            v = d.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    for d in candidates:
+        for key in ("username", "display_name", "name"):
+            v = d.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    return None
 
 
 def _extract_models(models_payload: Any) -> list[dict[str, str]]:
@@ -450,11 +515,14 @@ class FlowMusicClient:
     def __init__(self) -> None:
         # In-memory short-lived access_token cache keyed by account_id. Never persisted.
         self._token_cache: dict[str, dict[str, Any]] = {}
+        # In-memory credits/plan cache (supports legacy single-account mode too).
+        self._credits_cache: dict[str, dict[str, Any]] = {}
         self._last_paid_dispatch: dict[str, float] = {}
         self._dispatch_lock = asyncio.Lock()
 
     def clear_cached_tokens(self) -> None:
         self._token_cache.clear()
+        self._credits_cache.clear()
 
     @staticmethod
     def _transport_mode() -> str:
@@ -472,7 +540,12 @@ class FlowMusicClient:
     def _active_cache_key(self) -> str:
         return flow_accounts.active_id() or "__legacy__"
 
-    async def get_access_token(self, *, force_refresh: bool = False) -> str:
+    async def get_access_token(
+        self,
+        *,
+        force_refresh: bool = False,
+        refresh_if_expired: bool = True,
+    ) -> str:
         """Borrow a valid short-lived access_token from Chrome without touching refresh_token."""
         key = self._active_cache_key()
         cached = self._token_cache.get(key)
@@ -493,20 +566,34 @@ class FlowMusicClient:
         method = "flowmusic_refresh_session" if force_refresh else "flowmusic_get_token"
         resp = await flow_client.music_rpc(
             method,
-            {"refreshIfExpired": True},
+            {"refreshIfExpired": bool(refresh_if_expired)},
             timeout=30.0,
         )
         if not isinstance(resp, dict) or resp.get("error") or not resp.get("access_token"):
             err = str((resp or {}).get("error") or "FLOWMUSIC_NOT_LOGGED_IN")
+            diag = (resp or {}).get("diag") if isinstance(resp, dict) else None
             if err == "extension_disconnected":
                 raise FlowMusicError(
                     "FLOWMUSIC_EXTENSION_DISCONNECTED",
                     "扩展连接已断开，请先在右上角确认 Chrome 伴侣已就绪。",
                 )
+            if err == "timeout":
+                raise FlowMusicError(
+                    "FLOWMUSIC_EXTENSION_OUTDATED",
+                    "Chrome 扩展响应超时。若刚更新版本，请打开 chrome://extensions 点击 Flowboard Bridge 卡片上的「重新加载」图标后重试。",
+                    retryable=True,
+                )
             if err == "FLOWMUSIC_NOT_LOGGED_IN":
+                if isinstance(diag, dict):
+                    logger.warning("Flow Music session not detected in browser (diag=%s)", diag)
+                    if diag.get("has_cookies_api") is False:
+                        raise FlowMusicError(
+                            "FLOWMUSIC_EXTENSION_PERMISSION",
+                            "Chrome 扩展尚未启用 Flow Music Cookie 权限，请在 chrome://extensions 中重新加载 Flowboard Bridge 扩展后重试。",
+                        )
                 raise FlowMusicError(
                     "FLOWMUSIC_NOT_LOGGED_IN",
-                    "当前 Google 账号尚未登录 Flow Music。请点击「开启 Flow Music 通道」在 Chrome 中完成一次 Google 登录。",
+                    "当前 Google 账号尚未登录 Flow Music。请点击「开启 Flow Music 通道」在 Chrome 中完成一次 Google 登录；若已登录，请刷新 flowmusic.app 页面或在 chrome://extensions 重载扩展后重试。",
                 )
             raise FlowMusicError(err, f"获取 Flow Music 会话失败：{err}")
 
@@ -591,6 +678,78 @@ class FlowMusicClient:
                 data=data,
             )
 
+    @staticmethod
+    def _build_api_path(path: str, params: Optional[dict[str, Any]] = None) -> str:
+        full_path = f"/__api/{path.lstrip('/')}"
+        if params:
+            from urllib.parse import urlencode
+
+            qs = urlencode({k: v for k, v in params.items() if v is not None})
+            if qs:
+                full_path = f"{full_path}?{qs}"
+        return full_path
+
+    async def _extension_fetch_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: Any = None,
+        params: Optional[dict[str, Any]] = None,
+        timeout: float = 60.0,
+    ) -> Any:
+        full_path = self._build_api_path(path, params)
+        res = await flow_client.music_rpc(
+            "flowmusic_fetch",
+            {
+                "path": full_path,
+                "method": method,
+                "body": json_body,
+                "asText": False,
+                "allowCookieOnly": True,
+            },
+            timeout=timeout,
+        )
+        if not isinstance(res, dict) or res.get("error"):
+            err = str((res or {}).get("error") or "FLOWMUSIC_FETCH_FAILED")
+            raise FlowMusicError(err, f"Flow Music 同源代理请求失败：{err}")
+        st = int(res.get("status") or 200)
+        if st >= 400:
+            body_text = (
+                res.get("data")
+                if isinstance(res.get("data"), str)
+                else json.dumps(res.get("data"), ensure_ascii=False)
+            )
+            raise _map_http_error(st, body_text)
+        return res.get("data")
+
+    async def _extension_fetch_text(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Optional[dict[str, Any]] = None,
+        timeout: float = 180.0,
+    ) -> str:
+        full_path = self._build_api_path(path, params)
+        res = await flow_client.music_rpc(
+            "flowmusic_fetch",
+            {
+                "path": full_path,
+                "method": method,
+                "asText": True,
+                "allowCookieOnly": True,
+            },
+            timeout=timeout,
+        )
+        if not isinstance(res, dict) or res.get("error"):
+            err = str((res or {}).get("error") or "FLOWMUSIC_SSE_FAILED")
+            raise FlowMusicError(err, f"读取 Flow Music 生成流失败：{err}")
+        st = int(res.get("status") or 200)
+        if st >= 400:
+            raise _map_http_error(st, str(res.get("text") or ""))
+        return str(res.get("text") or "")
+
     async def request_json(
         self,
         method: str,
@@ -602,29 +761,16 @@ class FlowMusicClient:
         data: Any = None,
         timeout: float = 60.0,
     ) -> Any:
-        """Issue an authenticated call against `/__api/*`, refreshing once on HTTP 401."""
-        if self._transport_mode() == "extension_fetch" and files is None and data is None:
-            full_path = f"/__api/{path.lstrip('/')}"
-            if params:
-                from urllib.parse import urlencode
+        """Issue an authenticated call against `/__api/*`, refreshing once on HTTP 401.
 
-                qs = urlencode({k: v for k, v in params.items() if v is not None})
-                if qs:
-                    full_path = f"{full_path}?{qs}"
-            res = await flow_client.music_rpc(
-                "flowmusic_fetch",
-                {"path": full_path, "method": method, "body": json_body, "asText": False},
-                timeout=timeout,
+        Automatically falls back to same-origin `extension_fetch` inside Chrome when
+        direct Python `httpx` hits a network/proxy failure or Cloudflare 403 block.
+        """
+        can_proxy = files is None and data is None
+        if self._transport_mode() == "extension_fetch" and can_proxy:
+            return await self._extension_fetch_json(
+                method, path, json_body=json_body, params=params, timeout=timeout
             )
-            if not isinstance(res, dict) or res.get("error"):
-                raise FlowMusicError(
-                    str((res or {}).get("error") or "FLOWMUSIC_FETCH_FAILED"),
-                    f"Flow Music 同源代理请求失败：{(res or {}).get('error')}",
-                )
-            st = int(res.get("status") or 200)
-            if st >= 400:
-                raise _map_http_error(st, json.dumps(res.get("data"), ensure_ascii=False))
-            return res.get("data")
 
         refreshed = False
         while True:
@@ -641,6 +787,19 @@ class FlowMusicClient:
                     timeout=timeout,
                 )
             except httpx.HTTPError as exc:
+                if can_proxy and flow_client.music_connected:
+                    logger.info(
+                        "Direct Flow Music request %s %s hit %s; falling back to Chrome extension_fetch",
+                        method,
+                        path,
+                        exc.__class__.__name__,
+                    )
+                    try:
+                        return await self._extension_fetch_json(
+                            method, path, json_body=json_body, params=params, timeout=timeout
+                        )
+                    except FlowMusicError:
+                        pass
                 raise FlowMusicError(
                     "FLOWMUSIC_NETWORK_ERROR",
                     f"连接 Flow Music 失败：{exc}",
@@ -651,6 +810,16 @@ class FlowMusicClient:
                 refreshed = True
                 self._token_cache.pop(self._active_cache_key(), None)
                 continue
+
+            if resp.status_code == 403 and can_proxy and flow_client.music_connected:
+                logger.info(
+                    "Direct Flow Music request %s %s returned HTTP 403; falling back to Chrome extension_fetch",
+                    method,
+                    path,
+                )
+                return await self._extension_fetch_json(
+                    method, path, json_body=json_body, params=params, timeout=timeout
+                )
 
             if resp.status_code >= 400:
                 raise _map_http_error(resp.status_code, resp.text)
@@ -667,30 +836,19 @@ class FlowMusicClient:
 
     async def stream_job_events(self, job_id: str, *, timeout: float = 180.0) -> list[SSEEvent]:
         """Consume `GET /__api/messages/{job_id}/stream` SSE stream to completion."""
+        stream_path = f"/messages/{job_id}/stream"
+        stream_params = {"last_id": "0", "tool_progress": "true"}
+
         if self._transport_mode() == "extension_fetch":
-            res = await flow_client.music_rpc(
-                "flowmusic_fetch",
-                {
-                    "path": f"/__api/messages/{job_id}/stream?last_id=0&tool_progress=true",
-                    "method": "GET",
-                    "asText": True,
-                },
-                timeout=timeout,
+            text = await self._extension_fetch_text(
+                "GET", stream_path, params=stream_params, timeout=timeout
             )
-            if not isinstance(res, dict) or res.get("error"):
-                raise FlowMusicError(
-                    str((res or {}).get("error") or "FLOWMUSIC_SSE_FAILED"),
-                    f"读取 Flow Music 生成流失败：{(res or {}).get('error')}",
-                )
-            st = int(res.get("status") or 200)
-            if st >= 400:
-                raise _map_http_error(st, str(res.get("text") or ""))
-            return parse_sse_lines(str(res.get("text") or "").splitlines())
+            return parse_sse_lines(text.splitlines())
 
         refreshed = False
         while True:
             token = await self.get_access_token(force_refresh=refreshed)
-            url = f"{API_BASE}/messages/{job_id}/stream"
+            url = f"{API_BASE}{stream_path}"
             headers = {
                 "Authorization": f"Bearer {token}",
                 "Accept": "text/event-stream",
@@ -705,13 +863,18 @@ class FlowMusicClient:
                     async with client.stream(
                         "GET",
                         url,
-                        params={"last_id": "0", "tool_progress": "true"},
+                        params=stream_params,
                         headers=headers,
                     ) as resp:
                         if resp.status_code == 401 and not refreshed:
                             refreshed = True
                             self._token_cache.pop(self._active_cache_key(), None)
                             continue
+                        if resp.status_code == 403 and flow_client.music_connected:
+                            text = await self._extension_fetch_text(
+                                "GET", stream_path, params=stream_params, timeout=timeout
+                            )
+                            return parse_sse_lines(text.splitlines())
                         if resp.status_code >= 400:
                             body = (await resp.aread()).decode("utf-8", errors="replace")
                             raise _map_http_error(resp.status_code, body)
@@ -720,6 +883,14 @@ class FlowMusicClient:
                             lines.append(line)
                         return parse_sse_lines(lines)
             except httpx.HTTPError as exc:
+                if flow_client.music_connected:
+                    try:
+                        text = await self._extension_fetch_text(
+                            "GET", stream_path, params=stream_params, timeout=timeout
+                        )
+                        return parse_sse_lines(text.splitlines())
+                    except FlowMusicError:
+                        pass
                 raise FlowMusicError(
                     "FLOWMUSIC_SSE_ERROR",
                     f"读取 Flow Music 事件流中断：{exc}",
@@ -763,27 +934,48 @@ class FlowMusicClient:
                             tzinfo=timezone.utc
                         ).isoformat()
 
+        cache_key = self._active_cache_key()
+        mem_credits = self._credits_cache.get(cache_key)
+        if mem_credits:
+            if saved_credits is None and mem_credits.get("credits") is not None:
+                saved_credits = mem_credits["credits"]
+            if not saved_plan and mem_credits.get("plan"):
+                saved_plan = mem_credits["plan"]
+            if not saved_updated and mem_credits.get("updated_at"):
+                saved_updated = mem_credits["updated_at"]
+
         signed_in = False
-        email: Optional[str] = None
+        email: Optional[str] = mem_credits.get("email") if mem_credits else None
         models: list[dict[str, str]] = list(DEFAULT_MODELS_CATALOG)
         error_msg: Optional[str] = None
 
-        if ext_connected and (refresh_remote or music_tab_open):
+        if ext_connected:
             try:
-                await self.get_access_token(force_refresh=False)
+                await self.get_access_token(
+                    force_refresh=False,
+                    refresh_if_expired=refresh_remote,
+                )
                 signed_in = True
-                cached = self._token_cache.get(self._active_cache_key()) or {}
-                email = cached.get("email")
-                if refresh_remote:
-                    synced = await self.sync_credits()
-                    if synced.get("credits") is not None:
-                        saved_credits = synced["credits"]
-                    if synced.get("plan"):
-                        saved_plan = synced["plan"]
-                    if synced.get("models"):
-                        models = synced["models"]
-                    if synced.get("email"):
-                        email = synced["email"]
+                cached = self._token_cache.get(cache_key) or {}
+                if cached.get("email"):
+                    email = cached["email"]
+                if refresh_remote or saved_credits is None:
+                    try:
+                        synced = await self.sync_credits()
+                        if synced.get("credits") is not None:
+                            saved_credits = synced["credits"]
+                        if synced.get("plan"):
+                            saved_plan = synced["plan"]
+                        if synced.get("models"):
+                            models = synced["models"]
+                        if synced.get("email"):
+                            email = synced["email"]
+                        if synced.get("updated_at"):
+                            saved_updated = synced["updated_at"]
+                    except FlowMusicError as sync_exc:
+                        if sync_exc.code in ("FLOWMUSIC_AUTH_EXPIRED", "FLOWMUSIC_NOT_LOGGED_IN"):
+                            signed_in = False
+                        error_msg = sync_exc.message
             except FlowMusicError as exc:
                 error_msg = exc.message
                 signed_in = False
@@ -804,9 +996,12 @@ class FlowMusicClient:
 
     async def sync_credits(self) -> dict[str, Any]:
         """Fetch live Flow Music credits, subscription plan, and available models."""
+        from datetime import datetime, timezone
+
         account_id = flow_accounts.active_id()
-        credits_data, models_data, me_data = await asyncio.gather(
+        credits_data, billing_sub_data, models_data, me_data = await asyncio.gather(
             self.request_json("GET", "/billing/credits", timeout=20.0),
+            self.request_json("GET", "/billing/subscription", timeout=15.0),
             self.request_json("GET", "/models", timeout=20.0),
             self.request_json("GET", "/users/me", timeout=20.0),
             return_exceptions=True,
@@ -816,15 +1011,29 @@ class FlowMusicClient:
         if isinstance(credits_data, Exception):
             raise FlowMusicError("FLOWMUSIC_CREDITS_FAILED", f"同步 Flow Music 积分失败：{credits_data}")
 
-        sub_data: Any = None
-        try:
-            sub_data = await self.request_json("GET", "/subscription", timeout=15.0)
-        except Exception:
-            sub_data = None
-
+        sub_data: Any = None if isinstance(billing_sub_data, Exception) else billing_sub_data
         credits, plan = _extract_credits_and_plan(credits_data, sub_data)
+        if plan is None:
+            try:
+                legacy_sub = await self.request_json("GET", "/subscription", timeout=15.0)
+                c2, p2 = _extract_credits_and_plan(credits_data, legacy_sub)
+                if credits is None and c2 is not None:
+                    credits = c2
+                if p2:
+                    plan = p2
+            except Exception:
+                pass
+
         models = _extract_models(models_data) if not isinstance(models_data, Exception) else list(DEFAULT_MODELS_CATALOG)
-        email = me_data.get("email") if isinstance(me_data, dict) else None
+        cached = self._token_cache.get(self._active_cache_key()) or {}
+        email = _extract_email_or_username(me_data) or cached.get("email")
+        updated_iso = datetime.now(timezone.utc).isoformat()
+        self._credits_cache[self._active_cache_key()] = {
+            "credits": credits,
+            "plan": plan,
+            "email": email,
+            "updated_at": updated_iso,
+        }
         if account_id:
             flow_accounts.record_account_music_credits(account_id, credits, plan)
         return {
@@ -832,6 +1041,7 @@ class FlowMusicClient:
             "plan": plan,
             "models": models,
             "email": email,
+            "updated_at": updated_iso,
             "raw_credits": credits_data if isinstance(credits_data, dict) else None,
         }
 

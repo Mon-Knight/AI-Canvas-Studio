@@ -204,3 +204,154 @@ test("dispatchMusicGeneration and dispatchMusicSplitStems preserve primary media
     await server.close();
   }
 });
+
+test("extension/background.js extracts Flow Music session cleanly across subdomains, chunk encodings, and webRequest", async () => {
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const vm = await import("node:vm");
+
+  const bgPath = path.resolve(process.cwd(), "..", "extension", "background.js");
+  const bgSource = fs.readFileSync(bgPath, "utf8");
+
+  const webRequestListeners = [];
+  const noop = () => {};
+  const sandbox = {
+    console: { log: noop, warn: noop, error: noop },
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    URL,
+    TextDecoder,
+    atob,
+    fetch: async () => ({ ok: true, status: 200, text: async () => "", json: async () => ({}) }),
+    WebSocket: class {
+      constructor() {
+        this.readyState = 3;
+      }
+      send() {}
+      close() {}
+    },
+    chrome: {
+      runtime: {
+        onInstalled: { addListener: noop },
+        onStartup: { addListener: noop },
+        onMessage: { addListener: noop },
+        sendMessage: async () => {},
+        getManifest: () => ({ version: "0.1.6" }),
+        getURL: (p) => `chrome-extension://test/${p}`,
+      },
+      alarms: {
+        onAlarm: { addListener: noop },
+        create: noop,
+        clear: noop,
+      },
+      storage: {
+        local: {
+          get: async () => ({}),
+          set: async () => {},
+        },
+      },
+      tabs: {
+        query: async () => [],
+        get: async () => null,
+        create: async () => null,
+        update: async () => null,
+        reload: async () => null,
+        onCreated: { addListener: noop },
+        onRemoved: { addListener: noop },
+        onReplaced: { addListener: noop },
+        onUpdated: { addListener: noop, removeListener: noop },
+      },
+      windows: {
+        getLastFocused: async () => null,
+        update: async () => null,
+      },
+      action: {
+        setBadgeText: noop,
+        setBadgeBackgroundColor: noop,
+      },
+      webRequest: {
+        onBeforeSendHeaders: {
+          addListener: (fn, filter) => webRequestListeners.push({ fn, filter }),
+        },
+      },
+      cookies: {
+        getAll: async () => [],
+        getAllCookieStores: async () => [],
+        onChanged: { addListener: noop },
+      },
+      scripting: {
+        executeScript: async () => [],
+      },
+    },
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(
+    `${bgSource}\nglobalThis.__fmTest = { extractSafeFlowMusicSession, selectBestFlowMusicSessionFromCookies, buildFlowMusicSessionFromJwt, getCaptured: () => capturedFlowMusicSession };`,
+    sandbox,
+  );
+  const fm = sandbox.__fmTest;
+
+  const makeJwt = (payloadObj) => {
+    const hdr = Buffer.from(JSON.stringify({ alg: "HS256", typ: "JWT" })).toString("base64url");
+    const pay = Buffer.from(JSON.stringify(payloadObj)).toString("base64url");
+    return `${hdr}.${pay}.sig1234567890`;
+  };
+
+  const futureExp = Math.floor(Date.now() / 1000) + 3600;
+  const userJwt = makeJwt({ sub: "u-42", email: "valley@example.com", role: "authenticated", exp: futureExp });
+  const anonJwt = makeJwt({ ref: "ednjccqcmbxeaxbidinr", role: "anon", exp: futureExp + 10000 });
+
+  // 1. Public Supabase anon JWT must be rejected
+  assert.equal(fm.buildFlowMusicSessionFromJwt(anonJwt), null);
+
+  // 2. Cross-domain cookie chunk collision: www.flowmusic.app has stale anonymous .0,
+  //    while .flowmusic.app has real 2-chunk Google OAuth session (.0 + .1)
+  const validPayload = JSON.stringify({
+    access_token: userJwt,
+    refresh_token: "SECRET_REFRESH_MUST_NOT_LEAK",
+    expires_at: futureExp,
+    user: { id: "u-42", email: "valley@example.com", is_anonymous: false },
+  });
+  const encodedValid = "base64-" + Buffer.from(validPayload, "utf8").toString("base64url");
+  const mid = Math.floor(encodedValid.length / 2);
+
+  const staleAnonPayload = "base64-" + Buffer.from(
+    JSON.stringify({ access_token: anonJwt, user: { id: "anon-1", is_anonymous: true } }),
+    "utf8",
+  ).toString("base64url");
+
+  const picked = fm.selectBestFlowMusicSessionFromCookies([
+    { name: "sb-sb-auth-token.0", value: staleAnonPayload, domain: "www.flowmusic.app", path: "/", storeId: "0" },
+    { name: "sb-sb-auth-token.1", value: encodeURIComponent(encodedValid.slice(mid)), domain: ".flowmusic.app", path: "/", storeId: "0" },
+    { name: "sb-sb-auth-token.0", value: encodeURIComponent(encodedValid.slice(0, mid)), domain: ".flowmusic.app", path: "/", storeId: "0" },
+  ]);
+  assert.ok(picked);
+  assert.equal(picked.access_token, userJwt);
+  assert.equal(picked.email, "valley@example.com");
+  assert.equal("refresh_token" in picked, false);
+
+  // 3. Quoted, standard base64 (+, /, =), and nested session object all decode cleanly
+  const stdB64 = "base64-" + Buffer.from(
+    JSON.stringify({ session: { access_token: userJwt, refresh_token: "NOPE", user: { user_metadata: { email: "meta@example.com" } } } }),
+    "utf8",
+  ).toString("base64");
+  const nested = fm.extractSafeFlowMusicSession(`"${encodeURIComponent(stdB64)}"`);
+  assert.ok(nested);
+  assert.equal(nested.access_token, userJwt);
+  assert.equal(nested.email, "meta@example.com");
+  assert.equal("refresh_token" in nested, false);
+
+  // 4. Passive webRequest sniffer captures authenticated Bearer JWT and ignores anon JWT
+  const fmSniffer = webRequestListeners.find((l) =>
+    l.filter?.urls?.some((u) => u.includes("flowmusic.app/__api")),
+  );
+  assert.ok(fmSniffer, "expected Flow Music webRequest Bearer listener");
+  fmSniffer.fn({ requestHeaders: [{ name: "Authorization", value: `Bearer ${anonJwt}` }] });
+  assert.equal(fm.getCaptured(), null);
+  fmSniffer.fn({ requestHeaders: [{ name: "Authorization", value: `Bearer ${userJwt}` }] });
+  assert.equal(fm.getCaptured()?.access_token, userJwt);
+  assert.equal(fm.getCaptured()?.email, "valley@example.com");
+});
+

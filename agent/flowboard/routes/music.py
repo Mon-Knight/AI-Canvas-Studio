@@ -43,7 +43,14 @@ async def sync_music_credits():
     try:
         res = await get_flowmusic_client().sync_credits()
         status = await get_flowmusic_client().get_status(refresh_remote=False)
-        return {**status, **res}
+        merged = {**status, **res}
+        if merged.get("music_credits") is None and res.get("credits") is not None:
+            merged["music_credits"] = res["credits"]
+        if not merged.get("music_plan") and res.get("plan"):
+            merged["music_plan"] = res["plan"]
+        if not merged.get("email") and res.get("email"):
+            merged["email"] = res["email"]
+        return merged
     except FlowMusicError as exc:
         code = 401 if exc.code in ("FLOWMUSIC_NOT_LOGGED_IN", "FLOWMUSIC_AUTH_EXPIRED") else 502
         raise HTTPException(status_code=code, detail=exc.message) from None
