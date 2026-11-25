@@ -113,6 +113,10 @@ export interface FlowboardNodeData extends Record<string, unknown> {
   charCountry?: string;
   charVibe?: string;
   charGender?: string;
+  /** 角色节点绑定的固定音色预设 key（如 warm_female / bright_girl / custom） */
+  voicePreset?: string;
+  /** 角色节点自定义音色/声线特征补充说明 */
+  voiceCustom?: string;
   error?: string;
   // Storyboard layout. The Storyboard node is now a thin image-node
   // wrapper that generates a single composite using a locked prompt
@@ -123,6 +127,8 @@ export interface FlowboardNodeData extends Record<string, unknown> {
   storyboardGrid?: StoryboardGrid;
   storyboardMode?: StoryboardMode;
   audioPrompt?: string;
+  /** 视频节点「生成静音视频」开关（开启后抑制对白、配乐与环境音效，并屏蔽上游角色音色） */
+  silentVideo?: boolean;
   history?: NodeHistoryEntry[];
   groupId?: string;
   groupTitle?: string;
@@ -250,9 +256,15 @@ function nodeFromDto(n: NodeDTO): FlowNode {
       charCountry: n.data["charCountry"] as string | undefined,
       charVibe: n.data["charVibe"] as string | undefined,
       charGender: n.data["charGender"] as string | undefined,
+      voicePreset: n.data["voicePreset"] as string | undefined,
+      voiceCustom: n.data["voiceCustom"] as string | undefined,
       storyboardGrid: n.data["storyboardGrid"] as StoryboardGrid | undefined,
       storyboardMode: n.data["storyboardMode"] as StoryboardMode | undefined,
       audioPrompt: n.data["audioPrompt"] as string | undefined,
+      silentVideo:
+        typeof n.data["silentVideo"] === "boolean"
+          ? (n.data["silentVideo"] as boolean)
+          : undefined,
       history: Array.isArray(n.data["history"])
         ? (n.data["history"] as NodeHistoryEntry[])
         : undefined,
@@ -335,6 +347,9 @@ interface BoardState {
     position: { x: number; y: number },
   ): Promise<string | null>;
   persistNodePosition(rfId: string, position: { x: number; y: number }): Promise<void>;
+  batchUpdateNodePositions(
+    updates: Array<{ rfId: string; x: number; y: number }>,
+  ): Promise<void>;
   persistNodeDimensions(
     rfId: string,
     rect: { x: number; y: number; width: number; height: number },
@@ -627,6 +642,26 @@ export const useBoardStore = create<BoardState>((set, get) => ({
         // ignore persist failures
       }
     });
+  },
+
+  async batchUpdateNodePositions(updates) {
+    if (updates.length === 0) return;
+    const map = new Map(
+      updates.map((u) => [u.rfId, { x: Math.round(u.x), y: Math.round(u.y) }]),
+    );
+    set((s) => ({
+      nodes: s.nodes.map((n) => {
+        const nextPos = map.get(n.id);
+        return nextPos ? { ...n, position: nextPos } : n;
+      }),
+    }));
+    await Promise.all(
+      updates.map((u) => {
+        const dbId = parseInt(u.rfId, 10);
+        if (isNaN(dbId)) return Promise.resolve();
+        return patchNode(dbId, { x: Math.round(u.x), y: Math.round(u.y) }).catch(() => {});
+      }),
+    );
   },
 
   async persistNodeDimensions(rfId, rect) {

@@ -710,6 +710,7 @@ export async function autoPrompt(
     seedPrompt?: string;
     allowFallback?: boolean;
     durationSeconds?: number;
+    silentVideo?: boolean;
   },
 ): Promise<AutoPromptResponse> {
   const res = await fetch("/api/prompt/auto", {
@@ -721,6 +722,7 @@ export async function autoPrompt(
       seed_prompt: opts?.seedPrompt,
       allow_fallback: opts?.allowFallback ?? false,
       duration_s: opts?.durationSeconds,
+      silent_video: opts?.silentVideo ?? false,
     }),
   });
   if (!res.ok) {

@@ -1397,3 +1397,486 @@ test("promptSafety client sanitizer, video confirm toggle, GIF89a/timecode helpe
     await server.close();
   }
 });
+
+test("node double-click dropdown (openDialog) and settings-to-showcase (openViewer params/history) stay mutually exclusive", async () => {
+  const server = await createServer({ server: { middlewareMode: true, hmr: false, ws: false }, logLevel: "error" });
+  try {
+    const { useBoardStore } = await server.ssrLoadModule("/src/store/board.ts");
+    const { useGenerationStore } = await server.ssrLoadModule("/src/store/generation.ts");
+
+    useBoardStore.setState({
+      boardId: 1,
+      nodes: [
+        { id: "10", type: "image", selected: false, position: { x: 0, y: 0 }, data: { type: "image", shortId: "IM1", title: "图片" } },
+        { id: "20", type: "video", selected: false, position: { x: 300, y: 0 }, data: { type: "video", shortId: "VD1", title: "视频" } },
+      ],
+      edges: [],
+    });
+
+    // Double-click opens anchored dropdown (openDialog) and highlights the node
+    useGenerationStore.getState().openGenerationDialog("20", "慢镜头推近");
+    assert.equal(useGenerationStore.getState().openDialog.rfId, "20");
+    assert.equal(useGenerationStore.getState().openDialog.prompt, "慢镜头推近");
+    assert.equal(useGenerationStore.getState().openViewer.rfId, null);
+    assert.equal(useBoardStore.getState().nodes.find((n) => n.id === "20")?.selected, true);
+
+    // Clicking Settings enters Showcase on "params" tab and closes the dropdown
+    useGenerationStore.getState().openResultViewer("20", 0, "params");
+    assert.equal(useGenerationStore.getState().openDialog.rfId, null);
+    assert.equal(useGenerationStore.getState().openViewer.rfId, "20");
+    assert.equal(useGenerationStore.getState().openViewer.tab, "params");
+
+    // Clicking Preview / 展示页 opens Showcase on "history" tab
+    useGenerationStore.getState().openResultViewer("10", 1, "history");
+    assert.equal(useGenerationStore.getState().openViewer.rfId, "10");
+    assert.equal(useGenerationStore.getState().openViewer.idx, 1);
+    assert.equal(useGenerationStore.getState().openViewer.tab, "history");
+
+    // Re-opening dropdown closes Showcase cleanly
+    useGenerationStore.getState().openGenerationDialog("10", "晴朗海边");
+    assert.equal(useGenerationStore.getState().openViewer.rfId, null);
+    assert.equal(useGenerationStore.getState().openViewer.tab, "history");
+    assert.equal(useGenerationStore.getState().openDialog.rfId, "10");
+    assert.equal(useBoardStore.getState().nodes.find((n) => n.id === "10")?.selected, true);
+
+    useGenerationStore.getState().closeGenerationDialog();
+    assert.equal(useGenerationStore.getState().openDialog.rfId, null);
+  } finally {
+    await server.close();
+  }
+});
+
+test("computeArrangedPositions computes stack, grid, row, column, align, and distribute layouts accurately", async () => {
+  const server = await createServer({ server: { middlewareMode: true, hmr: false, ws: false }, logLevel: "error" });
+  try {
+    const { computeArrangedPositions, computeRightSpawnPosition, resolveNodeBox } = await server.ssrLoadModule(
+      "/src/lib/canvasArrange.ts",
+    );
+
+    // Fewer than 2 nodes produces empty map
+    assert.equal(computeArrangedPositions([{ id: "1", x: 10, y: 20, width: 200, height: 150 }], "stack").size, 0);
+
+    const boxes = [
+      { id: "a", x: 400, y: 120, width: 200, height: 100 },
+      { id: "b", x: 100, y: 80, width: 240, height: 160 },
+      { id: "c", x: 760, y: 300, width: 200, height: 120 },
+    ];
+
+    // Stack: cascading deck starting at (minX=100, minY=80), ordered by y then x (b -> a -> c)
+    const stacked = computeArrangedPositions(boxes, "stack");
+    assert.deepEqual(stacked.get("b"), { x: 100, y: 80 });
+    assert.deepEqual(stacked.get("a"), { x: 118, y: 94 });
+    assert.deepEqual(stacked.get("c"), { x: 136, y: 108 });
+
+    // Row: sorted by x (b -> a -> c), gap = 40
+    const row = computeArrangedPositions(boxes, "row", 40);
+    assert.deepEqual(row.get("b"), { x: 100, y: 80 });
+    assert.deepEqual(row.get("a"), { x: 380, y: 80 });
+    assert.deepEqual(row.get("c"), { x: 620, y: 80 });
+
+    // Column: sorted by y (b -> a -> c), gap = 30
+    const col = computeArrangedPositions(boxes, "column", 30);
+    assert.deepEqual(col.get("b"), { x: 100, y: 80 });
+    assert.deepEqual(col.get("a"), { x: 100, y: 270 });
+    assert.deepEqual(col.get("c"), { x: 100, y: 400 });
+
+    // Grid: 4 nodes arranged in 2x2 with per-column widths and per-row heights
+    const four = [
+      { id: "1", x: 50, y: 50, width: 200, height: 100 },
+      { id: "2", x: 300, y: 60, width: 260, height: 140 },
+      { id: "3", x: 60, y: 260, width: 220, height: 120 },
+      { id: "4", x: 320, y: 270, width: 200, height: 120 },
+    ];
+    const grid = computeArrangedPositions(four, "grid", 40);
+    assert.deepEqual(grid.get("1"), { x: 50, y: 50 });
+    assert.deepEqual(grid.get("2"), { x: 310, y: 50 }); // col0 maxW=220 + gap 40 => 50+260=310
+    assert.deepEqual(grid.get("3"), { x: 50, y: 230 }); // row0 maxH=140 + gap 40 => 50+180=230
+    assert.deepEqual(grid.get("4"), { x: 310, y: 230 });
+
+    // Alignments
+    const left = computeArrangedPositions(boxes, "align_left");
+    assert.equal(left.get("a")?.x, 100);
+    assert.equal(left.get("c")?.x, 100);
+
+    const right = computeArrangedPositions(boxes, "align_right");
+    // maxRight = 760 + 200 = 960
+    assert.equal(right.get("b")?.x, 960 - 240);
+    assert.equal(right.get("a")?.x, 960 - 200);
+
+    const centerX = computeArrangedPositions(boxes, "align_center_x");
+    // centerX = (100 + 960) / 2 = 530
+    assert.equal(centerX.get("b")?.x, 530 - 120);
+    assert.equal(centerX.get("a")?.x, 530 - 100);
+
+    const top = computeArrangedPositions(boxes, "align_top");
+    assert.equal(top.get("c")?.y, 80);
+
+    const bottom = computeArrangedPositions(boxes, "align_bottom");
+    // maxBottom = 300 + 120 = 420
+    assert.equal(bottom.get("a")?.y, 420 - 100);
+    assert.equal(bottom.get("b")?.y, 420 - 160);
+
+    const centerY = computeArrangedPositions(boxes, "align_center_y");
+    // centerY = (80 + 420) / 2 = 250
+    assert.equal(centerY.get("a")?.y, 250 - 50);
+
+    // Distribute horizontally: span = 960 - 100 = 860, totalW = 640, spacing = 110
+    const distH = computeArrangedPositions(boxes, "distribute_h", 20);
+    assert.equal(distH.get("b")?.x, 100);
+    assert.equal(distH.get("a")?.x, 100 + 240 + 110);
+    assert.equal(distH.get("c")?.x, 100 + 240 + 110 + 200 + 110);
+
+    // Distribute vertically: span = 420 - 80 = 340, totalH = 380 -> falls back to minimum gap 36
+    const distV = computeArrangedPositions(boxes, "distribute_v", 36);
+    assert.equal(distV.get("b")?.y, 80);
+    assert.equal(distV.get("a")?.y, 80 + 160 + 36);
+    assert.equal(distV.get("c")?.y, 80 + 160 + 36 + 100 + 36);
+
+    // Spawn position to the right of selection bounding box
+    const spawn = computeRightSpawnPosition(boxes, 76);
+    assert.equal(spawn.x, 960 + 76);
+    assert.equal(spawn.y, Math.round((80 + 420) / 2 - 110));
+
+    // resolveNodeBox fallback sizing
+    const fallbackBox = resolveNodeBox({
+      id: "n9",
+      type: "image",
+      position: { x: 12, y: 34 },
+      data: { type: "image", shortId: "N9", title: "图片" },
+    });
+    assert.deepEqual(fallbackBox, { id: "n9", x: 12, y: 34, width: 264, height: 210 });
+  } finally {
+    await server.close();
+  }
+});
+
+test("collectSelectedMediaDownloads gathers unique multi-variant media files and skips text/empty nodes", async () => {
+  const server = await createServer({ server: { middlewareMode: true, hmr: false, ws: false }, logLevel: "error" });
+  try {
+    const { collectSelectedMediaDownloads } = await server.ssrLoadModule("/src/lib/canvasArrange.ts");
+
+    const nodes = [
+      {
+        id: "1",
+        type: "prompt",
+        position: { x: 0, y: 0 },
+        data: { type: "prompt", shortId: "P1", title: "文本", mediaId: "should-skip" },
+      },
+      {
+        id: "2",
+        type: "image",
+        position: { x: 0, y: 0 },
+        data: {
+          type: "image",
+          shortId: "I1",
+          title: "赛博霓虹",
+          mediaId: "m-img-1",
+          mediaIds: ["m-img-1", null, "m-img-2"],
+        },
+      },
+      {
+        id: "3",
+        type: "video",
+        position: { x: 0, y: 0 },
+        data: {
+          type: "video",
+          shortId: "V1",
+          title: "推镜视频",
+          mediaId: "m-vid-1",
+          mediaIds: ["m-vid-1"],
+        },
+      },
+      {
+        id: "4",
+        type: "image",
+        position: { x: 0, y: 0 },
+        data: {
+          type: "image",
+          shortId: "I2",
+          title: "重复图",
+          mediaId: "m-img-1",
+        },
+      },
+      {
+        id: "5",
+        type: "image",
+        position: { x: 0, y: 0 },
+        data: { type: "image", shortId: "I3", title: "空节点" },
+      },
+    ];
+
+    const downloads = collectSelectedMediaDownloads(nodes);
+    assert.equal(downloads.length, 3);
+    assert.equal(downloads[0].filename, "赛博霓虹-I1-1.png");
+    assert.equal(downloads[0].mediaId, "m-img-1");
+    assert.equal(downloads[1].filename, "赛博霓虹-I1-2.png");
+    assert.equal(downloads[1].mediaId, "m-img-2");
+    assert.equal(downloads[2].filename, "推镜视频-V1.mp4");
+    assert.equal(downloads[2].mediaId, "m-vid-1");
+  } finally {
+    await server.close();
+  }
+});
+
+test("useBoardStore.batchUpdateNodePositions updates multiple nodes atomically and persists PATCH requests", async () => {
+  const server = await createServer({ server: { middlewareMode: true, hmr: false, ws: false }, logLevel: "error" });
+  const savedFetch = globalThis.fetch;
+  try {
+    const { useBoardStore } = await server.ssrLoadModule("/src/store/board.ts");
+    const patched = [];
+    globalThis.fetch = async (url, init) => {
+      if (typeof url === "string" && url.startsWith("/api/nodes/") && init?.method === "PATCH") {
+        patched.push({ url, body: JSON.parse(String(init.body)) });
+        return Response.json({ ok: true });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    };
+
+    useBoardStore.setState({
+      boardId: 1,
+      nodes: [
+        { id: "101", type: "image", selected: true, position: { x: 10, y: 20 }, data: { type: "image", shortId: "A1", title: "图1" } },
+        { id: "102", type: "image", selected: true, position: { x: 300, y: 40 }, data: { type: "image", shortId: "A2", title: "图2" } },
+        { id: "103", type: "prompt", selected: false, position: { x: 600, y: 60 }, data: { type: "prompt", shortId: "T1", title: "文本" } },
+      ],
+      edges: [],
+    });
+
+    await useBoardStore.getState().batchUpdateNodePositions([
+      { rfId: "101", x: 100, y: 100 },
+      { rfId: "102", x: 400, y: 100 },
+    ]);
+
+    const after = useBoardStore.getState().nodes;
+    assert.deepEqual(after.find((n) => n.id === "101")?.position, { x: 100, y: 100 });
+    assert.deepEqual(after.find((n) => n.id === "102")?.position, { x: 400, y: 100 });
+    assert.deepEqual(after.find((n) => n.id === "103")?.position, { x: 600, y: 60 });
+
+    assert.equal(patched.length, 2);
+    assert.deepEqual(patched[0], { url: "/api/nodes/101", body: { x: 100, y: 100 } });
+    assert.deepEqual(patched[1], { url: "/api/nodes/102", body: { x: 400, y: 100 } });
+  } finally {
+    globalThis.fetch = savedFetch;
+    await server.close();
+  }
+});
+
+test("characterVoice resolves presets/custom traits and propagates fixed voice across character -> image -> prompt -> video", async () => {
+  const server = await createServer({ server: { middlewareMode: true, hmr: false, ws: false }, logLevel: "error" });
+  try {
+    const {
+      resolveCharacterVoiceLabel,
+      resolveCharacterVoiceDirective,
+      collectUpstreamCharacterVoices,
+    } = await server.ssrLoadModule("/src/constants/characterVoice.ts");
+    const {
+      SILENT_VIDEO_DIRECTIVE,
+      composeVideoPromptWithDirectives,
+    } = await server.ssrLoadModule("/src/lib/promptMentions.ts");
+
+    assert.equal(resolveCharacterVoiceLabel("", ""), null);
+    assert.equal(resolveCharacterVoiceLabel("bright_girl", ""), "清亮元气少女");
+    assert.ok(resolveCharacterVoiceDirective("bright_girl", "略带南方口音").includes("略带南方口音"));
+    assert.equal(resolveCharacterVoiceLabel("custom", "低沉沙哑摇滚女声"), "低沉沙哑摇滚女声");
+    assert.equal(resolveCharacterVoiceDirective("custom", "低沉沙哑摇滚女声"), "低沉沙哑摇滚女声");
+
+    const nodes = [
+      {
+        id: "1",
+        type: "character",
+        position: { x: 0, y: 0 },
+        data: {
+          type: "character",
+          shortId: "CH1",
+          title: "林浅",
+          voicePreset: "warm_female",
+          voiceCustom: "语尾略带笑意",
+        },
+      },
+      {
+        id: "2",
+        type: "character",
+        position: { x: 0, y: 240 },
+        data: { type: "character", shortId: "CH2", title: "无音色路人" },
+      },
+      {
+        id: "3",
+        type: "image",
+        position: { x: 300, y: 0 },
+        data: { type: "image", shortId: "IM1", title: "雨夜街景" },
+      },
+      {
+        id: "4",
+        type: "prompt",
+        position: { x: 600, y: 0 },
+        data: { type: "prompt", shortId: "PR1", title: "分镜文本", prompt: "缓慢抬头微笑" },
+      },
+      {
+        id: "5",
+        type: "video",
+        position: { x: 900, y: 0 },
+        data: { type: "video", shortId: "VD1", title: "视频镜头" },
+      },
+    ];
+    const edges = [
+      { id: "e1", source: "1", target: "3" },
+      { id: "e2", source: "2", target: "3" },
+      { id: "e3", source: "3", target: "4" },
+      { id: "e4", source: "4", target: "5" },
+      // Diamond duplicate edge back from character 1 directly to video 5
+      { id: "e5", source: "1", target: "5" },
+    ];
+
+    const voices = collectUpstreamCharacterVoices("5", nodes, edges);
+    assert.equal(voices.length, 1);
+    assert.equal(voices[0].rfId, "1");
+    assert.equal(voices[0].title, "林浅");
+    assert.equal(voices[0].label, "温柔治愈女声");
+    assert.ok(voices[0].directive.includes("语尾略带笑意"));
+
+    // Non-silent with explicit dialogue pairs character voice with dialogue
+    const voicedWithDlg = composeVideoPromptWithDirectives({
+      prompt: "林浅撑伞走在雨夜街头",
+      cameraKey: "dolly_in",
+      dialogue: "今晚的雨下得好温柔",
+      sfx: "细雨打伞声",
+      silentVideo: false,
+      characterVoices: voices,
+    });
+    assert.ok(voicedWithDlg.includes("严格保持绑定固定音色"));
+    assert.ok(voicedWithDlg.includes("林浅"));
+    assert.ok(voicedWithDlg.includes("今晚的雨下得好温柔"));
+    assert.ok(voicedWithDlg.includes("细雨打伞声"));
+
+    // Non-silent without explicit dialogue still embeds conditional voice binding
+    const voicedNoDlg = composeVideoPromptWithDirectives({
+      prompt: "林浅回眸轻声说话",
+      cameraKey: "dynamic",
+      silentVideo: false,
+      characterVoices: voices,
+    });
+    assert.ok(voicedNoDlg.includes("角色固定音色绑定"));
+    assert.ok(voicedNoDlg.includes("林浅"));
+
+    // Silent Video overrides dialogue, SFX, character voices, AND strips 【声画指令】
+    const silentOut = composeVideoPromptWithDirectives({
+      prompt: "林浅站在窗边凝望远方\n【声画指令】角色台词：“你好”；环境氛围音：钢琴",
+      cameraKey: "static",
+      dialogue: "这段台词应被静音开关屏蔽",
+      sfx: "这段音效也应被屏蔽",
+      silentVideo: true,
+      characterVoices: voices,
+    });
+    assert.ok(silentOut.includes(SILENT_VIDEO_DIRECTIVE));
+    assert.ok(!silentOut.includes("【声画指令】"));
+    assert.ok(!silentOut.includes("这段台词应被静音开关屏蔽"));
+    assert.ok(!silentOut.includes("这段音效也应被屏蔽"));
+    assert.ok(!silentOut.includes("林浅（"));
+  } finally {
+    await server.close();
+  }
+});
+
+test("computeSmartSnapGuides magnetically snaps heterogeneous modules and emits clean gap-spanning dashed guides", async () => {
+  const server = await createServer({ server: { middlewareMode: true, hmr: false, ws: false }, logLevel: "error" });
+  try {
+    const {
+      computeSmartSnapGuides,
+      resolveSnapRect,
+      DEFAULT_NODE_HEADER_OFFSET,
+    } = await server.ssrLoadModule("/src/lib/smartSnapGuides.ts");
+
+    const leftImage = resolveSnapRect(
+      {
+        id: "img-2",
+        type: "image",
+        position: { x: 100, y: 120 },
+        data: { type: "image", shortId: "IM2", title: "图片 2" },
+      },
+      { width: 256, height: 241 },
+    );
+    assert.equal(leftImage.surfaceTopOffset, DEFAULT_NODE_HEADER_OFFSET);
+
+    // Dragging a same-height video/audio module to the right within 4px of horizontal alignment
+    const draggedRight = resolveSnapRect(
+      {
+        id: "vid-1",
+        type: "video",
+        position: { x: 520, y: 124 },
+        data: { type: "video", shortId: "VD1", title: "视频 1" },
+      },
+      { width: 256, height: 241 },
+    );
+
+    const hSnap = computeSmartSnapGuides(draggedRight, [leftImage], 7);
+    assert.equal(hSnap.didSnapY, true);
+    assert.equal(hSnap.snappedY, 120);
+    assert.equal(hSnap.didSnapX, false);
+
+    // Expect ALL THREE horizontal dashed lines (surface top, centerY, bottom) spanning strictly across the gap [356, 520]
+    const hGuides = hSnap.guides.filter((g) => g.orientation === "h");
+    assert.equal(hGuides.length, 3);
+    const ys = hGuides.map((g) => g.pos).sort((a, b) => a - b);
+    assert.deepEqual(ys, [120 + 31, (120 + 31 + 120 + 241) / 2, 120 + 241]);
+    for (const g of hGuides) {
+      assert.equal(g.start, 100 + 256);
+      assert.equal(g.end, 520);
+    }
+
+    // Dragging a shorter prompt module aligned to vertical center of leftImage
+    const draggedPrompt = resolveSnapRect(
+      {
+        id: "pr-1",
+        type: "prompt",
+        position: { x: 520, y: 175 }, // surface top=206, bottom=295, center=250.5 vs leftImage center=256
+        data: { type: "prompt", shortId: "PR1", title: "文本" },
+      },
+      { width: 256, height: 120 },
+    );
+    const centerSnap = computeSmartSnapGuides(draggedPrompt, [leftImage], 8);
+    assert.equal(centerSnap.didSnapY, true);
+    const centerGuides = centerSnap.guides.filter((g) => g.orientation === "h");
+    assert.equal(centerGuides.length, 1);
+    assert.equal(centerGuides[0].kind, "center");
+    assert.equal(centerGuides[0].pos, 256);
+
+    // Dragging a module below leftImage within X snap threshold yields vertical left/center/right lines
+    const draggedBelow = resolveSnapRect(
+      {
+        id: "char-1",
+        type: "character",
+        position: { x: 105, y: 440 },
+        data: { type: "character", shortId: "CH1", title: "角色" },
+      },
+      { width: 256, height: 220 },
+    );
+    const vSnap = computeSmartSnapGuides(draggedBelow, [leftImage], 7);
+    assert.equal(vSnap.didSnapX, true);
+    assert.equal(vSnap.snappedX, 100);
+    const vGuides = vSnap.guides.filter((g) => g.orientation === "v");
+    assert.equal(vGuides.length, 3);
+    assert.deepEqual(
+      vGuides.map((g) => g.pos).sort((a, b) => a - b),
+      [100, 228, 356],
+    );
+    for (const g of vGuides) {
+      assert.equal(g.start, 120 + 241);
+      assert.equal(g.end, 440);
+    }
+
+    // Far away -> no snap & no guides
+    const farAway = computeSmartSnapGuides(
+      { ...draggedRight, x: 900, y: 900 },
+      [leftImage],
+      7,
+    );
+    assert.equal(farAway.didSnapX, false);
+    assert.equal(farAway.didSnapY, false);
+    assert.equal(farAway.guides.length, 0);
+  } finally {
+    await server.close();
+  }
+});
+
+
+

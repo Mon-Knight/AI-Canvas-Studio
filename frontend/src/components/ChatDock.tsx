@@ -290,6 +290,45 @@ function BoardChat({ boardId }: { boardId: number }) {
     return () => document.removeEventListener("pointerdown", onOutside, true);
   }, [nodePickerOpen]);
 
+  // 接收画布框选浮窗的「✨ AI 协同」指令：展开对话面板、解除忽略并锁定所选节点引用、回填指令并聚焦
+  useEffect(() => {
+    const onOpenWithSelection = (ev: Event) => {
+      const detail = (
+        ev as CustomEvent<{
+          rfIds?: string[];
+          mode?: ChatMode;
+          prompt?: string;
+        }>
+      ).detail;
+      const rfIds = Array.isArray(detail?.rfIds) ? detail.rfIds : [];
+      if (detail?.mode) setMode(detail.mode);
+      if (rfIds.length > 0) {
+        const idSet = new Set(rfIds);
+        setMutedSelectedIds((prev) => {
+          if (prev.size === 0) return prev;
+          const next = new Set(prev);
+          for (const id of idSet) next.delete(id);
+          return next;
+        });
+        setPinnedNodeIds(rfIds.slice(0, MAX_CHAT_MENTIONS));
+      }
+      if (typeof detail?.prompt === "string") {
+        setText(detail.prompt);
+      }
+      setCollapsed(false);
+      requestAnimationFrame(() => {
+        const ta = textareaRef.current;
+        if (ta) {
+          ta.focus();
+          ta.setSelectionRange(ta.value.length, ta.value.length);
+        }
+      });
+    };
+    window.addEventListener("flowboard:open-chat-with-selection", onOpenWithSelection);
+    return () =>
+      window.removeEventListener("flowboard:open-chat-with-selection", onOpenWithSelection);
+  }, []);
+
   const activeCanvasRefs = useMemo(
     () => resolveActiveCanvasReferences(nodes, mutedSelectedIds, pinnedNodeIds),
     [nodes, mutedSelectedIds, pinnedNodeIds],

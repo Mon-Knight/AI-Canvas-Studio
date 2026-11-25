@@ -1,0 +1,310 @@
+/* Jimeng-style Marquee Selection Box & Floating Multi-Select Action Capsule */
+
+/* Active drag-selection rectangle */
+.react-flow__selection {
+  background: rgba(56, 189, 248, 0.08) !important;
+  border: 1px solid rgba(56, 189, 248, 0.55) !important;
+  border-radius: 6px !important;
+}
+
+/* Multi-selected bounding dashed box (matching Jimeng reference screenshot) */
+.react-flow__nodesselection-rect {
+  background: rgba(255, 255, 255, 0.015) !important;
+  border: 1px dashed rgba(255, 255, 255, 0.24) !important;
+  border-radius: 14px !important;
+}
+
+/* Canvas cursor feedback for Select vs Hand pan mode */
+.jm-canvas-mode--hand .react-flow__pane {
+  cursor: grab;
+}
+
+.jm-canvas-mode--hand .react-flow__pane:active {
+  cursor: grabbing;
+}
+
+.jm-canvas-mode--select .react-flow__pane {
+  cursor: default;
+}
+
+/* Floating Action Capsule anchored above the selected nodes bounding box */
+.jm-sel-bar {
+  position: absolute;
+  transform: translate(-50%, -100%);
+  z-index: 36;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 44px;
+  padding: 0 10px;
+  border-radius: 14px;
+  background: rgba(23, 23, 27, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(20px) saturate(140%);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  box-shadow:
+    0 16px 42px rgba(0, 0, 0, 0.65),
+    0 0 0 1px rgba(255, 255, 255, 0.03);
+  color: #f4f4f6;
+  font: 13px/1 var(--font-sans);
+  white-space: nowrap;
+  pointer-events: auto;
+}
+
+.jm-sel-bar__count {
+  padding: 0 8px 0 4px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: #71717a;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+.jm-sel-bar__btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #e4e4e7;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.jm-sel-bar__btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.09);
+  color: #ffffff;
+}
+
+.jm-sel-bar__btn--active {
+  background: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+}
+
+.jm-sel-bar__btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.jm-sel-bar__btn--ai {
+  color: #7dd3fc;
+  background: rgba(56, 189, 248, 0.1);
+  border-color: rgba(56, 189, 248, 0.25);
+}
+
+.jm-sel-bar__btn--ai:hover:not(:disabled),
+.jm-sel-bar__btn--ai.jm-sel-bar__btn--active {
+  background: rgba(56, 189, 248, 0.2);
+  border-color: rgba(56, 189, 248, 0.5);
+  color: #e0f2fe;
+}
+
+.jm-sel-bar__caret {
+  font-size: 11px;
+  opacity: 0.72;
+  margin-left: -2px;
+}
+
+.jm-sel-bar__sep {
+  width: 1px;
+  height: 18px;
+  background: rgba(255, 255, 255, 0.1);
+  margin: 0 3px;
+  flex-shrink: 0;
+}
+
+.jm-sel-bar__icon-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #e4e4e7;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.jm-sel-bar__icon-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.09);
+  color: #ffffff;
+}
+
+.jm-sel-bar__icon-btn:disabled {
+  color: #52525b;
+  cursor: not-allowed;
+}
+
+.jm-sel-bar__dl-badge {
+  position: absolute;
+  top: 2px;
+  right: 1px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: #38bdf8;
+  color: #09090b;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 14px;
+  text-align: center;
+}
+
+/* Popover Dropdowns attached to SelectionActionBar */
+.jm-sel-bar__menu-wrap {
+  position: relative;
+}
+
+.jm-sel-popover {
+  position: absolute;
+  top: calc(100% + 10px);
+  left: 50%;
+  transform: translateX(-50%);
+  min-width: 224px;
+  padding: 6px;
+  border-radius: 14px;
+  background: rgba(24, 24, 28, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  box-shadow: 0 20px 54px rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(22px);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  z-index: 48;
+}
+
+.jm-sel-popover--wide {
+  min-width: 248px;
+}
+
+.jm-sel-popover--ai {
+  left: auto;
+  right: 0;
+  transform: none;
+  min-width: 256px;
+}
+
+.jm-sel-popover__label {
+  padding: 4px 8px 2px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #71717a;
+  letter-spacing: 0.03em;
+}
+
+.jm-sel-popover__item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: #e4e4e7;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 110ms ease, color 110ms ease;
+}
+
+.jm-sel-popover__item:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+}
+
+.jm-sel-popover__hint,
+.jm-sel-popover__kbd {
+  font-size: 11px;
+  color: #71717a;
+  font-family: ui-monospace, monospace;
+}
+
+.jm-sel-popover__divider {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.07);
+  margin: 3px 4px;
+}
+
+.jm-sel-popover__form {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 4px;
+}
+
+.jm-sel-popover__input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #141417;
+  color: #f4f4f6;
+  font-size: 12px;
+  outline: none;
+}
+
+.jm-sel-popover__input:focus {
+  border-color: rgba(56, 189, 248, 0.55);
+}
+
+.jm-sel-popover__ok {
+  height: 28px;
+  padding: 0 9px;
+  border-radius: 7px;
+  border: none;
+  background: #f4f4f6;
+  color: #09090b;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.jm-sel-popover__ok:hover {
+  background: #ffffff;
+}
+
+.jm-sel-popover__align-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  padding: 2px 4px;
+}
+
+.jm-sel-popover__dist-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  padding: 2px 4px;
+}
+
+.jm-sel-popover__chip {
+  height: 28px;
+  padding: 0 6px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: #1c1c20;
+  color: #d4d4d8;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: background 110ms ease, border-color 110ms ease, color 110ms ease;
+}
+
+.jm-sel-popover__chip:hover {
+  background: #27272c;
+  border-color: rgba(56, 189, 248, 0.45);
+  color: #ffffff;
+}

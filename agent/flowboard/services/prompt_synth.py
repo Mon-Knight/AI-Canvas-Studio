@@ -255,10 +255,51 @@ _SYNTH_SYSTEM_VIDEO_STATIC = (
 )
 
 
+_SILENT_VIDEO_AUDIO_CLAUSE = (
+    "\n\nSILENT VIDEO MODE (STRICT OVERRIDE): The user explicitly toggled "
+    "Generate Silent Video (生成静音视频). Ignore any default musical/ambient "
+    "audio bed instructions above:\n"
+    "  • ZERO AUDIO: complete silence throughout the entire clip. NO spoken "
+    "dialogue, NO voice-over, NO singing, NO humming, NO background music, "
+    "NO ambient noise, and NO sound effects.\n"
+    "  • Mouths stay naturally closed or softly smiling without speaking.\n"
+    "  • End the Chinese prompt with a clear silent-video cue "
+    "(e.g. '全程完全静音无声，无人物对白、无背景音乐及环境音效')."
+)
+
+_CHARACTER_VOICE_PRESET_DIRECTIVES: dict[str, str] = {
+    "warm_female": "温柔治愈女声，音色温润清甜、语速舒缓自然、富有亲和力",
+    "bright_girl": "清亮元气少女音，咬字灵动明快、活力充沛、青春感鲜明",
+    "cold_royal_female": "清冷御姐女声，声线沉稳利落、低微磁性、克制有气场",
+    "deep_cinema_male": "电影深沉男声，低沉磁性、胸腔共鸣扎实、情绪克制有张力",
+    "sunny_youth_male": "清朗青年少年男声，嗓音干净明亮、自然松弛、有朝气",
+    "mature_uncle_male": "醇厚磁性中年男声，低音细腻稳重、富有叙事沧桑感",
+    "cute_child": "软萌清脆童声，天真活泼、语调上扬灵动、清澈纯净",
+    "ancient_heroic": "古风韵味声线，吐字铿锵从容、气韵悠长、戏剧表现力强",
+    "suspense_whisper": "悬疑贴耳低沉气声，节奏紧凑微颤、近距离呼吸感强",
+}
+
+
+def _resolve_character_voice_desc(data: dict) -> Optional[str]:
+    preset_key = data.get("voicePreset") if isinstance(data.get("voicePreset"), str) else ""
+    custom = data.get("voiceCustom") if isinstance(data.get("voiceCustom"), str) else ""
+    preset_key = preset_key.strip()
+    custom = custom.strip()
+    preset_desc = _CHARACTER_VOICE_PRESET_DIRECTIVES.get(preset_key, "") if preset_key and preset_key != "custom" else ""
+    if preset_desc and custom:
+        return f"{preset_desc}，补充声线特征：{custom}"
+    if preset_desc:
+        return preset_desc
+    if custom:
+        return custom
+    return None
+
+
 def _video_system_prompt(
     camera: Optional[str],
     subject_count: int = 1,
     duration_s: Optional[int] = None,
+    silent_video: bool = False,
 ) -> str:
     base = (
         _SYNTH_SYSTEM_VIDEO_STATIC if camera == "static"
@@ -276,6 +317,8 @@ def _video_system_prompt(
             f"If using time-coded beats, ensure timestamps span 0-{duration_s}s cleanly "
             f"(never exceed {duration_s}s)."
         )
+    if silent_video:
+        base = base + _SILENT_VIDEO_AUDIO_CLAUSE
     return base + SAFETY_SYSTEM_POLICY_CLAUSE
 
 
@@ -308,6 +351,8 @@ def _collect_upstream(node_id: int) -> tuple[list[dict], Optional[Node]]:
         an ``image`` chain. Used to detect when two image siblings wrap
         different people (couple/group scenes); translated to
         ref_image labels at format time.
+      - ``voice_bindings`` — list of ``(title, voice_desc)`` from bound
+        ``character`` nodes (directly or via an upstream ``image``).
 
     Ordering: records are produced in the same edge-iteration order the
     frontend uses to build ``ref_media_ids``, so ``ref_index = 1``
@@ -356,6 +401,16 @@ def _collect_upstream(node_id: int) -> tuple[list[dict], Optional[Node]]:
                     # that never received a prompt.
                     brief = user_prompt or ai_brief
                     subject_chars: list[str] = []
+                    voice_bindings: list[tuple[str, str]] = []
+                    if n.type == "character":
+                        vdesc = _resolve_character_voice_desc(data)
+                        if vdesc:
+                            ctitle = (
+                                data.get("title").strip()
+                                if isinstance(data.get("title"), str) and data.get("title").strip()
+                                else "角色主体"
+                            )
+                            voice_bindings.append((ctitle, vdesc))
                     if n.type == "image":
                         gp_edges = s.exec(
                             select(Edge).where(Edge.target_id == uid).order_by(Edge.id)
@@ -364,6 +419,15 @@ def _collect_upstream(node_id: int) -> tuple[list[dict], Optional[Node]]:
                             gp = s.get(Node, ge.source_id)
                             if gp is not None and gp.type == "character":
                                 subject_chars.append(gp.short_id)
+                                gp_data = gp.data or {}
+                                vdesc = _resolve_character_voice_desc(gp_data)
+                                if vdesc:
+                                    ctitle = (
+                                        gp_data.get("title").strip()
+                                        if isinstance(gp_data.get("title"), str) and gp_data.get("title").strip()
+                                        else "角色主体"
+                                    )
+                                    voice_bindings.append((ctitle, vdesc))
                     # Accept either the singular `mediaId` (single-variant node)
                     # or the variant list `mediaIds` (multi-variant). The
                     # frontend's `collectUpstreamRefMediaIds` already expands
@@ -389,6 +453,7 @@ def _collect_upstream(node_id: int) -> tuple[list[dict], Optional[Node]]:
                             "title": data.get("title") if isinstance(data.get("title"), str) else None,
                             "has_media": has_media,
                             "subject_chars": subject_chars,
+                            "voice_bindings": voice_bindings,
                         }
                     )
                 if is_passthrough and n.id not in visited_passthrough:
@@ -532,6 +597,7 @@ def _format_user_message(
     target: Node,
     *,
     seed_prompt: Optional[str] = None,
+    silent_video: bool = False,
 ) -> str:
     """Render the upstream context into a compact prompt for the LLM.
 
@@ -639,6 +705,29 @@ def _format_user_message(
             "placement using the `ref_image_N` labels above."
         )
 
+    # Surface upstream character fixed voice bindings for non-silent video prompts
+    if target.type == "video" and not silent_video:
+        seen_voices: set[tuple[str, str]] = set()
+        voice_lines: list[str] = []
+        for r in records:
+            for item in r.get("voice_bindings") or []:
+                if isinstance(item, (list, tuple)) and len(item) == 2:
+                    key = (str(item[0]), str(item[1]))
+                    if key not in seen_voices:
+                        seen_voices.add(key)
+                        voice_lines.append(f"{key[0]}：{key[1]}")
+        if voice_lines:
+            parts.append(
+                "Bound character fixed voice profile(s) (if the user requests dialogue "
+                "or vocal performance for this character, preserve this exact timbre):\n  - "
+                + "\n  - ".join(voice_lines)
+            )
+    elif target.type == "video" and silent_video:
+        parts.append(
+            "SILENT VIDEO ENABLED: Output a purely visual silent motion prompt "
+            "(全程完全静音无声，严禁添加对白、背景音乐或环境音效)."
+        )
+
     target_data = target.data or {}
     target_title = target_data.get("title") if isinstance(target_data.get("title"), str) else None
     if target_title:
@@ -691,6 +780,7 @@ def build_local_chinese_fallback_prompt(
     camera: Optional[str] = None,
     seed_prompt: Optional[str] = None,
     stance_hint: Optional[str] = None,
+    silent_video: bool = False,
 ) -> str:
     """Deterministically compose a Simplified Chinese prompt without external LLM calls.
 
@@ -717,9 +807,14 @@ def build_local_chinese_fallback_prompt(
             if camera == "static"
             else "镜头缓慢推进搭配细腻运镜"
         )
+        audio_note = (
+            "全程完全静音无声，无人物对白、无背景音乐及环境音效"
+            if silent_video
+            else "配以轻柔纯音乐与细腻环境音效"
+        )
         chunks.append(
             f"{cam_note}，主体神态自然、伴有轻微呼吸起伏与眨眼，"
-            "衣料随气流轻柔摆动，配以轻柔纯音乐与细腻环境音效"
+            f"衣料随气流轻柔摆动，{audio_note}"
         )
     else:
         narrative = _is_narrative_context(target, records, seed_prompt)
@@ -913,6 +1008,7 @@ async def auto_prompt_detailed(
     seed_prompt: Optional[str] = None,
     allow_fallback: bool = False,
     duration_s: Optional[int] = None,
+    silent_video: Optional[bool] = None,
 ) -> tuple[str, SafetySanitizeResult]:
     """Compose a generation prompt and return ``(prompt, safety_audit)``."""
     records, target = _collect_upstream(node_id)
@@ -920,19 +1016,34 @@ async def auto_prompt_detailed(
         raise PromptSynthError(f"node {node_id} not found")
 
     is_video = target.type == "video"
+    effective_silent = (
+        bool(silent_video)
+        if silent_video is not None
+        else bool((target.data or {}).get("silentVideo"))
+    )
     subject_count = len(_distinct_subjects(records))
     narrative_mode = _is_narrative_context(target, records, seed_prompt)
     if is_video:
         system_prompt = _video_system_prompt(
-            camera, subject_count, duration_s=duration_s
+            camera,
+            subject_count,
+            duration_s=duration_s,
+            silent_video=effective_silent,
         )
     else:
         system_prompt = _image_system_prompt(subject_count, narrative_mode=narrative_mode)
-    user_msg = _format_user_message(records, target, seed_prompt=seed_prompt)
+    user_msg = _format_user_message(
+        records,
+        target,
+        seed_prompt=seed_prompt,
+        silent_video=effective_silent,
+    )
 
     activity_params: dict[str, object] = {"node_id": node_id, "camera": camera}
     if duration_s is not None:
         activity_params["duration_s"] = duration_s
+    if effective_silent:
+        activity_params["silent_video"] = True
 
     async with record_activity(
         "auto_prompt",
@@ -955,6 +1066,7 @@ async def auto_prompt_detailed(
                 target,
                 camera=camera,
                 seed_prompt=seed_prompt,
+                silent_video=effective_silent,
             )
             safety = SafetySanitizeResult(
                 text=text,
@@ -1015,6 +1127,7 @@ async def auto_prompt(
     seed_prompt: Optional[str] = None,
     allow_fallback: bool = False,
     duration_s: Optional[int] = None,
+    silent_video: Optional[bool] = None,
 ) -> str:
     """Compose a generation prompt by walking upstream + asking the
     configured Auto-Prompt provider.
@@ -1033,5 +1146,6 @@ async def auto_prompt(
         seed_prompt=seed_prompt,
         allow_fallback=allow_fallback,
         duration_s=duration_s,
+        silent_video=silent_video,
     )
     return text

@@ -65,19 +65,60 @@ export function normalizePromptRefMentions(prompt: string, refCount = 9): string
   });
 }
 
+export const SILENT_VIDEO_DIRECTIVE =
+  "静音视频约束：全程完全静音无声，严禁生成任何人物对话、旁白、口型发声、背景音乐或环境音效，人物保持自然闭口状态，纯无声纯视觉画面（complete silence, muted audio, no speech, no music, no sound effects）";
+
+export interface VideoPromptCharacterVoice {
+  title: string;
+  directive: string;
+}
+
 export function composeVideoPromptWithDirectives(opts: {
   prompt: string;
   cameraKey: string;
   dialogue?: string;
   sfx?: string;
+  silentVideo?: boolean;
+  characterVoices?: readonly VideoPromptCharacterVoice[];
 }): string {
   const parts: string[] = [];
-  const main = opts.prompt.trim();
+  let main = opts.prompt.trim();
+  if (opts.silentVideo && main) {
+    // Strip any previously written 【声画指令】 snippet so it never contradicts silent mode
+    main = main.replace(/\n*【声画指令】[^\n]*/g, "").trim();
+  }
   if (main) parts.push(main);
   const cam = videoCameraInstruction(opts.cameraKey);
   if (cam) parts.push(cam);
+
+  if (opts.silentVideo) {
+    parts.push(SILENT_VIDEO_DIRECTIVE);
+    return parts.join("；");
+  }
+
+  const validVoices = (opts.characterVoices ?? []).filter(
+    (v) => v.directive.trim().length > 0,
+  );
   const dlg = (opts.dialogue ?? "").trim();
-  if (dlg) parts.push(`人物台词对白（口型与声调自然同步）：“${dlg}”`);
+  if (dlg) {
+    if (validVoices.length > 0) {
+      const voiceSummary = validVoices
+        .map((v) => `${v.title}·${v.directive.trim()}`)
+        .join("；");
+      parts.push(
+        `人物台词对白（严格保持绑定固定音色：${voiceSummary}，口型与声调自然同步）：“${dlg}”`,
+      );
+    } else {
+      parts.push(`人物台词对白（口型与声调自然同步）：“${dlg}”`);
+    }
+  } else if (validVoices.length > 0) {
+    const voiceSummary = validVoices
+      .map((v) => `${v.title}（${v.directive.trim()}）`)
+      .join("；");
+    parts.push(
+      `角色固定音色绑定（若镜头中出现该角色开口台词或发声，须保持固定声线）：${voiceSummary}`,
+    );
+  }
   const sfx = (opts.sfx ?? "").trim();
   if (sfx) parts.push(`环境音与音效设计：${sfx}`);
   return parts.join("；");

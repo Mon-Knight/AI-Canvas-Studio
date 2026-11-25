@@ -7,7 +7,6 @@ import { TopRightCapsuleBar } from "./components/TopRightCapsuleBar";
 import { ChatDock } from "./components/ChatDock";
 import { ReferencesPanel } from "./components/ReferencesPanel";
 import { Toaster } from "./components/Toaster";
-import { GenerationDialog } from "./components/GenerationDialog";
 import { ResultViewer } from "./components/ResultViewer";
 import { EmbeddedFlowModal } from "./components/EmbeddedFlowModal";
 import { DirectorStageModal } from "./components/DirectorStageModal";
@@ -62,7 +61,6 @@ export function App() {
         </div>
 
         <Toaster />
-        <GenerationDialog />
         <ResultViewer />
         <EmbeddedFlowModal />
         <DirectorStageModal />

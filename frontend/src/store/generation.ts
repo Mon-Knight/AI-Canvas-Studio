@@ -60,11 +60,13 @@ export type VideoSubMode =
   | "first_frame"
   | "first_last";
 
+export type ViewerTab = "history" | "params";
+
 interface GenerationState {
   active: Record<string, PollEntry>;
   sidecar: Record<string, PollEntry>;
   openDialog: { rfId: string | null; prompt: string };
-  openViewer: { rfId: string | null; idx: number };
+  openViewer: { rfId: string | null; idx: number; tab: ViewerTab };
   videoDraft: { rfId: string; prompt: string; revision: number } | null;
   projectId: string | null;
   paygateTier: "PAYGATE_TIER_ONE" | "PAYGATE_TIER_TWO" | null;
@@ -72,7 +74,7 @@ interface GenerationState {
 
   openGenerationDialog(rfId: string, prompt: string): void;
   closeGenerationDialog(): void;
-  openResultViewer(rfId: string, idx?: number): void;
+  openResultViewer(rfId: string, idx?: number, tab?: ViewerTab): void;
   closeResultViewer(): void;
 
   ensureProjectId(): Promise<string | null>;
@@ -104,6 +106,7 @@ interface GenerationState {
       videoRefFrame?: VideoRefFrameMode;
       videoSubMode?: VideoSubMode;
       endMediaId?: string;
+      silentVideo?: boolean;
     },
   ): Promise<void>;
 
@@ -150,6 +153,7 @@ async function submitFlowVideo(
     videoRefFrame?: VideoRefFrameMode;
     videoSubMode?: VideoSubMode;
     endMediaId?: string;
+    silentVideo?: boolean;
   },
 ) {
   const board = useBoardStore.getState();
@@ -347,6 +351,7 @@ async function submitFlowVideo(
       prompt: normalizedPrompt,
       error: undefined,
       videoSubMode: subMode,
+      silentVideo: Boolean(opts.silentVideo),
       videoResolution:
         reqType === "gen_video_text" && rawVideoRes === "360p"
           ? "720p"
@@ -390,7 +395,7 @@ export const useGenerationStore = create<GenerationState>((set, get) => {
     active: {},
     sidecar: {},
     openDialog: { rfId: null, prompt: "" },
-    openViewer: { rfId: null, idx: 0 },
+    openViewer: { rfId: null, idx: 0, tab: "history" },
     projectId: null,
     videoDraft: null,
     paygateTier: null,
@@ -398,7 +403,8 @@ export const useGenerationStore = create<GenerationState>((set, get) => {
 
     openGenerationDialog(rfId, prompt) {
       const board = useBoardStore.getState();
-      if (board.nodes.some((n) => n.id === rfId && n.data.type === "video")) {
+      const target = board.nodes.find((n) => n.id === rfId);
+      if (target) {
         board.setNodes(
           board.nodes.map((n) =>
             !!n.selected === (n.id === rfId)
@@ -406,25 +412,34 @@ export const useGenerationStore = create<GenerationState>((set, get) => {
               : { ...n, selected: n.id === rfId },
           ),
         );
+      }
+      if (target?.data.type === "video") {
         set({
+          openViewer: { rfId: null, idx: 0, tab: "history" },
           openDialog: { rfId, prompt },
           videoDraft: { rfId, prompt, revision: ++draftRevision },
         });
         return;
       }
-      set({ openDialog: { rfId, prompt } });
+      set({
+        openViewer: { rfId: null, idx: 0, tab: "history" },
+        openDialog: { rfId, prompt },
+      });
     },
 
     closeGenerationDialog() {
       set({ openDialog: { rfId: null, prompt: "" } });
     },
 
-    openResultViewer(rfId, idx = 0) {
-      set({ openViewer: { rfId, idx } });
+    openResultViewer(rfId, idx = 0, tab = "history") {
+      set({
+        openDialog: { rfId: null, prompt: "" },
+        openViewer: { rfId, idx, tab },
+      });
     },
 
     closeResultViewer() {
-      set({ openViewer: { rfId: null, idx: 0 } });
+      set({ openViewer: { rfId: null, idx: 0, tab: "history" } });
     },
 
     async ensureProjectId() {

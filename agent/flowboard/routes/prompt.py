@@ -37,6 +37,7 @@ class AutoPromptBody(BaseModel):
     seed_prompt: Optional[str] = None
     allow_fallback: bool = False
     duration_s: Optional[int] = None
+    silent_video: bool = False
 
 
 class AutoPromptResponse(BaseModel):
@@ -55,6 +56,8 @@ async def auto_prompt(body: AutoPromptBody) -> AutoPromptResponse:
         kwargs["allow_fallback"] = True
     if body.duration_s is not None:
         kwargs["duration_s"] = body.duration_s
+    if body.silent_video:
+        kwargs["silent_video"] = True
     prompt_synth.reset_safety_audit_ctx()
     try:
         text = await prompt_synth.auto_prompt(body.node_id, **kwargs)  # type: ignore[arg-type]

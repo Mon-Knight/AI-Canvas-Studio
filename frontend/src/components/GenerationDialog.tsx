@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   collectUpstreamPromptText,
   collectUpstreamRefEntries,
@@ -8,6 +9,7 @@ import {
 import { type VideoRefFrameMode } from "../lib/videoFrame";
 import { useFlowAccounts } from "../store/flowAccounts";
 import { useBoardStore, type FlowboardNodeData, type StoryboardGrid, type StoryboardMode } from "../store/board";
+import { useReferencesStore } from "../store/references";
 import { displayNodeTitle } from "../constants/nodeLabels";
 import {
   STORYBOARD_GRIDS,
@@ -19,6 +21,7 @@ import {
 } from "../lib/storyboardPrompt";
 import { composeVideoPromptWithDirectives } from "../lib/promptMentions";
 import { sanitizePromptForFlowSafetyClient } from "../lib/promptSafety";
+import { pickImageFiles } from "../lib/filePicker";
 import { filterDirectorSkills, type DirectorSkillEntry } from "../constants/directorSkills";
 import {
   useSettingsStore,
@@ -48,10 +51,19 @@ import {
 import {
   autoPrompt as autoPromptApi,
   autoPromptBatch as autoPromptBatchApi,
+  mediaUrl,
   patchEdge,
   patchNode,
+  uploadImage,
 } from "../api/client";
+import { requestAutoBrief } from "../api/autoBrief";
 import { applySubjectTemplateText } from "../constants/character";
+import {
+  CHARACTER_VOICE_PRESETS,
+  collectUpstreamCharacterVoices,
+  resolveCharacterVoiceDirective,
+  resolveCharacterVoiceLabel,
+} from "../constants/characterVoice";
 import {
   CAMERA_MOVEMENTS,
   IMAGE_ASPECT_RATIOS,
@@ -79,6 +91,7 @@ interface PendingVideoConfirmPayload {
   resolutionLabel: string;
   durationSec: number;
   clipCount: number;
+  audioModeLabel: string;
   costDisplay: string;
   costBreakdown: string;
   costTotal: number | null;
@@ -89,18 +102,32 @@ interface PendingVideoConfirmPayload {
   >[1];
 }
 
+export type GenerationComposerVariant = "dropdown" | "sidebar" | "modal";
+
 export function GenerationDialog() {
   const { rfId, prompt } = useGenerationStore((s) => s.openDialog);
   const close = useGenerationStore((s) => s.closeGenerationDialog);
-  return rfId === null ? null : <GenerationComposer key={rfId} rfId={rfId} initialPrompt={prompt} onClose={close} />;
+  return rfId === null ? null : <GenerationComposer key={rfId} rfId={rfId} initialPrompt={prompt} onClose={close} variant="modal" />;
 }
 
-export function GenerationComposer({ rfId, initialPrompt, onClose, inline = false }: {
+export function GenerationComposer({
+  rfId,
+  initialPrompt,
+  onClose,
+  inline = false,
+  variant,
+}: {
   rfId: string;
   initialPrompt: string;
   onClose?: () => void;
   inline?: boolean;
+  variant?: GenerationComposerVariant;
 }) {
+  const resolvedVariant: GenerationComposerVariant =
+    variant ?? (inline ? "dropdown" : "modal");
+  const isDropdown = resolvedVariant === "dropdown";
+  const isSidebar = resolvedVariant === "sidebar";
+  const isEmbedded = resolvedVariant !== "modal";
   const closeGenerationDialog = () => onClose?.();
   const promptId = useId();
   const titleId = useId();
@@ -123,8 +150,17 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
   const [audioOpen, setAudioOpen] = useState(false);
   const [dialogueText, setDialogueText] = useState("");
   const [sfxText, setSfxText] = useState("");
+  const [silentVideo, setSilentVideo] = useState(false);
+  const [voiceOpen, setVoiceOpen] = useState(false);
+  const [voicePreset, setVoicePreset] = useState("");
+  const [voiceCustom, setVoiceCustom] = useState("");
   const [atSuggestOpen, setAtSuggestOpen] = useState(false);
   const [slashSkillOpen, setSlashSkillOpen] = useState(false);
+  const [shelfCollapsed, setShelfCollapsed] = useState(false);
+  const [presetsOpen, setPresetsOpen] = useState(false);
+  const [subjectTplOpen, setSubjectTplOpen] = useState(false);
+  const [addRefMenuOpen, setAddRefMenuOpen] = useState(false);
+  const [uploadingRef, setUploadingRef] = useState(false);
 
   const lastAppliedTemplateRef = useRef<string | null>(null);
 
@@ -461,37 +497,44 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
       setAudioOpen(false);
       setDialogueText("");
       setSfxText("");
+      setSilentVideo(Boolean(openNodeData?.silentVideo));
+      setVoiceOpen(false);
+      setVoicePreset(typeof openNodeData?.voicePreset === "string" ? openNodeData.voicePreset : "");
+      setVoiceCustom(typeof openNodeData?.voiceCustom === "string" ? openNodeData.voiceCustom : "");
       setAtSuggestOpen(false);
       setSlashSkillOpen(false);
+      setPresetsOpen(false);
+      setSubjectTplOpen(false);
+      setAddRefMenuOpen(false);
       setSeedInput(openNodeData?.seed != null ? String(openNodeData.seed) : "");
       lastAppliedTemplateRef.current = null;
       setAutoBuilding(false);
       setAutoPromptUsed(false);
-      // Default-select every upstream source variant for video targets so
-      // the user just hits Generate when they want all videos.
-      if (!inline) {
+      if (resolvedVariant === "modal" || resolvedVariant === "dropdown") {
         const trigger = document.activeElement;
-        const timer = window.setTimeout(() => (firstFocusRef.current ?? dialogRef.current)?.focus(), 50);
+        const timer = window.setTimeout(() => (firstFocusRef.current ?? dialogRef.current)?.focus(), 40);
         return () => {
           window.clearTimeout(timer);
-          if (trigger instanceof HTMLElement && trigger.isConnected) trigger.focus();
+          if (resolvedVariant === "modal" && trigger instanceof HTMLElement && trigger.isConnected) {
+            trigger.focus();
+          }
         };
       }
     }
   // Only reset the draft on a new session, not on canvas updates.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rfId, inline]);
+  }, [rfId, resolvedVariant]);
 
   // React to an explicit chat/quick-edit handoff even when this node was already selected.
   // Do not reset the draft on unrelated account polls or board updates.
   useEffect(() => {
-    if (isVideo && inline && videoDraft && videoDraft.prompt.trim()) {
+    if (isVideo && isEmbedded && videoDraft && videoDraft.prompt.trim()) {
       promptManuallyEditedRef.current = true;
       setPrompt(videoDraft.prompt);
       setPendingAiConfirm(false);
       setPreAiPrompt(null);
     }
-  }, [isVideo, inline, videoDraft]);
+  }, [isVideo, isEmbedded, videoDraft]);
 
   // 文本 -> 图片 / 主体 / 视频：在用户未手动编辑且未点 AI 润色前，上游文本连线或编辑时自动同步继承。
   useEffect(() => {
@@ -526,11 +569,11 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     const el = firstFocusRef.current;
     if (!el) return;
     el.style.height = "auto";
-    const minH = inline ? 104 : 136;
-    const maxH = inline ? 220 : 280;
+    const minH = isDropdown ? 56 : isSidebar ? 96 : 136;
+    const maxH = isDropdown ? 168 : isSidebar ? 220 : 280;
     const nextH = Math.min(maxH, Math.max(minH, el.scrollHeight));
     el.style.height = `${nextH}px`;
-  }, [prompt, inline, rfId]);
+  }, [prompt, isDropdown, isSidebar, rfId]);
 
   const sourceKey = JSON.stringify(sourceMediaIds);
   const candidateKey = JSON.stringify(videoCandidateFrames.map((c) => c.mediaId));
@@ -554,9 +597,27 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     setSelectedSourceIdx(new Set(pin >= 0 ? [pin] : ids.map((_, i) => i)));
   }, [rfId, sourceKey, pinnedMedia]);
 
-  // Keyboard handling
+  // Capture-phase keyboard handling for Video Confirmation Portal (works across dropdown/sidebar/modal)
   useEffect(() => {
-    if (inline) return;
+    if (!pendingVideoConfirm) return;
+    const onCaptureKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        setPendingVideoConfirm(null);
+      } else if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && !e.isComposing) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        void confirmPendingVideoDispatch();
+      }
+    };
+    document.addEventListener("keydown", onCaptureKey, true);
+    return () => document.removeEventListener("keydown", onCaptureKey, true);
+  });
+
+  // Keyboard handling for modal & anchored dropdown
+  useEffect(() => {
+    if (isSidebar) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         if (pendingVideoConfirm !== null) {
@@ -564,12 +625,19 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
           setPendingVideoConfirm(null);
           return;
         }
-        // ESC closes the variant picker first if open, otherwise the
-        // dialog. Lets the user back out of a stray picker click
-        // without losing their prompt + form state.
         if (openVariantPicker !== null) {
           e.preventDefault();
           setOpenVariantPicker(null);
+          return;
+        }
+        if (addRefMenuOpen) {
+          e.preventDefault();
+          setAddRefMenuOpen(false);
+          return;
+        }
+        if (presetsOpen) {
+          e.preventDefault();
+          setPresetsOpen(false);
           return;
         }
         e.preventDefault();
@@ -589,18 +657,18 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     return () => document.removeEventListener("keydown", onKeyDown);
   });
 
-  // Click-outside to close the variant picker. We listen on
-  // `mousedown` instead of `click` so the close fires BEFORE the chip's
-  // `onClick` toggle would otherwise re-open it on the same gesture.
-  // A click that lands inside any `.ref-source-chip-wrap` is ignored —
-  // chip-internal handlers (toggle / swap / pick) own those.
+  // Click-outside to close variant picker and '+' add-ref mini-menu.
   useEffect(() => {
-    if (openVariantPicker === null) return;
+    if (openVariantPicker === null && !addRefMenuOpen) return;
     const onPointerDown = (e: Event) => {
       const node = e.target as Node | null;
       const target = node instanceof Element ? node : node?.parentElement ?? null;
-      if (target?.closest(".ref-source-chip-wrap")) return;
-      setOpenVariantPicker(null);
+      if (openVariantPicker !== null && !target?.closest(".ref-source-chip-wrap")) {
+        setOpenVariantPicker(null);
+      }
+      if (addRefMenuOpen && !target?.closest(".jm-drop-add-wrap")) {
+        setAddRefMenuOpen(false);
+      }
     };
     document.addEventListener("pointerdown", onPointerDown, true);
     document.addEventListener("mousedown", onPointerDown, true);
@@ -608,11 +676,11 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
       document.removeEventListener("pointerdown", onPointerDown, true);
       document.removeEventListener("mousedown", onPointerDown, true);
     };
-  }, [openVariantPicker]);
+  }, [openVariantPicker, addRefMenuOpen]);
 
-  // Focus trap
+  // Focus trap (modal only)
   useEffect(() => {
-    if (inline) return;
+    if (isEmbedded) return;
     const el = dialogRef.current;
     if (!el) return;
     const onKeyDown = (e: KeyboardEvent) => {
@@ -637,7 +705,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     };
     el.addEventListener("keydown", onKeyDown);
     return () => el.removeEventListener("keydown", onKeyDown);
-  }, [rfId, inline]);
+  }, [rfId, isEmbedded]);
 
   if (!node) return null;
 
@@ -657,6 +725,44 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
   function updateVariants(next: number) {
     setVariants(next);
     persistNodeDraftPatch({ variantCount: next });
+  }
+
+  const upstreamCharacterVoices = isVideo
+    ? collectUpstreamCharacterVoices(rfId, nodes, edges)
+    : [];
+  const boundVoiceLabel = isCharacter
+    ? resolveCharacterVoiceLabel(voicePreset, voiceCustom)
+    : null;
+  const boundVoiceDirective = isCharacter
+    ? resolveCharacterVoiceDirective(voicePreset, voiceCustom)
+    : "";
+
+  function handleToggleSilentVideo(nextVal?: boolean) {
+    const next = typeof nextVal === "boolean" ? nextVal : !silentVideo;
+    setSilentVideo(next);
+    persistNodeDraftPatch({ silentVideo: next });
+  }
+
+  function handleSelectVoicePreset(nextPreset: string) {
+    setVoicePreset(nextPreset);
+    if (!nextPreset) {
+      setVoiceCustom("");
+      persistNodeDraftPatch({ voicePreset: "", voiceCustom: "" });
+      return;
+    }
+    persistNodeDraftPatch({ voicePreset: nextPreset });
+  }
+
+  function handleChangeVoiceCustom(nextCustom: string) {
+    setVoiceCustom(nextCustom);
+    const nextPreset = voicePreset || (nextCustom.trim() ? "custom" : "");
+    if (nextPreset !== voicePreset) setVoicePreset(nextPreset);
+  }
+
+  function handleBlurVoiceCustom() {
+    const trimmed = voiceCustom.trim();
+    const nextPreset = voicePreset || (trimmed ? "custom" : "");
+    persistNodeDraftPatch({ voicePreset: nextPreset, voiceCustom: trimmed });
   }
 
   /** Pick a different variant on a Source Reference chip. PATCHes the
@@ -765,7 +871,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     promptManuallyEditedRef.current = true;
     setPendingBatchPrompts(undefined);
     setPrompt(clipped);
-    if (inline) persistNodeDraftPatch({ prompt: clipped });
+    if (isEmbedded) persistNodeDraftPatch({ prompt: clipped });
   }
 
   function handleRevertPreAiPrompt() {
@@ -778,7 +884,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     setAutoPromptUsed(false);
     setPendingBatchPrompts(undefined);
     promptManuallyEditedRef.current = !!restored.trim();
-    if (inline) persistNodeDraftPatch({ prompt: restored });
+    if (isEmbedded) persistNodeDraftPatch({ prompt: restored });
     window.requestAnimationFrame(() => firstFocusRef.current?.focus());
   }
 
@@ -804,7 +910,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     if (tpl.recommendedAspect && refSourceNodes.length === 0) {
       updateAspectRatio(tpl.recommendedAspect);
     }
-    if (inline) persistNodeDraftPatch({ prompt: nextPrompt });
+    if (isEmbedded) persistNodeDraftPatch({ prompt: nextPrompt });
     window.requestAnimationFrame(() => firstFocusRef.current?.focus());
   }
 
@@ -812,7 +918,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     lastAppliedTemplateRef.current = createdPrompt;
     promptManuallyEditedRef.current = true;
     setPrompt(createdPrompt);
-    if (inline) persistNodeDraftPatch({ prompt: createdPrompt });
+    if (isEmbedded) persistNodeDraftPatch({ prompt: createdPrompt });
   }
 
   async function handleAiPolish() {
@@ -833,6 +939,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
           seedPrompt: seedText || undefined,
           allowFallback: true,
           durationSeconds: isVideo ? activeVideoDuration : undefined,
+          silentVideo: isVideo ? silentVideo : undefined,
         });
         const nextPrompt = res.prompt.slice(0, PROMPT_MAX_LENGTH);
         promptManuallyEditedRef.current = true;
@@ -845,14 +952,16 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
             : [],
         );
         useBoardStore.getState().updateNodeData(rfId, { autoPromptStatus: undefined });
-        if (inline) persistNodeDraftPatch({ prompt: nextPrompt });
+        if (isEmbedded) persistNodeDraftPatch({ prompt: nextPrompt });
         window.requestAnimationFrame(() => firstFocusRef.current?.focus());
       } else {
         throw new Error("unsaved node");
       }
     } catch {
       const localPatch = isVideo
-        ? "主体动作连贯流畅，电影级自然光影流转，真实物理景深视差，画面稳定高清"
+        ? silentVideo
+          ? "主体动作连贯流畅，电影级自然光影流转，画面稳定高清，全程完全静音无声"
+          : "主体动作连贯流畅，电影级自然光影流转，真实物理景深视差，画面稳定高清"
         : "电影级布光与自然通透色彩，材质与边缘细节清晰锐利，和谐比例构图，真实质感摄影";
       const rawLocal = seedText ? `${seedText}，${localPatch}` : localPatch;
       const audited = sanitizePromptForFlowSafetyClient(rawLocal);
@@ -863,7 +972,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
       setPendingAiConfirm(true);
       setSafetyAuditNotes(audited.rewritten ? audited.notes : []);
       useBoardStore.getState().updateNodeData(rfId, { autoPromptStatus: undefined });
-      if (inline) persistNodeDraftPatch({ prompt: nextPrompt });
+      if (isEmbedded) persistNodeDraftPatch({ prompt: nextPrompt });
       window.requestAnimationFrame(() => firstFocusRef.current?.focus());
     } finally {
       setAutoBuilding(false);
@@ -1005,6 +1114,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
               camera: isVideo ? camera : undefined,
               allowFallback: true,
               durationSeconds: isVideo ? activeVideoDuration : undefined,
+              silentVideo: isVideo ? silentVideo : undefined,
             });
             setPendingBatchPrompts(undefined);
             setPrompt(res.prompt.slice(0, PROMPT_MAX_LENGTH));
@@ -1039,6 +1149,8 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
         cameraKey: camera,
         dialogue: dialogueText,
         sfx: sfxText,
+        silentVideo,
+        characterVoices: upstreamCharacterVoices,
       });
       const isT2v = effectiveVideoMode === "t2v";
       const isIngredients = effectiveVideoMode === "ingredients";
@@ -1079,6 +1191,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
         durationSeconds: activeVideoDuration,
         videoResolution: effectiveRes,
         videoRefFrame: hasVideoUpstream ? videoRefFrame : undefined,
+        silentVideo,
       };
 
       if (confirmBeforeVideoGen === "always") {
@@ -1089,6 +1202,13 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
             : isFirstLast
               ? "首尾帧锁定"
               : `首帧一致图生视频（可选 · ${Math.max(1, picked.length)} 张首帧）`;
+        const audioModeLabel = silentVideo
+          ? "🔇 静音视频（无对话 / 无配乐 / 无环境音）"
+          : upstreamCharacterVoices.length > 0
+            ? `🎙️ 有声 · 绑定角色音色（${upstreamCharacterVoices.map((v) => `${v.title}:${v.label}`).join("、")}）`
+            : (dialogueText.trim() || sfxText.trim())
+              ? "🎙️ 有声（含自定义台词/音效指令）"
+              : "🔊 默认原生有声";
         const videoEst = estimateVideoCreditCost({
           videoModel: effectiveVideoModelFamily,
           omniVersion,
@@ -1104,6 +1224,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
           resolutionLabel: effectiveRes.toUpperCase(),
           durationSec: activeVideoDuration,
           clipCount,
+          audioModeLabel,
           costDisplay: videoEst.displayText,
           costBreakdown: videoEst.breakdown,
           costTotal: videoEst.total,
@@ -1152,7 +1273,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     const clean = skill.action.snippet.slice(0, PROMPT_MAX_LENGTH);
     promptManuallyEditedRef.current = true;
     setPrompt(clean);
-    if (inline) persistNodeDraftPatch({ prompt: clean });
+    if (isEmbedded) persistNodeDraftPatch({ prompt: clean });
     window.requestAnimationFrame(() => firstFocusRef.current?.focus());
   }
 
@@ -1175,8 +1296,88 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     promptManuallyEditedRef.current = true;
     setPrompt(clipped);
     setAtSuggestOpen(false);
-    if (inline) persistNodeDraftPatch({ prompt: clipped });
+    if (isEmbedded) persistNodeDraftPatch({ prompt: clipped });
     window.requestAnimationFrame(() => ta?.focus());
+  }
+
+  async function handleUploadAndWireRef() {
+    if (uploadingRef || !node) return;
+    setAddRefMenuOpen(false);
+    let picked: File[];
+    try {
+      picked = await pickImageFiles({
+        multiple: false,
+        accept: "image/png,image/jpeg,image/webp,image/gif",
+        title: "上传本地参考图并连线",
+      });
+    } catch (err) {
+      useGenerationStore.setState({
+        error: err instanceof Error ? err.message : "选择图片失败",
+      });
+      return;
+    }
+    const file = picked[0];
+    if (!file) return;
+    setUploadingRef(true);
+    try {
+      const binding = await useGenerationStore.getState().ensureProjectBinding();
+      if (!binding) {
+        useGenerationStore.setState({
+          error: "尚未绑定 Flow 项目，无法上传参考图。",
+        });
+        return;
+      }
+      const boardStore = useBoardStore.getState();
+      const refOffsetY = allVideoRefEntries.length * 48 + refSourceNodes.length * 48;
+      const newRefId = await boardStore.addNodeOfType("visual_asset", {
+        x: Math.round(node.position.x - 320),
+        y: Math.round(node.position.y + refOffsetY),
+      });
+      if (!newRefId) return;
+      const cleanTitle = file.name.replace(/\.[^.]+$/, "") || "参考素材";
+      boardStore.updateNodeData(newRefId, { title: cleanTitle, status: "running" });
+      const dbId = parseInt(newRefId, 10);
+      const resp = await uploadImage(
+        file,
+        binding.flow_project_id,
+        isNaN(dbId) ? undefined : dbId,
+        binding.flow_account_id,
+      );
+      const renderedAt = new Date().toISOString();
+      useBoardStore.getState().updateNodeData(newRefId, {
+        title: cleanTitle,
+        mediaId: resp.media_id,
+        mediaIds: [resp.media_id],
+        variantCount: 1,
+        status: "done",
+        aspectRatio: resp.aspect_ratio,
+        renderedAt,
+      });
+      if (!isNaN(dbId)) {
+        patchNode(dbId, {
+          status: "done",
+          data: {
+            title: cleanTitle,
+            mediaId: resp.media_id,
+            mediaIds: [resp.media_id],
+            variantCount: 1,
+            aspectRatio: resp.aspect_ratio,
+            renderedAt,
+          },
+        }).catch(() => {});
+      }
+      await useBoardStore.getState().addEdgeFromConnection(newRefId, rfId);
+      requestAutoBrief(newRefId, resp.media_id);
+      if (isVideo && videoSubMode === "t2v") {
+        handleSelectVideoSubMode("ingredients");
+      }
+    } catch (err) {
+      useGenerationStore.setState({
+        error: err instanceof Error ? err.message : "上传参考图失败",
+      });
+    } finally {
+      setUploadingRef(false);
+    }
   }
 
   const nodeLLMBusy =
@@ -1203,11 +1404,70 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     <SubjectTemplatesPanel
       key={rfId}
       prompt={prompt}
-      inline={inline}
+      inline={isEmbedded}
       disabled={isWorking || queued}
       onApplyTemplate={handleApplySubjectTemplate}
       onAutoFillCreatedPrompt={handleAutoFillCreatedTemplatePrompt}
     />
+  ) : null;
+
+  const characterVoiceSection = isCharacter ? (
+    <div className="jm-voice-binder" role="region" aria-label="角色固定音色绑定">
+      <div className="jm-voice-binder__head">
+        <span className="jm-voice-binder__title">
+          🎙️ 固定音色绑定
+          {boundVoiceLabel && (
+            <span className="jm-voice-binder__active-pill">{boundVoiceLabel}</span>
+          )}
+        </span>
+        {boundVoiceLabel && (
+          <button
+            type="button"
+            className="jm-voice-binder__clear"
+            onClick={() => handleSelectVoicePreset("")}
+            title="解除此角色的固定音色绑定"
+          >
+            清除绑定
+          </button>
+        )}
+      </div>
+      <div className="jm-voice-binder__chips" role="radiogroup" aria-label="选择角色音色预设">
+        {CHARACTER_VOICE_PRESETS.map((preset) => {
+          const active = voicePreset === preset.key;
+          return (
+            <button
+              key={preset.key}
+              type="button"
+              role="radio"
+              aria-checked={active}
+              className={`jm-voice-chip${active ? " jm-voice-chip--active" : ""}`}
+              onClick={() => handleSelectVoicePreset(active ? "" : preset.key)}
+              title={preset.directive || "自由输入该角色的专属声线描述"}
+            >
+              {preset.shortLabel}
+            </button>
+          );
+        })}
+      </div>
+      <input
+        type="text"
+        className="gen-dialog__seed-input jm-voice-binder__input"
+        value={voiceCustom}
+        onChange={(e) => handleChangeVoiceCustom(e.target.value)}
+        onBlur={handleBlurVoiceCustom}
+        placeholder={
+          voicePreset === "custom"
+            ? "输入该角色的固定音色特征（如：略带微哑磁性女中音，语速偏慢从容）…"
+            : "可选补充声线细节（如：轻微京腔、语速轻快、带呼吸感）…"
+        }
+        maxLength={120}
+      />
+      <p className="jm-voice-binder__hint">
+        {boundVoiceDirective
+          ? `已绑定：${boundVoiceDirective}（连线至下游视频节点时自动继承，若视频开启「静音视频」则自动屏蔽）`
+          : "未绑定固定音色；绑定后，此角色连线到下游视频节点（含经由图片/文本中转）将自动保持一致声线。"}
+      </p>
+    </div>
   ) : null;
 
   const promptField = (
@@ -1280,7 +1540,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
         id={promptId}
         ref={firstFocusRef}
         className="gen-dialog__textarea"
-        rows={inline ? 4 : 5}
+        rows={isEmbedded ? 4 : 5}
         maxLength={PROMPT_MAX_LENGTH}
         value={prompt}
         onChange={(e) => {
@@ -1295,7 +1555,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
           if (autoPromptUsed) setAutoPromptUsed(false);
         }}
         onBlur={() => {
-          if (inline && !hasStoryboardUpstream && prompt !== (node?.data.prompt ?? "")) {
+          if (isEmbedded && !hasStoryboardUpstream && prompt !== (node?.data.prompt ?? "")) {
             persistNodeDraftPatch({ prompt });
           }
         }}
@@ -1361,22 +1621,55 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
       )}
       {isVideo && !hasStoryboardUpstream && (
         <div className="gen-dialog__audio-slot">
-          <button
-            type="button"
-            className={`gen-dialog__preset-chip${audioOpen || dialogueText || sfxText ? " gen-dialog__preset-chip--active" : ""}`}
-            onClick={() => setAudioOpen((v) => !v)}
-            title="展开/收起角色原生对白台词与环境音效输入槽（适配 Veo / Omni 原生声画同步）"
-          >
-            {audioOpen ? "▾ 收起台词与音效" : "🎙️ + 台词与音效预设"}
-            {(dialogueText.trim() || sfxText.trim()) ? "（已填写）" : ""}
-          </button>
+          <div className="gen-dialog__audio-toolbar">
+            <button
+              type="button"
+              className={`gen-dialog__preset-chip jm-silent-toggle${silentVideo ? " jm-silent-toggle--on" : ""}`}
+              onClick={() => handleToggleSilentVideo()}
+              aria-pressed={silentVideo}
+              title="开启后将向模型注入严格静音约束，屏蔽人物台词、角色固定音色、背景音乐与环境音效"
+            >
+              {silentVideo ? "🔇 生成静音视频：已开启" : "🔇 生成静音视频"}
+            </button>
+            <button
+              type="button"
+              className={`gen-dialog__preset-chip${!silentVideo && (audioOpen || dialogueText || sfxText) ? " gen-dialog__preset-chip--active" : ""}`}
+              onClick={() => setAudioOpen((v) => !v)}
+              title="展开/收起角色原生对白台词与环境音效输入槽（适配 Veo / Omni 原生声画同步）"
+            >
+              {audioOpen ? "▾ 收起台词与音效" : "🎙️ + 台词与音效预设"}
+              {!silentVideo && (dialogueText.trim() || sfxText.trim()) ? "（已填写）" : ""}
+            </button>
+          </div>
+          {upstreamCharacterVoices.length > 0 && (
+            <div className={`jm-inherited-voices${silentVideo ? " jm-inherited-voices--muted" : ""}`}>
+              <span className="jm-inherited-voices__label">
+                {silentVideo ? "🔇 角色音色（已因静音模式屏蔽）：" : "🎙️ 已继承上游角色固定音色："}
+              </span>
+              {upstreamCharacterVoices.map((v) => (
+                <span
+                  key={v.rfId}
+                  className="jm-inherited-voices__pill"
+                  title={`${v.title}（#${v.shortId}）：${v.directive}`}
+                >
+                  {v.title} · {v.label}
+                </span>
+              ))}
+            </div>
+          )}
           {audioOpen && (
             <div className="gen-dialog__audio-fields">
+              {silentVideo && (
+                <p className="jm-silent-notice">
+                  已开启「生成静音视频」，提交生成时将自动忽略下方台词与音效，输出全程无声纯视觉画面。
+                </p>
+              )}
               <input
                 type="text"
                 className="gen-dialog__seed-input"
                 value={dialogueText}
                 onChange={(e) => setDialogueText(e.target.value)}
+                disabled={silentVideo}
                 placeholder="角色口型对白台词（如：这束光终于照进来了）…"
                 maxLength={300}
               />
@@ -1385,6 +1678,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
                 className="gen-dialog__seed-input"
                 value={sfxText}
                 onChange={(e) => setSfxText(e.target.value)}
+                disabled={silentVideo}
                 placeholder="环境音与音效（如：细雨落瓦、轻柔钢琴弦乐、城市车流低噪）…"
                 maxLength={300}
               />
@@ -1483,265 +1777,6 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
           })
       : null;
 
-  if (inline) {
-    const unavailable = isCharacter
-      ? "请选择推荐/自定义模板、填写主体特征描述，或连线参考图。"
-      : isVideoFirstLastMode
-        ? "请选择两个不同的首帧与尾帧参考。"
-        : isVideoTextMode
-          ? "请输入视频主体、动作与镜头描述以进行纯文生视频。"
-          : isOmniVideo
-            ? "请连线至少一张参考图或视频。"
-            : isVideo
-              ? "请连线并勾选至少一个图片或视频参考，或移除参考直接文生视频。"
-              : undefined;
-    const inlineHint = isVideo && accountIssue
-      ? accountIssue
-      : !canGenerate && !queued && !isWorking && unavailable
-        ? unavailable
-        : undefined;
-    return (
-      <section
-        className="jm-context-generator nodrag nopan nowheel"
-        aria-label="上下文生成控制栏"
-        onDoubleClick={(event) => event.stopPropagation()}
-        onKeyDown={(event) => {
-          if (event.key === "Escape" && openVariantPicker !== null) {
-            event.stopPropagation();
-            setOpenVariantPicker(null);
-            return;
-          }
-          if (event.defaultPrevented || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
-          if (event.key === "Enter" && !event.shiftKey &&
-              ((!isVideo && event.target instanceof HTMLTextAreaElement) || event.ctrlKey || event.metaKey)) {
-            event.preventDefault();
-            event.stopPropagation();
-            if (!event.repeat && canGenerate) void handleSubmit();
-          }
-          if (event.key === "Backspace" || event.key === "Delete") event.stopPropagation();
-        }}
-      >
-        {references}
-        {subjectTemplatesSection}
-        {promptField}
-        {inlineHint && (
-          <p className="jm-context-generator__hint">{inlineHint}</p>
-        )}
-        <div className="jm-context-generator__tools">
-          {mediaProvider === "flow" && !isVideo && !isPrompt && (
-            <>
-              <select
-                aria-label="图片模型"
-                value={imageModel}
-                onChange={(e) => setImageModel(e.target.value as ImageModelKey)}
-              >
-                {IMAGE_MODEL_CATALOG.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.label}
-                  </option>
-                ))}
-              </select>
-              <select
-                aria-label="图片清晰度"
-                value={imageResolution}
-                onChange={(e) => setImageResolution(e.target.value as ImageResolutionKey)}
-              >
-                {IMAGE_RESOLUTION_OPTIONS.map((r) => (
-                  <option key={r.value} value={r.value}>
-                    {r.label}
-                  </option>
-                ))}
-              </select>
-              {imageModel === "NANO_BANANA_2_1" && (
-                <select
-                  aria-label="思考深度"
-                  value={imageThinkingLevel}
-                  onChange={(e) => setImageThinkingLevel(e.target.value as ImageThinkingLevel)}
-                >
-                  {IMAGE_THINKING_OPTIONS.map((t) => (
-                    <option key={t.value} value={t.value}>
-                      推理:{t.label}
-                    </option>
-                  ))}
-                </select>
-              )}
-            </>
-          )}
-          {isVideo && (
-            <>
-              <select
-                aria-label="视频模型"
-                value={selectedVideoId}
-                onChange={(e) => applyVideoSelection(e.target.value as VideoModelCatalogEntry["id"])}
-              >
-                {VIDEO_MODEL_CATALOG.map((m) => {
-                  const locked = !!m.ultraOnly && paygateTier !== "PAYGATE_TIER_TWO";
-                  return (
-                    <option key={m.id} value={m.id} disabled={locked}>
-                      {m.label}
-                      {m.deprecationNote ? " · 12/5停用" : m.ultraOnly ? " · Ultra 0积分" : ""}
-                    </option>
-                  );
-                })}
-              </select>
-              <select
-                aria-label="视频分辨率"
-                value={!isOmniVideo && videoResolution === "360p" ? "720p" : videoResolution}
-                onChange={(e) => setVideoResolution(e.target.value as VideoResolutionKey)}
-              >
-                {VIDEO_RESOLUTION_OPTIONS.map((r) => {
-                  const unsupported = !!r.omniOnly && !isOmniVideo;
-                  const resLabel = unsupported
-                    ? `${r.label}（仅 Omni）`
-                    : r.value === "4k"
-                      ? `${r.label} (+50分起)`
-                      : r.label;
-                  return (
-                    <option key={r.value} value={r.value} disabled={unsupported}>
-                      {resLabel}
-                    </option>
-                  );
-                })}
-              </select>
-            </>
-          )}
-          {!isPrompt && (
-            <select
-              aria-label="画幅比例"
-              value={aspectRatio}
-              onChange={(e) => updateAspectRatio(e.target.value as AspectKey)}
-            >
-              {(isVideo ? VIDEO_ASPECT_RATIOS : IMAGE_ASPECT_RATIOS).map(({ key, label }) => (
-                <option key={key} value={key}>{label}</option>
-              ))}
-            </select>
-          )}
-          {isVideo ? (
-            <select aria-label="镜头运动" value={camera} onChange={(e) => setCamera(e.target.value as CameraKey)}>
-              {CAMERA_MOVEMENTS.map(({ key, label }) => <option key={key} value={key}>{label}</option>)}
-            </select>
-          ) : !isPrompt && (
-            <select aria-label="生成数量" value={variants} onChange={(e) => updateVariants(Number(e.target.value))}>
-              {OUTPUT_COUNT_OPTIONS.map((count) => <option key={count} value={count}>x{count} 张</option>)}
-            </select>
-          )}
-          {isStoryboard && (
-            <>
-              <select aria-label="分镜宫格" value={storyboardGrid} onChange={(e) => setStoryboardGrid(e.target.value as StoryboardGrid)}>
-                {STORYBOARD_GRIDS.map((grid) => <option key={grid} value={grid}>{totalPanels(grid)} 格</option>)}
-              </select>
-              <select
-                aria-label="分镜模式"
-                value={storyboardMode}
-                onChange={(e) => setStoryboardMode(e.target.value as StoryboardMode)}
-                title="剧情连贯分镜按情节顺推，同场多机位锁定同人同景切换 9 种电影机位"
-              >
-                <option value="narrative">剧情连贯</option>
-                <option value="multicam">同场多机位</option>
-              </select>
-            </>
-          )}
-          {isVideo && (isVideoFirstLastMode || isVideoTextMode) && (
-            <span className="jm-context-generator__badge jm-context-generator__badge--cyan">
-              {isVideoFirstLastMode ? "⇄ 首尾帧锁定" : "✦ 纯文生视频"}
-            </span>
-          )}
-          {isVideo && (
-            <select
-              aria-label="生成时长"
-              value={activeVideoDuration}
-              onChange={(e) => handleSelectVideoDuration(Number(e.target.value))}
-              title={
-                isOmniVideo
-                  ? "选择视频生成时长（3–15 秒，选择非常规档位将自动匹配 Omni 1.2）"
-                  : "Veo 3.1 固定 8 秒；选择其他秒数将自动切换为 Omni 1.2 Flash"
-              }
-            >
-              {OMNI_1_2_DURATIONS.map((duration) => {
-                const label = !isOmniVideo
-                  ? duration === 8
-                    ? "8 秒"
-                    : `${duration} 秒 · Omni 1.2`
-                  : omniVersion === "1.1" && ![4, 6, 8, 10].includes(duration)
-                    ? `${duration} 秒 · 升1.2`
-                    : `${duration} 秒`;
-                return (
-                  <option key={duration} value={duration}>
-                    {label}
-                  </option>
-                );
-              })}
-            </select>
-          )}
-          {isVideo && (isOmniVideo || selectedSourceIdx.size <= 1) && (
-            <select
-              aria-label="视频输出数量"
-              value={variants}
-              onChange={(e) => updateVariants(Number(e.target.value))}
-            >
-              {OUTPUT_COUNT_OPTIONS.map((count) => (
-                <option key={count} value={count}>x{count} 条</option>
-              ))}
-            </select>
-          )}
-          {!isVideo && !isPrompt && (
-            <select aria-label="渲染引擎" value={mediaProvider} onChange={(e) => setMediaProvider(e.target.value as MediaProviderKey)}>
-              <option value="flow">Flow</option><option value="muse">Muse</option>
-            </select>
-          )}
-          {costEstimate && (
-            <span
-              className={`jm-cost-pill${costEstimate.isZero ? " jm-cost-pill--zero" : ""}`}
-              title={costEstimate.breakdown}
-            >
-              {costEstimate.displayText}
-            </span>
-          )}
-          {showCreditsPill && (
-            <button
-              type="button"
-              className="jm-credits-pill"
-              onClick={() => void useFlowAccounts.getState().syncCredits()}
-              title="点击刷新 Flow 实时积分余额"
-            >
-              积分余额 {liveCredits!.toLocaleString("zh-CN")}
-            </button>
-          )}
-          <button
-            type="button"
-            className={`jm-context-generator__submit${pendingAiConfirm ? " jm-context-generator__submit--confirm" : ""}`}
-            disabled={!canGenerate}
-            onClick={() => void handleSubmit()}
-            aria-label={isPrompt ? "保存文本" : pendingAiConfirm ? "确认生成" : "立即生成"}
-            title={
-              isPrompt
-                ? "保存文本（回车）"
-                : pendingAiConfirm
-                  ? "确认 AI 润色后的提示词并提交生成"
-                  : isVideo
-                    ? "使用当前 Flow 账号生成（Ctrl / ⌘ + 回车）"
-                    : "立即生成（回车）"
-            }
-          >
-            {isWorking
-              ? "构思中…"
-              : queued
-                ? node.data.status === "queued"
-                  ? "排队中…"
-                  : "生成中…"
-                : isPrompt
-                  ? "保存"
-                  : pendingAiConfirm
-                    ? "确认生成"
-                    : isVideo
-                      ? "生成视频"
-                      : "↑"}
-          </button>
-        </div>
-      </section>
-    );
-  }
-
   const hasGeneratedMedia =
     !isPrompt &&
     Boolean(node.data.mediaId || node.data.mediaIds?.some((m) => typeof m === "string" && m.length > 0));
@@ -1751,6 +1786,1164 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
     liveCredits !== null &&
     pendingVideoConfirm.costTotal !== null &&
     pendingVideoConfirm.costTotal > liveCredits;
+
+  const videoConfirmPortal = pendingVideoConfirm
+    ? createPortal(
+        <div
+          className="gen-dialog__confirm-overlay gen-dialog__confirm-overlay--portal"
+          role="alertdialog"
+          aria-modal="true"
+          aria-label="确认视频生成参数与积分消耗"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setPendingVideoConfirm(null);
+          }}
+        >
+          <div className="gen-dialog__confirm-card">
+            <div className="gen-dialog__confirm-head">
+              <div>
+                <h3 className="gen-dialog__confirm-title">确认生成视频</h3>
+                <p className="gen-dialog__confirm-sub">
+                  请核对本次生成模式、模型清晰度与预计积分消耗，确认无误后提交至 Google Flow。
+                </p>
+              </div>
+              <button
+                type="button"
+                className="gen-dialog__close"
+                onClick={() => setPendingVideoConfirm(null)}
+                aria-label="返回修改"
+              >
+                ✕
+              </button>
+            </div>
+
+            <dl className="gen-dialog__confirm-grid">
+              <dt>当前账号</dt>
+              <dd>{pendingVideoConfirm.accountLabel}</dd>
+              <dt>生成模式</dt>
+              <dd>{pendingVideoConfirm.modeLabel}</dd>
+              <dt>视频模型</dt>
+              <dd>{pendingVideoConfirm.modelLabel}</dd>
+              <dt>规格参数</dt>
+              <dd>
+                {pendingVideoConfirm.resolutionLabel} · {pendingVideoConfirm.durationSec} 秒 · x{pendingVideoConfirm.clipCount} 条
+              </dd>
+              <dt>音频模式</dt>
+              <dd>{pendingVideoConfirm.audioModeLabel}</dd>
+              <dt>预计消耗</dt>
+              <dd>
+                <span className={`jm-cost-pill${pendingVideoConfirm.costTotal === 0 ? " jm-cost-pill--zero" : ""}`}>
+                  {pendingVideoConfirm.costDisplay}
+                </span>
+                {liveCredits !== null && (
+                  <span className={`gen-dialog__confirm-balance${insufficientCredits ? " gen-dialog__confirm-balance--low" : ""}`}>
+                    当前余额 {liveCredits.toLocaleString("zh-CN")} 积分
+                    {insufficientCredits ? "（余额可能不足）" : ""}
+                  </span>
+                )}
+              </dd>
+            </dl>
+
+            <div className="gen-dialog__confirm-prompt-box">
+              <div className="gen-dialog__confirm-prompt-label">最终提交提示词</div>
+              <p className="gen-dialog__confirm-prompt-text">{pendingVideoConfirm.finalPrompt}</p>
+            </div>
+
+            <label className="gen-dialog__confirm-skip">
+              <input
+                type="checkbox"
+                checked={rememberNeverConfirm}
+                onChange={(e) => setRememberNeverConfirm(e.target.checked)}
+              />
+              <span>以后生成视频直接提交，不再确认（可随时在「设置 → 生成前先确认」恢复为始终）</span>
+            </label>
+
+            <div className="gen-dialog__confirm-actions">
+              <button
+                type="button"
+                className="gen-dialog__confirm-cancel"
+                onClick={() => setPendingVideoConfirm(null)}
+              >
+                返回修改
+              </button>
+              <button
+                type="button"
+                className="gen-dialog__confirm-submit"
+                onClick={() => void confirmPendingVideoDispatch()}
+              >
+                确认生成视频 ⌘↵
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )
+    : null;
+
+  if (isDropdown) {
+    const unavailable = isCharacter
+      ? "请选择推荐/自定义模板、填写主体特征描述，或连线参考图。"
+      : isVideoFirstLastMode
+        ? "请选择两个不同的首帧与尾帧参考。"
+        : isVideoTextMode
+          ? "请输入视频主体、动作与镜头描述以进行纯文生视频。"
+          : effectiveVideoOmni
+            ? "请连线至少一张参考图或视频。"
+            : isVideo
+              ? "请连线并勾选至少一个图片或视频参考，或切换为纯文生视频。"
+              : undefined;
+    const inlineHint = isVideo && accountIssue
+      ? accountIssue
+      : !canGenerate && !queued && !isWorking && unavailable
+        ? unavailable
+        : undefined;
+    const activeCameraLabel =
+      CAMERA_MOVEMENTS.find((c) => c.key === camera)?.label ?? "智能动态";
+    const hasAudioDirectives = Boolean(dialogueText.trim() || sfxText.trim());
+    const hasAnyFrame = videoCandidateFrames.length >= 1;
+    const hasTwoFrames = videoCandidateFrames.length >= 2;
+    const activeVideoRes =
+      effectiveVideoModelFamily !== "omni_flash" && videoResolution === "360p"
+        ? "720p"
+        : videoResolution;
+    const activeRatioLabel = (isVideo ? VIDEO_ASPECT_RATIOS : IMAGE_ASPECT_RATIOS)
+      .find((a) => a.key === aspectRatio)?.label ?? "16:9";
+
+    return (
+      <>
+        <section
+          className="jm-node-dropdown nodrag nopan nowheel"
+          aria-label="节点快捷参数下拉框"
+          onDoubleClick={(event) => event.stopPropagation()}
+          onKeyDown={(event) => {
+            if (event.key === "Backspace" || event.key === "Delete") event.stopPropagation();
+            if (event.defaultPrevented || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+            if (
+              event.key === "Enter" &&
+              !event.shiftKey &&
+              ((!isVideo && event.target instanceof HTMLTextAreaElement) || event.ctrlKey || event.metaKey)
+            ) {
+              event.preventDefault();
+              event.stopPropagation();
+              if (!event.repeat && canGenerate) void handleSubmit();
+            }
+          }}
+        >
+          {/* Top Preset Shelf — inspired by Reference Screenshot 1, mapped to real Flow controls */}
+          {!isPrompt && (
+            <div className={`jm-drop-shelf${shelfCollapsed ? " jm-drop-shelf--collapsed" : ""}`}>
+              {!shelfCollapsed && (
+                <div className={`jm-drop-shelf__cards${isVideo ? " jm-drop-shelf__cards--four" : ""}`}>
+                  {isVideo ? (
+                    <>
+                      <div className="jm-drop-pill-card jm-drop-pill-card--select" title="选择镜头运镜风格">
+                        <span className="jm-drop-pill-card__icon" aria-hidden="true">🎬</span>
+                        <span className="jm-drop-pill-card__text">
+                          <span className="jm-drop-pill-card__kicker">运镜</span>
+                          <span className="jm-drop-pill-card__val">{activeCameraLabel}</span>
+                        </span>
+                        <select
+                          className="jm-drop-pill-card__overlay-select"
+                          aria-label="镜头运动"
+                          value={camera}
+                          onChange={(e) => setCamera(e.target.value as CameraKey)}
+                        >
+                          {CAMERA_MOVEMENTS.map((c) => (
+                            <option key={c.key} value={c.key}>{c.label}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <button
+                        type="button"
+                        className={`jm-drop-pill-card${!silentVideo && (audioOpen || hasAudioDirectives || upstreamCharacterVoices.length > 0) ? " jm-drop-pill-card--active" : ""}`}
+                        onClick={() => setAudioOpen((v) => !v)}
+                        disabled={hasStoryboardUpstream}
+                        title="设置 Veo / Omni 原生声画同步台词、环境音效或查看上游角色音色"
+                      >
+                        <span className="jm-drop-pill-card__icon" aria-hidden="true">🎙️</span>
+                        <span className="jm-drop-pill-card__text">
+                          <span className="jm-drop-pill-card__kicker">声画</span>
+                          <span className="jm-drop-pill-card__val">
+                            {silentVideo
+                              ? "静音已屏蔽"
+                              : hasAudioDirectives
+                                ? "已填台词/音效"
+                                : upstreamCharacterVoices.length > 0
+                                  ? `音色(${upstreamCharacterVoices.length})`
+                                  : "台词与音效"}
+                          </span>
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        className={`jm-drop-pill-card${silentVideo ? " jm-drop-pill-card--warn" : ""}`}
+                        onClick={() => handleToggleSilentVideo()}
+                        disabled={hasStoryboardUpstream}
+                        aria-pressed={silentVideo}
+                        title="开关「生成静音视频」：开启后全程无对话、无配乐、无环境音效，并屏蔽上游角色音色"
+                      >
+                        <span className="jm-drop-pill-card__icon" aria-hidden="true">
+                          {silentVideo ? "🔇" : "🔊"}
+                        </span>
+                        <span className="jm-drop-pill-card__text">
+                          <span className="jm-drop-pill-card__kicker">静音视频</span>
+                          <span className="jm-drop-pill-card__val">
+                            {silentVideo ? "已开启静音" : "默认有声"}
+                          </span>
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        className={`jm-drop-pill-card${autoBuilding ? " jm-drop-pill-card--active" : ""}`}
+                        onClick={() => void handleAiPolish()}
+                        disabled={isWorking || queued || hasStoryboardUpstream}
+                        title="结合上游参考图进行中文 AI 润色，并自动触发安全词审核改写"
+                      >
+                        <span className="jm-drop-pill-card__icon" aria-hidden="true">✨</span>
+                        <span className="jm-drop-pill-card__text">
+                          <span className="jm-drop-pill-card__kicker">AI 润色</span>
+                          <span className="jm-drop-pill-card__val">
+                            {autoBuilding ? "润色中…" : "安全审核"}
+                          </span>
+                        </span>
+                      </button>
+                    </>
+                  ) : isStoryboard ? (
+                    <>
+                      <div className="jm-drop-pill-card jm-drop-pill-card--select" title="选择分镜宫格布局">
+                        <span className="jm-drop-pill-card__icon" aria-hidden="true">🎞️</span>
+                        <span className="jm-drop-pill-card__text">
+                          <span className="jm-drop-pill-card__kicker">宫格</span>
+                          <span className="jm-drop-pill-card__val">{totalPanels(storyboardGrid)} 格分镜</span>
+                        </span>
+                        <select
+                          className="jm-drop-pill-card__overlay-select"
+                          aria-label="分镜宫格"
+                          value={storyboardGrid}
+                          onChange={(e) => setStoryboardGrid(e.target.value as StoryboardGrid)}
+                        >
+                          {STORYBOARD_GRIDS.map((g) => (
+                            <option key={g} value={g}>{g} · {totalPanels(g)} 格</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="jm-drop-pill-card jm-drop-pill-card--select" title="切换剧情连贯或同场多机位">
+                        <span className="jm-drop-pill-card__icon" aria-hidden="true">🎬</span>
+                        <span className="jm-drop-pill-card__text">
+                          <span className="jm-drop-pill-card__kicker">模式</span>
+                          <span className="jm-drop-pill-card__val">
+                            {storyboardMode === "multicam" ? "同场多机位" : "剧情连贯"}
+                          </span>
+                        </span>
+                        <select
+                          className="jm-drop-pill-card__overlay-select"
+                          aria-label="分镜模式"
+                          value={storyboardMode}
+                          onChange={(e) => setStoryboardMode(e.target.value as StoryboardMode)}
+                        >
+                          <option value="narrative">剧情连贯</option>
+                          <option value="multicam">同场多机位</option>
+                        </select>
+                      </div>
+
+                      <button
+                        type="button"
+                        className={`jm-drop-pill-card${autoBuilding ? " jm-drop-pill-card--active" : ""}`}
+                        onClick={() => void handleAiPolish()}
+                        disabled={isWorking || queued}
+                        title="AI 润色故事板脚本并自动安全审核"
+                      >
+                        <span className="jm-drop-pill-card__icon" aria-hidden="true">✨</span>
+                        <span className="jm-drop-pill-card__text">
+                          <span className="jm-drop-pill-card__kicker">AI 润色</span>
+                          <span className="jm-drop-pill-card__val">
+                            {autoBuilding ? "润色中…" : "自动安全审核"}
+                          </span>
+                        </span>
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      {isCharacter ? (
+                        <button
+                          type="button"
+                          className={`jm-drop-pill-card${subjectTplOpen ? " jm-drop-pill-card--active" : ""}`}
+                          onClick={() => {
+                            setSubjectTplOpen((v) => !v);
+                            setVoiceOpen(false);
+                          }}
+                          title="展开动漫 / 3D / 真人 / 萌宠官方与自定义主体模板"
+                        >
+                          <span className="jm-drop-pill-card__icon" aria-hidden="true">👤</span>
+                          <span className="jm-drop-pill-card__text">
+                            <span className="jm-drop-pill-card__kicker">主体模板</span>
+                            <span className="jm-drop-pill-card__val">动漫 · 3D · 真人</span>
+                          </span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className={`jm-drop-pill-card${presetsOpen ? " jm-drop-pill-card--active" : ""}`}
+                          onClick={() => setPresetsOpen((v) => !v)}
+                          title="一键补充中文电影质感、光影与构图词"
+                        >
+                          <span className="jm-drop-pill-card__icon" aria-hidden="true">🎨</span>
+                          <span className="jm-drop-pill-card__text">
+                            <span className="jm-drop-pill-card__kicker">画风词</span>
+                            <span className="jm-drop-pill-card__val">快捷质感 +</span>
+                          </span>
+                        </button>
+                      )}
+
+                      {isCharacter ? (
+                        <button
+                          type="button"
+                          className={`jm-drop-pill-card${voiceOpen || boundVoiceLabel ? " jm-drop-pill-card--active" : ""}`}
+                          onClick={() => {
+                            setVoiceOpen((v) => !v);
+                            setSubjectTplOpen(false);
+                          }}
+                          title="为此角色绑定固定音色，连线下游视频节点时将自动继承保持一致声线"
+                        >
+                          <span className="jm-drop-pill-card__icon" aria-hidden="true">🎙️</span>
+                          <span className="jm-drop-pill-card__text">
+                            <span className="jm-drop-pill-card__kicker">固定音色</span>
+                            <span className="jm-drop-pill-card__val">
+                              {boundVoiceLabel ?? "点击绑定音色"}
+                            </span>
+                          </span>
+                        </button>
+                      ) : mediaProvider === "flow" && imageModel === "NANO_BANANA_2_1" ? (
+                        <div className="jm-drop-pill-card jm-drop-pill-card--select" title="调节 Nano Banana 2.1 推理思考深度">
+                          <span className="jm-drop-pill-card__icon" aria-hidden="true">🧠</span>
+                          <span className="jm-drop-pill-card__text">
+                            <span className="jm-drop-pill-card__kicker">思考深度</span>
+                            <span className="jm-drop-pill-card__val">
+                              {IMAGE_THINKING_OPTIONS.find((t) => t.value === imageThinkingLevel)?.label ?? "默认"}
+                            </span>
+                          </span>
+                          <select
+                            className="jm-drop-pill-card__overlay-select"
+                            aria-label="思考深度"
+                            value={imageThinkingLevel}
+                            onChange={(e) => setImageThinkingLevel(e.target.value as ImageThinkingLevel)}
+                          >
+                            {IMAGE_THINKING_OPTIONS.map((t) => (
+                              <option key={t.value} value={t.value}>{t.label}</option>
+                            ))}
+                          </select>
+                        </div>
+                      ) : (
+                        <div className="jm-drop-pill-card jm-drop-pill-card--select" title="切换图片渲染引擎">
+                          <span className="jm-drop-pill-card__icon" aria-hidden="true">⚡</span>
+                          <span className="jm-drop-pill-card__text">
+                            <span className="jm-drop-pill-card__kicker">引擎</span>
+                            <span className="jm-drop-pill-card__val">
+                              {mediaProvider === "flow" ? "Google Flow" : "Muse"}
+                            </span>
+                          </span>
+                          <select
+                            className="jm-drop-pill-card__overlay-select"
+                            aria-label="渲染引擎"
+                            value={mediaProvider}
+                            onChange={(e) => setMediaProvider(e.target.value as MediaProviderKey)}
+                          >
+                            <option value="flow">Google Flow</option>
+                            <option value="muse">Muse</option>
+                          </select>
+                        </div>
+                      )}
+
+                      <button
+                        type="button"
+                        className={`jm-drop-pill-card${autoBuilding ? " jm-drop-pill-card--active" : ""}`}
+                        onClick={() => void handleAiPolish()}
+                        disabled={isWorking || queued}
+                        title="AI 润色中文提示词并自动安全词审核"
+                      >
+                        <span className="jm-drop-pill-card__icon" aria-hidden="true">✨</span>
+                        <span className="jm-drop-pill-card__text">
+                          <span className="jm-drop-pill-card__kicker">AI 润色</span>
+                          <span className="jm-drop-pill-card__val">
+                            {autoBuilding ? "润色审核中…" : "自动安全审核"}
+                          </span>
+                        </span>
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+              <button
+                type="button"
+                className="jm-drop-shelf__toggle"
+                onClick={() => setShelfCollapsed((v) => !v)}
+                aria-label={shelfCollapsed ? "展开快捷工具栏" : "收起快捷工具栏"}
+                title={shelfCollapsed ? "展开快捷工具栏" : "收起快捷工具栏"}
+              >
+                {shelfCollapsed ? "⌃" : "⌄"}
+              </button>
+            </div>
+          )}
+
+          {/* Main Elevated Composer Card */}
+          <div className="jm-drop-card">
+            <div className="jm-drop-card__top">
+              <div className="jm-drop-refs">
+                {!isPrompt && (
+                  <div className="jm-drop-add-wrap">
+                    <button
+                      type="button"
+                      className="jm-drop-add-btn"
+                      onClick={() => setAddRefMenuOpen((v) => !v)}
+                      disabled={uploadingRef}
+                      title="添加参考图（上传本地图片自动连线，或打开资产库）"
+                      aria-label="添加参考图"
+                    >
+                      {uploadingRef ? "…" : "+"}
+                    </button>
+                    {addRefMenuOpen && (
+                      <div className="jm-drop-add-menu" role="menu">
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="jm-drop-add-menu__item"
+                          onClick={() => void handleUploadAndWireRef()}
+                        >
+                          📤 上传本地图片并连线参考
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="jm-drop-add-menu__item"
+                          onClick={() => {
+                            setAddRefMenuOpen(false);
+                            useReferencesStore.getState().openPanel("assets");
+                          }}
+                        >
+                          📁 打开资产库选择素材
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* First-frame selectable source thumbnails for Veo i2v mode */}
+                {isVideo && effectiveVideoMode === "first_frame" && sourceMediaIds.length > 0 && sourceNode && (
+                  sourceMediaIds.map((mid, i) => {
+                    const checked = selectedSourceIdx.has(i);
+                    const isVidSrc = sourceNode.data.type === "video";
+                    return (
+                      <button
+                        key={`ff-${mid}`}
+                        type="button"
+                        className={`jm-drop-ref-thumb${checked ? " jm-drop-ref-thumb--checked" : ""}`}
+                        onClick={() => {
+                          setSelectedSourceIdx((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(i)) next.delete(i);
+                            else next.add(i);
+                            return next;
+                          });
+                        }}
+                        title={`首帧参考 #${sourceNode.data.shortId} · v${i + 1}（点击勾选/取消）`}
+                      >
+                        {isVidSrc ? (
+                          <video src={mediaUrl(mid)} muted playsInline preload="metadata" />
+                        ) : (
+                          <img src={mediaUrl(mid)} alt={sourceNode.data.title} />
+                        )}
+                        <span className="jm-drop-ref-thumb__badge">
+                          {checked ? "首帧✓" : `v${i + 1}`}
+                        </span>
+                      </button>
+                    );
+                  })
+                )}
+
+                {/* Upstream multi-ref thumbnails (image / character / Storyboard / video ingredients) */}
+                {(!isVideo || effectiveVideoMode === "ingredients") &&
+                  refSourceNodes.map((r, rIdx) => {
+                    const refTitle = displayNodeTitle(r.node.data.title, r.node.data.type);
+                    const isMulti = r.allVariants.length >= 2;
+                    const isPickerOpen = openVariantPicker === r.edgeId;
+                    const isVidChip = r.node.data.type === "video";
+                    return (
+                      <div key={r.edgeId} className="ref-source-chip-wrap jm-drop-ref-wrap">
+                        <button
+                          type="button"
+                          className={`jm-drop-ref-thumb${isPickerOpen ? " jm-drop-ref-thumb--checked" : ""}`}
+                          onClick={() => {
+                            if (isMulti) {
+                              setOpenVariantPicker(isPickerOpen ? null : r.edgeId);
+                            } else {
+                              insertRefMentionTag(rIdx + 1);
+                            }
+                          }}
+                          title={
+                            isMulti
+                              ? `${refTitle} (v${(r.variantIdx ?? 0) + 1}) · 点击切换变体`
+                              : `${refTitle} · 点击插入 @图${rIdx + 1}`
+                          }
+                        >
+                          {isVidChip ? (
+                            <video src={mediaUrl(r.mediaId)} muted playsInline preload="metadata" />
+                          ) : (
+                            <img src={mediaUrl(r.mediaId)} alt={refTitle} />
+                          )}
+                          <span className="jm-drop-ref-thumb__badge">@图{rIdx + 1}</span>
+                        </button>
+                        {isMulti && isPickerOpen && (
+                          <div className="ref-source-chip__picker" role="dialog" aria-label={`选择 ${refTitle} 变体`}>
+                            {r.allVariants.map((mid, i) => {
+                              if (!mid) return null;
+                              const isCurrent = i === (r.variantIdx ?? 0);
+                              return (
+                                <button
+                                  key={i}
+                                  type="button"
+                                  className={`ref-source-chip__picker-item${isCurrent ? " ref-source-chip__picker-item--current" : ""}`}
+                                  onClick={() => void pickVariantForEdge(r.edgeId, i)}
+                                >
+                                  {isVidChip ? (
+                                    <video className="ref-source-chip__picker-img" src={mediaUrl(mid)} muted playsInline preload="metadata" />
+                                  ) : (
+                                    <img className="ref-source-chip__picker-img" src={mediaUrl(mid)} alt={`v${i + 1}`} />
+                                  )}
+                                  <span className="ref-source-chip__picker-label">v{i + 1}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+
+                {/* Upstream text prompt chips */}
+                {promptSourceNodes.map((p) => (
+                  <span
+                    key={p.edgeId}
+                    className="jm-drop-prompt-chip"
+                    title={`${displayNodeTitle(p.node.data.title, p.node.data.type)}：${p.text.trim() || "空白文本"}`}
+                  >
+                    ✦ #{p.node.data.shortId}
+                  </span>
+                ))}
+              </div>
+
+              <div className="jm-drop-card__top-actions">
+                {!hasStoryboardUpstream && preAiPrompt !== null && (
+                  <button
+                    type="button"
+                    className="jm-drop-mini-btn"
+                    onClick={handleRevertPreAiPrompt}
+                    disabled={isWorking || queued}
+                    title="还原润色前的原始提示词"
+                  >
+                    ↩ 还原
+                  </button>
+                )}
+                {!hasStoryboardUpstream && (
+                  <button
+                    type="button"
+                    className="jm-drop-mini-btn"
+                    onClick={() => setSlashSkillOpen((v) => !v)}
+                    disabled={isWorking || queued}
+                    title="唤出 / 导演技能模板"
+                  >
+                    / 技能
+                  </button>
+                )}
+                {!isPrompt && (
+                  <button
+                    type="button"
+                    className="jm-drop-expand-btn"
+                    onClick={() => openResultViewer(rfId, 0, "params")}
+                    aria-label={isVideo ? "展开进入视频展示页与完整参数侧边栏" : "展开进入展示页与完整参数侧边栏"}
+                    title={isVideo ? "展开进入视频展示页（右侧可收回完整参数侧边栏）" : "展开进入展示页（右侧可收回完整参数侧边栏）"}
+                  >
+                    ⤢
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="jm-drop-expand-btn"
+                  onClick={closeGenerationDialog}
+                  aria-label="收起下拉框 (ESC)"
+                  title="收起下拉框 (ESC)"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+
+            {/* Compact First+Last Frame pickers when first_last mode is active */}
+            {isVideo && effectiveVideoMode === "first_last" && hasTwoFrames && (
+              <div className="gen-dialog__first-last-row">
+                <div className="gen-dialog__first-last-slot">
+                  <span className="gen-dialog__first-last-tag">首帧</span>
+                  <select
+                    aria-label="选择首帧参考图"
+                    value={firstFrameId}
+                    onChange={(e) => setFirstFrameId(e.target.value)}
+                  >
+                    {videoCandidateFrames.map((c) => (
+                      <option key={`start-${c.mediaId}`} value={c.mediaId}>{c.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <button
+                  type="button"
+                  className="source-select-mini"
+                  onClick={() => {
+                    const prevStart = firstFrameId;
+                    setFirstFrameId(lastFrameId);
+                    setLastFrameId(prevStart);
+                  }}
+                  title="互换首帧与尾帧"
+                >
+                  ⇄
+                </button>
+                <div className="gen-dialog__first-last-slot">
+                  <span className="gen-dialog__first-last-tag">尾帧</span>
+                  <select
+                    aria-label="选择尾帧参考图"
+                    value={lastFrameId}
+                    onChange={(e) => setLastFrameId(e.target.value)}
+                  >
+                    {videoCandidateFrames.map((c) => (
+                      <option key={`end-${c.mediaId}`} value={c.mediaId}>{c.label}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            )}
+
+            {/* Toggleable Subject Templates Drawer for Character nodes */}
+            {subjectTplOpen && subjectTemplatesSection}
+
+            {/* Toggleable Fixed Voice Binder for Character nodes */}
+            {voiceOpen && characterVoiceSection}
+
+            {/* Toggleable Chinese Style Presets Strip */}
+            {presetsOpen && !hasStoryboardUpstream && (
+              <div className="gen-dialog__preset-row" aria-label="中文快捷画风词">
+                {CHINESE_PROMPT_PRESETS.map((preset) => (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    className="gen-dialog__preset-chip"
+                    onClick={() => handleAppendChinesePreset(preset.snippet)}
+                    disabled={isWorking || queued}
+                    title={preset.snippet}
+                  >
+                    + {preset.label}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Inherited Upstream Character Voices Indicator for Video nodes */}
+            {isVideo && upstreamCharacterVoices.length > 0 && !hasStoryboardUpstream && (
+              <div className={`jm-inherited-voices${silentVideo ? " jm-inherited-voices--muted" : ""}`}>
+                <span className="jm-inherited-voices__label">
+                  {silentVideo ? "🔇 角色音色（已因静音模式屏蔽）：" : "🎙️ 已继承角色固定音色："}
+                </span>
+                {upstreamCharacterVoices.map((v) => (
+                  <span
+                    key={v.rfId}
+                    className="jm-inherited-voices__pill"
+                    title={`${v.title}（#${v.shortId}）：${v.directive}`}
+                  >
+                    {v.title} · {v.label}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {/* Toggleable Video Dialogue & SFX fields */}
+            {isVideo && audioOpen && !hasStoryboardUpstream && (
+              <div className="gen-dialog__audio-fields">
+                {silentVideo && (
+                  <p className="jm-silent-notice">
+                    已开启「生成静音视频」，提交时将自动屏蔽台词、角色固定音色与环境配乐，生成纯无声视频。
+                  </p>
+                )}
+                <input
+                  type="text"
+                  className="gen-dialog__seed-input"
+                  value={dialogueText}
+                  onChange={(e) => setDialogueText(e.target.value)}
+                  disabled={silentVideo}
+                  placeholder="角色口型对白台词（如：这束光终于照进来了）…"
+                  maxLength={300}
+                />
+                <input
+                  type="text"
+                  className="gen-dialog__seed-input"
+                  value={sfxText}
+                  onChange={(e) => setSfxText(e.target.value)}
+                  disabled={silentVideo}
+                  placeholder="环境音与音效（如：细雨落瓦、轻柔钢琴弦乐）…"
+                  maxLength={300}
+                />
+              </div>
+            )}
+
+            {/* Clean Borderless Prompt Textarea */}
+            <textarea
+              id={promptId}
+              ref={firstFocusRef}
+              className="jm-drop-textarea"
+              rows={2}
+              maxLength={PROMPT_MAX_LENGTH}
+              value={prompt}
+              onChange={(e) => {
+                const val = e.target.value;
+                const cursor = e.target.selectionStart ?? val.length;
+                const beforeCursor = val.slice(0, cursor);
+                setAtSuggestOpen(refSourceNodes.length > 0 && /@(?:图\s*)?$/.test(beforeCursor));
+                setSlashSkillOpen(val.startsWith("/"));
+                promptManuallyEditedRef.current = true;
+                setPrompt(val);
+                if (pendingBatchPrompts) setPendingBatchPrompts(undefined);
+                if (autoPromptUsed) setAutoPromptUsed(false);
+              }}
+              onBlur={() => {
+                if (!hasStoryboardUpstream && prompt !== (node?.data.prompt ?? "")) {
+                  persistNodeDraftPatch({ prompt });
+                }
+              }}
+              placeholder={
+                upstreamPromptText
+                  ? "已默认继承上游文本节点提示词，可直接生成，或点击上方「AI 润色」…"
+                  : isVideo
+                    ? "上传参考图、输入文本或运镜描述，快速生成你想要的视频…"
+                    : isCharacter
+                      ? "描述动漫/3D/真人主体设定特征，或点击上方「主体模板」一键套用…"
+                      : isStoryboard
+                        ? "输入中文剧情脚本（如：清晨拆箱 → 试穿展示 → 街头漫步）…"
+                        : isPrompt
+                          ? "输入中文脚本或提示词灵感，连线后自动传递给下游节点…"
+                          : "上传图片、输入画面描述或 @引用主体，快速生成你想要的图片…"
+              }
+              disabled={isWorking}
+              readOnly={hasStoryboardUpstream}
+            />
+
+            {pendingAiConfirm && !isWorking && !hasStoryboardUpstream && (
+              <div className="gen-dialog__confirm-banner" role="status">
+                <span>✨ AI 已润色/生成提示词，请检查或微调后点击右下角确认生成</span>
+              </div>
+            )}
+            {safetyAuditNotes.length > 0 && !isWorking && !hasStoryboardUpstream && (
+              <div className="gen-dialog__safety-banner" role="status">
+                <span>🛡️ 安全词审核已自动改写：{safetyAuditNotes.join("；")}</span>
+              </div>
+            )}
+            {(slashSkillOpen || prompt.startsWith("/")) && !hasStoryboardUpstream && (
+              <div className="gen-dialog__at-bar" role="listbox" aria-label="斜杠导演技能">
+                <span className="gen-dialog__at-hint">/ 技能：</span>
+                {filterDirectorSkills(prompt.startsWith("/") ? prompt.slice(1) : "").map((skill) => (
+                  <button
+                    key={skill.id}
+                    type="button"
+                    className="gen-dialog__preset-chip gen-dialog__at-chip"
+                    title={skill.desc}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      handleApplyPromptSlashSkill(skill);
+                    }}
+                  >
+                    {skill.slash}
+                  </button>
+                ))}
+              </div>
+            )}
+            {atSuggestOpen && refSourceNodes.length > 0 && !hasStoryboardUpstream && (
+              <div className="gen-dialog__at-bar" role="listbox" aria-label="选择要引用的上游参考图">
+                <span className="gen-dialog__at-hint">点选插入：</span>
+                {refSourceNodes.map((r, rIdx) => (
+                  <button
+                    key={r.edgeId}
+                    type="button"
+                    className="gen-dialog__preset-chip gen-dialog__at-chip"
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      insertRefMentionTag(rIdx + 1);
+                    }}
+                  >
+                    @图{rIdx + 1} · #{r.node.data.shortId}
+                  </button>
+                ))}
+              </div>
+            )}
+            {hasStoryboardUpstream && (
+              <p className="gen-dialog__hint gen-dialog__hint--locked">
+                🎬 故事板动态演绎模板已启用（{totalPanels(storyboardUpstreamGrid)} 格分镜按顺序演绎）。
+              </p>
+            )}
+            {inlineHint && (
+              <p className="jm-context-generator__hint">{inlineHint}</p>
+            )}
+
+            {/* Bottom Flow Parameter Bar — Matching Screenshot 1 Layout with Flow's Real Settings */}
+            <div className="jm-drop-bar">
+              <div className="jm-drop-bar__left">
+                {isVideo ? (
+                  <>
+                    {/* Model Picker */}
+                    <label className="jm-drop-inline-ctrl jm-drop-inline-ctrl--model" title={selectedVideoEntry.bestFor}>
+                      <span className="jm-drop-sparkle" aria-hidden="true">✦</span>
+                      <select
+                        aria-label="视频模型"
+                        value={selectedVideoId}
+                        onChange={(e) => applyVideoSelection(e.target.value as VideoModelCatalogEntry["id"])}
+                      >
+                        {VIDEO_MODEL_CATALOG.map((m) => {
+                          const locked = !!m.ultraOnly && paygateTier !== "PAYGATE_TIER_TWO";
+                          return (
+                            <option key={m.id} value={m.id} disabled={locked}>
+                              {m.label}{m.ultraOnly ? " (0分)" : ""}
+                            </option>
+                          );
+                        })}
+                      </select>
+                    </label>
+
+                    {/* Aspect · Resolution · Count compact group */}
+                    <div className="jm-drop-spec-group" aria-label="画幅、清晰度与输出数量">
+                      <select
+                        aria-label="画幅比例"
+                        value={aspectRatio}
+                        onChange={(e) => updateAspectRatio(e.target.value as AspectKey)}
+                      >
+                        {VIDEO_ASPECT_RATIOS.map(({ key, label }) => (
+                          <option key={key} value={key}>{label}</option>
+                        ))}
+                      </select>
+                      <span className="jm-drop-spec-dot" aria-hidden="true">·</span>
+                      <select
+                        aria-label="视频分辨率"
+                        value={activeVideoRes}
+                        onChange={(e) => setVideoResolution(e.target.value as VideoResolutionKey)}
+                      >
+                        {VIDEO_RESOLUTION_OPTIONS.map((r) => {
+                          const unsupported = !!r.omniOnly && effectiveVideoModelFamily !== "omni_flash";
+                          return (
+                            <option key={r.value} value={r.value} disabled={unsupported}>
+                              {r.value.toUpperCase()}{unsupported ? " (Omni)" : ""}
+                            </option>
+                          );
+                        })}
+                      </select>
+                      <span className="jm-drop-spec-dot" aria-hidden="true">·</span>
+                      {effectiveVideoMode === "first_frame" && selectedSourceIdx.size > 1 ? (
+                        <span className="jm-drop-spec-static">{selectedSourceIdx.size}条</span>
+                      ) : (
+                        <select
+                          aria-label="视频输出数量"
+                          value={variants}
+                          onChange={(e) => updateVariants(Number(e.target.value))}
+                        >
+                          {OUTPUT_COUNT_OPTIONS.map((count) => (
+                            <option key={count} value={count}>{count}条</option>
+                          ))}
+                        </select>
+                      )}
+                    </div>
+
+                    {/* Video Generation Mode (Flow's Optional First-Frame / Ingredients / T2V / First+Last) */}
+                    <label className="jm-drop-inline-ctrl" title="首帧一致为可选项：可按需选择纯文生、参考元素（不锁首帧）、首帧一致或首尾帧锁定">
+                      <select
+                        aria-label="视频生成模式"
+                        value={effectiveVideoMode}
+                        onChange={(e) => handleSelectVideoSubMode(e.target.value as VideoSubMode)}
+                      >
+                        <option value="t2v">纯文生视频</option>
+                        <option value="ingredients" disabled={!hasAnyFrame}>
+                          参考元素{hasAnyFrame ? "" : " (需连图)"}
+                        </option>
+                        <option value="first_frame" disabled={!hasAnyFrame}>
+                          首帧一致{hasAnyFrame ? "" : " (需连图)"}
+                        </option>
+                        {hasTwoFrames && <option value="first_last">首尾帧锁定</option>}
+                      </select>
+                    </label>
+
+                    {/* Duration */}
+                    <label className="jm-drop-inline-ctrl" title="选择视频时长（3–15 秒）">
+                      <select
+                        aria-label="生成时长"
+                        value={activeVideoDuration}
+                        onChange={(e) => handleSelectVideoDuration(Number(e.target.value))}
+                      >
+                        {OMNI_1_2_DURATIONS.map((d) => (
+                          <option key={d} value={d}>
+                            {d}s{effectiveVideoModelFamily !== "omni_flash" && d !== 8 ? " · Omni" : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </>
+                ) : !isPrompt ? (
+                  <>
+                    {mediaProvider === "flow" ? (
+                      <label className="jm-drop-inline-ctrl jm-drop-inline-ctrl--model" title={selectedImageEntry.bestFor}>
+                        <span className="jm-drop-sparkle" aria-hidden="true">✦</span>
+                        <select
+                          aria-label="图片模型"
+                          value={imageModel}
+                          onChange={(e) => setImageModel(e.target.value as ImageModelKey)}
+                        >
+                          {IMAGE_MODEL_CATALOG.map((m) => (
+                            <option key={m.id} value={m.id}>{m.label}</option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : (
+                      <span className="jm-drop-spec-static">✦ Muse</span>
+                    )}
+
+                    <div className="jm-drop-spec-group" aria-label="比例、清晰度与张数">
+                      <select
+                        aria-label="画幅比例"
+                        value={aspectRatio}
+                        onChange={(e) => updateAspectRatio(e.target.value as AspectKey)}
+                        title={`当前画幅 ${activeRatioLabel}`}
+                      >
+                        {IMAGE_ASPECT_RATIOS.map(({ key, label }) => (
+                          <option key={key} value={key}>{label}</option>
+                        ))}
+                      </select>
+                      <span className="jm-drop-spec-dot" aria-hidden="true">·</span>
+                      <select
+                        aria-label="图片清晰度"
+                        value={imageResolution}
+                        onChange={(e) => setImageResolution(e.target.value as ImageResolutionKey)}
+                      >
+                        {IMAGE_RESOLUTION_OPTIONS.map((r) => (
+                          <option key={r.value} value={r.value}>{r.value}</option>
+                        ))}
+                      </select>
+                      <span className="jm-drop-spec-dot" aria-hidden="true">·</span>
+                      <select
+                        aria-label="生成数量"
+                        value={variants}
+                        onChange={(e) => updateVariants(Number(e.target.value))}
+                      >
+                        {OUTPUT_COUNT_OPTIONS.map((count) => (
+                          <option key={count} value={count}>{count}张</option>
+                        ))}
+                      </select>
+                    </div>
+                  </>
+                ) : (
+                  <span className="jm-drop-spec-static">文本节点 · 回车或点击右侧保存</span>
+                )}
+
+                {!isPrompt && refSourceNodes.length > 0 && !hasStoryboardUpstream && (
+                  <button
+                    type="button"
+                    className={`jm-drop-at-btn${atSuggestOpen ? " jm-drop-at-btn--active" : ""}`}
+                    onClick={() => setAtSuggestOpen((v) => !v)}
+                    title="插入 @图N 引用上游参考素材"
+                    aria-label="插入参考图引用"
+                  >
+                    @
+                  </button>
+                )}
+              </div>
+
+              <div className="jm-drop-bar__right">
+                {costEstimate && (
+                  <span
+                    className={`jm-drop-cost${costEstimate.isZero ? " jm-drop-cost--zero" : ""}`}
+                    title={costEstimate.breakdown}
+                  >
+                    <span className="jm-drop-sparkle" aria-hidden="true">✦</span>
+                    {costEstimate.total !== null ? costEstimate.total : costEstimate.displayText.replace(/^消耗\s*/, "")}
+                  </span>
+                )}
+                {showCreditsPill && (
+                  <button
+                    type="button"
+                    className="jm-drop-balance"
+                    onClick={() => void useFlowAccounts.getState().syncCredits()}
+                    title="当前 Flow 实时积分余额（点击刷新）"
+                  >
+                    {liveCredits!.toLocaleString("zh-CN")}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className={`jm-drop-submit${pendingAiConfirm ? " jm-drop-submit--confirm" : ""}`}
+                  disabled={!canGenerate}
+                  onClick={() => void handleSubmit()}
+                  aria-label={
+                    isPrompt
+                      ? "保存文本"
+                      : pendingAiConfirm
+                        ? "确认并生成"
+                        : isVideo && confirmBeforeVideoGen === "always"
+                          ? "下一步：确认生成视频"
+                          : "立即生成"
+                  }
+                  title={
+                    isPrompt
+                      ? "保存文本"
+                      : pendingAiConfirm
+                        ? "确认 AI 润色提示词并生成"
+                        : isVideo && confirmBeforeVideoGen === "always"
+                          ? "核对参数并确认生成视频（Ctrl / ⌘ + 回车）"
+                          : "立即生成（Ctrl / ⌘ + 回车）"
+                  }
+                >
+                  {isWorking || queued ? "…" : isPrompt ? "✓" : "↑"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+        {videoConfirmPortal}
+      </>
+    );
+  }
+
+  if (isSidebar) {
+    return (
+      <>
+        <div
+          className="gen-sidebar-composer"
+          onKeyDown={(event) => {
+            if (event.defaultPrevented || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+            if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+              event.preventDefault();
+              event.stopPropagation();
+              if (pendingVideoConfirm) {
+                void confirmPendingVideoDispatch();
+              } else if (canGenerate) {
+                void handleSubmit();
+              }
+            }
+          }}
+        >
+          <div className="gen-sidebar-composer__body">
+            {subjectTemplatesSection}
+            {characterVoiceSection}
+            {promptField}
+            {references}
+            <ModalParameterControls
+              isVideo={isVideo}
+              isPrompt={isPrompt}
+              isStoryboard={isStoryboard}
+              isOmniVideo={effectiveVideoModelFamily === "omni_flash"}
+              accountIssue={accountIssue ?? null}
+              mediaProvider={mediaProvider}
+              setMediaProvider={setMediaProvider}
+              imageModel={imageModel}
+              setImageModel={setImageModel}
+              selectedImageEntry={selectedImageEntry}
+              aspectRatio={aspectRatio}
+              updateAspectRatio={updateAspectRatio}
+              imageResolution={imageResolution}
+              setImageResolution={setImageResolution}
+              imageThinkingLevel={imageThinkingLevel}
+              setImageThinkingLevel={setImageThinkingLevel}
+              selectedVideoId={selectedVideoId}
+              applyVideoSelection={applyVideoSelection}
+              selectedVideoEntry={selectedVideoEntry}
+              paygateTier={paygateTier ?? null}
+              videoResolution={videoResolution}
+              setVideoResolution={setVideoResolution}
+              omniVersion={omniVersion}
+              activeVideoDuration={activeVideoDuration}
+              handleSelectVideoDuration={handleSelectVideoDuration}
+              camera={camera}
+              setCamera={setCamera}
+              selectedSourceCount={effectiveVideoMode === "first_frame" ? selectedSourceIdx.size : 1}
+              variants={variants}
+              updateVariants={updateVariants}
+              seedInput={seedInput}
+              setSeedInput={setSeedInput}
+              storyboardMode={storyboardMode}
+              setStoryboardMode={setStoryboardMode}
+              storyboardGrid={storyboardGrid}
+              setStoryboardGrid={setStoryboardGrid}
+            />
+          </div>
+
+          <div className="gen-sidebar-composer__footer">
+            <div className="gen-sidebar-composer__meta">
+              {isVideo && (
+                <button
+                  type="button"
+                  className={`gen-dialog__confirm-toggle${confirmBeforeVideoGen === "always" ? " gen-dialog__confirm-toggle--on" : ""}`}
+                  onClick={() =>
+                    setConfirmBeforeVideoGen(
+                      confirmBeforeVideoGen === "always" ? "never" : "always",
+                    )
+                  }
+                  title="切换视频生成前二次确认策略（始终 / 永不）"
+                >
+                  生成前确认：{confirmBeforeVideoGen === "always" ? "始终" : "永不"}
+                </button>
+              )}
+              {costEstimate && (
+                <span
+                  className={`jm-cost-pill${costEstimate.isZero ? " jm-cost-pill--zero" : ""}`}
+                  title={costEstimate.breakdown}
+                >
+                  {costEstimate.displayText}
+                </span>
+              )}
+              {showCreditsPill && (
+                <button
+                  type="button"
+                  className="jm-credits-pill"
+                  onClick={() => void useFlowAccounts.getState().syncCredits()}
+                  title="点击刷新 Flow 实时积分余额"
+                >
+                  余额 {liveCredits!.toLocaleString("zh-CN")}
+                </button>
+              )}
+            </div>
+            <button
+              className="gen-sidebar-composer__cta"
+              type="button"
+              onClick={() => void handleSubmit()}
+              disabled={!canGenerate}
+              title={
+                nodeLLMBusy && !autoBuilding
+                  ? "后台正在合成提示词，请稍候"
+                  : undefined
+              }
+            >
+              {isWorking
+                ? "构思中…"
+                : queued
+                  ? node.data.status === "queued"
+                    ? "已加入队列，等待生成…"
+                    : "正在生成中…"
+                  : isPrompt
+                    ? "保存文本 ⌘↵"
+                    : isVideo && confirmBeforeVideoGen === "always"
+                      ? "下一步：确认生成视频 ⌘↵"
+                      : pendingAiConfirm
+                        ? "确认并生成 ⌘↵"
+                        : isVideo
+                          ? "立即生成视频 ⌘↵"
+                          : "立即生成 ⌘↵"}
+            </button>
+          </div>
+        </div>
+        {videoConfirmPortal}
+      </>
+    );
+  }
 
   return (
     <div
@@ -1796,7 +2989,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
                 className="gen-dialog__showcase-btn"
                 onClick={() => {
                   closeGenerationDialog();
-                  openResultViewer(rfId, 0);
+                  openResultViewer(rfId, 0, "history");
                 }}
                 title={isVideo ? "打开官方风格视频展示页与时间轴播控" : "全屏预览已生成的图片与高清重塑"}
               >
@@ -1815,6 +3008,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
 
         <div className="gen-dialog__body">
         {subjectTemplatesSection}
+        {characterVoiceSection}
         {promptField}
         {references}
 
@@ -1918,84 +3112,7 @@ export function GenerationComposer({ rfId, initialPrompt, onClose, inline = fals
           </button>
         </div>
 
-        {pendingVideoConfirm && (
-          <div className="gen-dialog__confirm-overlay" role="alertdialog" aria-modal="true" aria-label="确认视频生成参数与积分消耗">
-            <div className="gen-dialog__confirm-card">
-              <div className="gen-dialog__confirm-head">
-                <div>
-                  <h3 className="gen-dialog__confirm-title">确认生成视频</h3>
-                  <p className="gen-dialog__confirm-sub">
-                    请核对本次生成模式、模型清晰度与预计积分消耗，确认无误后提交至 Google Flow。
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  className="gen-dialog__close"
-                  onClick={() => setPendingVideoConfirm(null)}
-                  aria-label="返回修改"
-                >
-                  ✕
-                </button>
-              </div>
-
-              <dl className="gen-dialog__confirm-grid">
-                <dt>当前账号</dt>
-                <dd>{pendingVideoConfirm.accountLabel}</dd>
-                <dt>生成模式</dt>
-                <dd>{pendingVideoConfirm.modeLabel}</dd>
-                <dt>视频模型</dt>
-                <dd>{pendingVideoConfirm.modelLabel}</dd>
-                <dt>规格参数</dt>
-                <dd>
-                  {pendingVideoConfirm.resolutionLabel} · {pendingVideoConfirm.durationSec} 秒 · x{pendingVideoConfirm.clipCount} 条
-                </dd>
-                <dt>预计消耗</dt>
-                <dd>
-                  <span className={`jm-cost-pill${pendingVideoConfirm.costTotal === 0 ? " jm-cost-pill--zero" : ""}`}>
-                    {pendingVideoConfirm.costDisplay}
-                  </span>
-                  {liveCredits !== null && (
-                    <span className={`gen-dialog__confirm-balance${insufficientCredits ? " gen-dialog__confirm-balance--low" : ""}`}>
-                      当前余额 {liveCredits.toLocaleString("zh-CN")} 积分
-                      {insufficientCredits ? "（余额可能不足）" : ""}
-                    </span>
-                  )}
-                </dd>
-              </dl>
-
-              <div className="gen-dialog__confirm-prompt-box">
-                <div className="gen-dialog__confirm-prompt-label">最终提交提示词</div>
-                <p className="gen-dialog__confirm-prompt-text">{pendingVideoConfirm.finalPrompt}</p>
-              </div>
-
-              <label className="gen-dialog__confirm-skip">
-                <input
-                  type="checkbox"
-                  checked={rememberNeverConfirm}
-                  onChange={(e) => setRememberNeverConfirm(e.target.checked)}
-                />
-                <span>以后生成视频直接提交，不再确认（可随时在「设置 → 生成前先确认」恢复为始终）</span>
-              </label>
-
-              <div className="gen-dialog__confirm-actions">
-                <button
-                  type="button"
-                  className="gen-dialog__confirm-cancel"
-                  onClick={() => setPendingVideoConfirm(null)}
-                >
-                  返回修改
-                </button>
-                <button
-                  type="button"
-                  className="gen-dialog__confirm-submit"
-                  onClick={() => void confirmPendingVideoDispatch()}
-                >
-                  确认生成视频 ⌘↵
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
+        {videoConfirmPortal}
       </div>
     </div>
   );

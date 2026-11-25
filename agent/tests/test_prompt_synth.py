@@ -1469,3 +1469,116 @@ async def test_auto_prompt_activates_narrative_override_for_storyboard_and_drama
     assert len(captured) == 2
     assert "NARRATIVE & STORYBOARD OVERRIDE" in captured[0]
     assert "NARRATIVE & STORYBOARD OVERRIDE" in captured[1]
+
+
+@pytest.mark.asyncio
+async def test_auto_prompt_video_inherits_character_fixed_voice_and_honors_silent_video(
+    client, monkeypatch
+):
+    """Character fixed voice bindings flow through character -> image -> video
+    when non-silent, and are cleanly suppressed by SILENT VIDEO MODE when
+    silent_video=True (including deterministic local fallback)."""
+    with get_session() as s:
+        b = Board(name="voice-and-silent")
+        s.add(b)
+        s.commit()
+        s.refresh(b)
+        char = Node(
+            board_id=b.id,
+            short_id="vc01",
+            type="character",
+            x=0,
+            y=0,
+            w=240,
+            h=180,
+            data={
+                "title": "林浅",
+                "aiBrief": "古风青衫少女",
+                "mediaId": "m-char-voice",
+                "voicePreset": "warm_female",
+                "voiceCustom": "尾音柔和清甜",
+            },
+            status="done",
+        )
+        img = Node(
+            board_id=b.id,
+            short_id="vi01",
+            type="image",
+            x=280,
+            y=0,
+            w=240,
+            h=180,
+            data={"title": "廊下镜头", "aiBrief": "少女立于长廊", "mediaId": "m-shot-1"},
+            status="done",
+        )
+        vid = Node(
+            board_id=b.id,
+            short_id="vv01",
+            type="video",
+            x=560,
+            y=0,
+            w=240,
+            h=180,
+            data={"title": "廊下视频"},
+            status="idle",
+        )
+        s.add_all([char, img, vid])
+        s.commit()
+        for n in (char, img, vid):
+            s.refresh(n)
+        s.add(Edge(board_id=b.id, source_id=char.id, target_id=img.id))
+        s.add(Edge(board_id=b.id, source_id=img.id, target_id=vid.id))
+        s.commit()
+        vid_id = vid.id
+
+    captured: list[tuple[str, str]] = []
+
+    async def stub_run(feature, prompt, *, system_prompt=None, timeout=0):
+        captured.append((system_prompt or "", prompt))
+        return "镜头缓缓推进，少女轻眨双眼微笑。"
+
+    monkeypatch.setattr(prompt_synth, "run_llm", stub_run)
+
+    # 1. Normal video includes bound character voice profile
+    await prompt_synth.auto_prompt(vid_id)
+    sp_voiced, msg_voiced = captured[0]
+    assert "SILENT VIDEO MODE" not in sp_voiced
+    assert "Bound character fixed voice profile" in msg_voiced
+    assert "林浅" in msg_voiced
+    assert "尾音柔和清甜" in msg_voiced
+
+    # 2. Silent video switches system prompt and suppresses voice binding
+    await prompt_synth.auto_prompt(vid_id, silent_video=True)
+    sp_silent, msg_silent = captured[1]
+    assert "SILENT VIDEO MODE" in sp_silent
+    assert "ZERO AUDIO" in sp_silent
+    assert "SILENT VIDEO ENABLED" in msg_silent
+    assert "Bound character fixed voice profile" not in msg_silent
+
+    # 3. Local Chinese fallback respects silent_video=True
+    records, target = prompt_synth._collect_upstream(vid_id)
+    assert target is not None
+    fallback_silent = prompt_synth.build_local_chinese_fallback_prompt(
+        records, target, silent_video=True
+    )
+    assert "全程完全静音无声" in fallback_silent
+    assert "轻柔纯音乐" not in fallback_silent
+
+
+def test_route_passes_silent_video_flag_through(client, monkeypatch):
+    ids = _seed_board_with_chain()
+    captured: dict = {}
+
+    async def stub(node_id, **kwargs):
+        captured.update(kwargs)
+        return "静音镜头提示词"
+
+    monkeypatch.setattr(prompt_synth, "auto_prompt", stub)
+    r = client.post(
+        "/api/prompt/auto",
+        json={"node_id": ids["target_id"], "camera": "static", "silent_video": True},
+    )
+    assert r.status_code == 200, r.text
+    assert captured.get("camera") == "static"
+    assert captured.get("silent_video") is True
+

@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { collectUpstreamRefEntries, useGenerationStore } from "../store/generation";
-import { estimateVideoUpscaleCreditCost } from "../constants/models";
+import { collectUpstreamRefEntries, useGenerationStore, type ViewerTab } from "../store/generation";
 import { useBoardStore } from "../store/board";
 import { displayNodeTitle } from "../constants/nodeLabels";
 import { useSettingsStore } from "../store/settings";
@@ -12,8 +11,13 @@ import {
   type MediaStatus,
 } from "../api/client";
 import { countryLabel, vibeLabel } from "../constants/character";
+import {
+  resolveCharacterVoiceDirective,
+  resolveCharacterVoiceLabel,
+} from "../constants/characterVoice";
 import { deriveNextScene, derivePrevScene, switchNodeHistoryVersion } from "../lib/quickDerive";
 import { FlowVideoShowcase } from "./FlowVideoShowcase";
+import { GenerationComposer } from "./GenerationDialog";
 
 const ICON: Record<string, string> = {
   character: "◎",
@@ -102,6 +106,8 @@ export function ResultViewer() {
   const settingsVideoQuality = useSettingsStore((s) => s.videoQuality);
 
   const [activeIdx, setActiveIdx] = useState(0);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarTab, setSidebarTab] = useState<ViewerTab>("history");
   const [mediaReady, setMediaReady] = useState(false);
   const [cacheKey, setCacheKey] = useState(0);
   const [status, setStatus] = useState<MediaStatus | null>(null);
@@ -153,14 +159,6 @@ export function ResultViewer() {
     ? collectUpstreamRefEntries(rfId, nodes, edges)
     : [];
 
-  // Slot-aware mediaId resolution. When the node has a per-variant
-  // `mediaIds` array, slot index activeIdx is authoritative even if
-  // its value is `null` — the null means "this variant got blocked",
-  // which is semantically distinct from "no per-variant array exists,
-  // fall back to the legacy single mediaId". Using `??` chained the
-  // two together and made every blocked slot silently render the
-  // primary mediaId from slot 0 — i.e. clicking tile 4 played
-  // tile 1's video.
   const slotMediaId = data?.mediaIds?.[activeIdx];
   const currentMediaId = rfId && data
     ? (data.mediaIds !== undefined
@@ -169,13 +167,12 @@ export function ResultViewer() {
     : null;
   const slotError = data?.slotErrors?.[activeIdx] ?? null;
 
-  // Reset active variant index and media state when viewer opens for a different node
+  // Reset active variant index, sidebar tab, and media state when viewer opens
   useEffect(() => {
     if (rfId !== null) {
-      // Honor the idx the caller passed via openResultViewer(rfId, idx)
-      // so clicking a specific tile in the node card opens at that
-      // variant. Bound by current mediaIds length (best-effort).
       setActiveIdx(openViewer.idx ?? 0);
+      setSidebarTab(openViewer.tab ?? "history");
+      setSidebarOpen(true);
       setMediaReady(false);
       setStatus(null);
       triggerRef.current = document.activeElement;
@@ -188,7 +185,7 @@ export function ResultViewer() {
         triggerRef.current.focus();
       }
     }
-  }, [rfId]);
+  }, [rfId, openViewer.tab]);
 
   // Reset media state when active variant changes
   useEffect(() => {
@@ -212,6 +209,17 @@ export function ResultViewer() {
         return;
       }
       if (isVid) return;
+      const active = document.activeElement;
+      const tag = (active?.tagName ?? "").toLowerCase();
+      if (
+        tag === "input" ||
+        tag === "textarea" ||
+        tag === "select" ||
+        tag === "button" ||
+        (active instanceof HTMLElement && active.isContentEditable)
+      ) {
+        return;
+      }
       if (e.key === "ArrowRight" || e.key === " ") {
         e.preventDefault();
         setActiveIdx((i) => (i + 1) % Math.max(mediaIds.length, 1));
@@ -449,6 +457,7 @@ export function ResultViewer() {
             node={node}
             data={data}
             nodeTitle={nodeTitle}
+            initialSidebarTab={openViewer.tab}
             mediaIds={mediaIds}
             slotErrors={data.slotErrors ?? []}
             activeIdx={activeIdx}
@@ -482,6 +491,10 @@ export function ResultViewer() {
     );
   }
 
+  const isGenerating = data.status === "queued" || data.status === "running";
+  const initialParamPrompt =
+    (data.type === "Storyboard" ? data.aiBrief : data.prompt) ?? "";
+
   return (
     <div
       className="result-viewer-backdrop"
@@ -491,34 +504,69 @@ export function ResultViewer() {
       }}
     >
       <div
-        className="result-viewer"
+        className="result-viewer result-viewer--shell"
         role="dialog"
         aria-labelledby="result-viewer-title"
         aria-modal="true"
         ref={dialogRef}
       >
-        {/* Left panel — media tile */}
-        <div className="result-viewer__left">
-          <div
-            className="media-placeholder"
-            role={mediaReady ? undefined : "img"}
-            aria-label={mediaReady ? undefined : `${nodeTitle} — 媒体加载中`}
-          >
-            {currentMediaId ? (
-              <>
-                {/* Single media element — always mounted so load/error fires once and
-                    there's no flicker from mount/unmount on state flip. */}
-                {isVideo ? (
-                  <video
-                    className="media-placeholder__video"
-                    style={mediaReady ? undefined : { display: "none" }}
-                    src={mediaUrl(currentMediaId) + cacheBust}
-                    controls
-                    preload="metadata"
-                    onError={onImgError}
-                    onLoadedData={onImgLoad}
-                  />
-                ) : (
+        {/* Top Bar with Collapsible Sidebar Toggle */}
+        <header className="result-viewer__topbar">
+          <div className="result-viewer__top-left">
+            <button
+              type="button"
+              className="flow-showcase__icon-btn"
+              onClick={closeResultViewer}
+              aria-label="返回画布"
+              title="返回画布 (ESC)"
+            >
+              ←
+            </button>
+            <h2 id="result-viewer-title" className="result-viewer__top-title">
+              {nodeTitle}
+            </h2>
+            <span className="result-viewer__node-id">#{data.shortId}</span>
+            <span
+              className={`result-viewer__status-pill${isGenerating ? " result-viewer__status-pill--busy" : !currentMediaId ? " result-viewer__status-pill--idle" : ""}`}
+            >
+              {isGenerating
+                ? data.status === "queued"
+                  ? "排队中…"
+                  : "生成中…"
+                : currentMediaId
+                  ? "已生成"
+                  : "待生成"}
+            </span>
+          </div>
+          <div className="result-viewer__top-right">
+            <button
+              type="button"
+              className={`flow-showcase__pill-btn${sidebarOpen ? " flow-showcase__pill-btn--active" : ""}`}
+              onClick={() => setSidebarOpen((v) => !v)}
+              title={sidebarOpen ? "收起右侧参数与详情侧边栏，全宽预览画面" : "展开右侧参数设置与详情侧边栏"}
+            >
+              {sidebarOpen ? "收起侧边栏" : "展开参数栏"}
+            </button>
+            <button
+              type="button"
+              className="flow-showcase__done-btn"
+              onClick={closeResultViewer}
+            >
+              完成
+            </button>
+          </div>
+        </header>
+
+        <div className="result-viewer__workspace">
+          {/* Left panel — media stage (expands full width when sidebar is collapsed) */}
+          <div className="result-viewer__left">
+            <div
+              className="media-placeholder"
+              role={mediaReady ? undefined : "img"}
+              aria-label={mediaReady ? undefined : `${nodeTitle} — 媒体展示区`}
+            >
+              {currentMediaId ? (
+                <>
                   <img
                     className="media-placeholder__img"
                     style={mediaReady ? undefined : { display: "none" }}
@@ -527,409 +575,420 @@ export function ResultViewer() {
                     onError={onImgError}
                     onLoad={onImgLoad}
                   />
+                  {!mediaReady && (
+                    <div className="media-placeholder__content">
+                      <span className="media-placeholder__icon" aria-hidden="true">
+                        {ICON[data.type] ?? "□"}
+                      </span>
+                      <span className="media-placeholder__title">{nodeTitle}</span>
+                      <span className="media-placeholder__id">媒体标识：{shortMediaId}</span>
+                    </div>
+                  )}
+                </>
+              ) : isGenerating ? (
+                <div className="media-placeholder__content" role="status">
+                  <span className="flow-showcase__pulse-dot" aria-hidden="true" />
+                  <span className="media-placeholder__title">
+                    {data.status === "queued" ? "已加入 Flow 队列，等待生成…" : "正在渲染画面，完成后自动展示…"}
+                  </span>
+                </div>
+              ) : slotError ? (
+                <div className="media-placeholder__content media-placeholder__content--blocked">
+                  <span className="media-placeholder__icon media-placeholder__icon--warn" aria-hidden="true">⚠</span>
+                  <span className="media-placeholder__title">该变体已被拦截</span>
+                  <span className="media-placeholder__error-code">{slotError}</span>
+                  <span className="media-placeholder__error-hint">
+                    该变体未通过 Google 内容安全审核，批次内其余变体已正常生成。可在右侧「参数设置」调整参考图或使用「AI 润色」后重新生成。
+                  </span>
+                </div>
+              ) : (
+                <div className="media-placeholder__content">
+                  <span className="media-placeholder__icon" aria-hidden="true">
+                    {ICON[data.type] ?? "□"}
+                  </span>
+                  <span className="media-placeholder__title">{nodeTitle}（待生成）</span>
+                  <span className="media-placeholder__id">
+                    在右侧「参数设置」侧边栏配置提示词、模型与画幅后点击生成，成品将直接在此展示。
+                  </span>
+                  {!sidebarOpen && (
+                    <button
+                      type="button"
+                      className="flow-showcase__done-btn"
+                      style={{ marginTop: 6 }}
+                      onClick={() => {
+                        setSidebarTab("params");
+                        setSidebarOpen(true);
+                      }}
+                    >
+                      展开参数设置侧边栏
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {currentMediaId && !mediaReady && (
+              <p className="media-placeholder__hint">{hintText}</p>
+            )}
+
+            <div className="result-viewer__stage-bar">
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                {currentMediaId && (
+                  <button className="media-placeholder__refresh" onClick={handleRefresh}>
+                    刷新预览
+                  </button>
                 )}
-                {!mediaReady && (
-                  <div className="media-placeholder__content">
-                    <span className="media-placeholder__icon" aria-hidden="true">
-                      {ICON[data.type] ?? "□"}
-                    </span>
-                    <span className="media-placeholder__title">{nodeTitle}</span>
-                    <span className="media-placeholder__id">媒体标识：{shortMediaId}</span>
+                {mediaIds.length > 0 && (
+                  <div className="variant-switcher" role="group" aria-label="切换变体">
+                    {mediaIds.map((_id, idx) => {
+                      const chipError = data?.slotErrors?.[idx] ?? null;
+                      const blocked = chipError !== null && chipError !== undefined;
+                      return (
+                        <button
+                          key={idx}
+                          className={`variant-switcher__chip${idx === activeIdx ? " variant-switcher__chip--active" : ""}${blocked ? " variant-switcher__chip--blocked" : ""}`}
+                          onClick={() => setActiveIdx(idx)}
+                          aria-label={blocked ? `变体 ${idx + 1} — 被拦截: ${chipError}` : `变体 ${idx + 1}`}
+                          title={blocked ? `内容安全拦截: ${chipError}` : `变体 ${idx + 1}`}
+                          aria-pressed={idx === activeIdx}
+                        >
+                          {blocked ? "⚠" : idx + 1}
+                        </button>
+                      );
+                    })}
                   </div>
                 )}
-              </>
-            ) : slotError ? (
-              // Blocked variant — Veo's safety classifier rejected this
-              // specific clip while the rest of the batch rendered.
-              // Show the exact filter reason so the user can decide
-              // whether to retry, change inputs, or accept the loss.
-              <div className="media-placeholder__content media-placeholder__content--blocked">
-                <span className="media-placeholder__icon media-placeholder__icon--warn" aria-hidden="true">⚠</span>
-                <span className="media-placeholder__title">该变体已被拦截</span>
-                <span className="media-placeholder__error-code">{slotError}</span>
-                <span className="media-placeholder__error-hint">
-                  该变体未通过 Google 内容安全审核，批次内其余变体已正常生成。可尝试调整上游参考图或提示词后重新生成。
-                </span>
+                {Array.isArray(data.history) && data.history.length >= 2 && rfId && (
+                  <div className="variant-switcher" role="group" aria-label="切换历史版本">
+                    {data.history.map((h, hIdx) => {
+                      const isCurrent = h.mediaId === data.mediaId;
+                      return (
+                        <button
+                          key={h.mediaId}
+                          type="button"
+                          className={`variant-switcher__chip${isCurrent ? " variant-switcher__chip--active" : ""}`}
+                          onClick={() => {
+                            switchNodeHistoryVersion(rfId, hIdx);
+                            setActiveIdx(0);
+                          }}
+                          title={h.prompt ? `第 ${hIdx + 1} 版：${h.prompt.slice(0, 60)}` : `第 ${hIdx + 1} 版`}
+                        >
+                          v{hIdx + 1}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
-            ) : (
-              <div className="media-placeholder__content">
-                <span className="media-placeholder__icon" aria-hidden="true">
-                  {ICON[data.type] ?? "□"}
-                </span>
-                <span className="media-placeholder__title">{nodeTitle}</span>
-                <span className="media-placeholder__id">媒体标识：{shortMediaId}</span>
-              </div>
-            )}
+              <span className="result-viewer__stage-hint">ESC 关闭 · ←/→ 切换变体</span>
+            </div>
           </div>
 
-          {currentMediaId && !mediaReady && (
-            <p className="media-placeholder__hint">{hintText}</p>
-          )}
-
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            {currentMediaId && (
-              <button className="media-placeholder__refresh" onClick={handleRefresh}>
-                刷新预览
-              </button>
-            )}
-            {mediaIds.length > 0 && (
-              <div className="variant-switcher" role="group" aria-label="切换变体">
-                {mediaIds.map((_id, idx) => {
-                  const chipError = data?.slotErrors?.[idx] ?? null;
-                  const blocked = chipError !== null && chipError !== undefined;
-                  return (
-                    <button
-                      key={idx}
-                      className={`variant-switcher__chip${idx === activeIdx ? " variant-switcher__chip--active" : ""}${blocked ? " variant-switcher__chip--blocked" : ""}`}
-                      onClick={() => setActiveIdx(idx)}
-                      aria-label={blocked ? `变体 ${idx + 1} — 被拦截: ${chipError}` : `变体 ${idx + 1}`}
-                      title={blocked ? `内容安全拦截: ${chipError}` : `变体 ${idx + 1}`}
-                      aria-pressed={idx === activeIdx}
-                    >
-                      {blocked ? "⚠" : idx + 1}
-                    </button>
-                  );
-                })}
+          {/* Right Collapsible Sidebar — Parameters & Details */}
+          {sidebarOpen && (
+            <aside className="result-viewer__right result-viewer__right--tabbed" aria-label="参数设置与创作详情侧边栏">
+              <div className="flow-showcase__sidebar-head">
+                <div className="flow-showcase__tabs" role="tablist" aria-label="侧边栏视图切换">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={sidebarTab === "params"}
+                    className={`flow-showcase__tab${sidebarTab === "params" ? " flow-showcase__tab--active" : ""}`}
+                    onClick={() => setSidebarTab("params")}
+                  >
+                    参数设置
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={sidebarTab === "history"}
+                    className={`flow-showcase__tab${sidebarTab === "history" ? " flow-showcase__tab--active" : ""}`}
+                    onClick={() => setSidebarTab("history")}
+                  >
+                    详情与操作
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  className="flow-showcase__collapse-btn"
+                  onClick={() => setSidebarOpen(false)}
+                  title="收起侧边栏，不影响大屏展示"
+                  aria-label="收起侧边栏"
+                >
+                  ›
+                </button>
               </div>
-            )}
-            {Array.isArray(data.history) && data.history.length >= 2 && rfId && (
-              <div className="variant-switcher" role="group" aria-label="切换历史版本">
-                {data.history.map((h, hIdx) => {
-                  const isCurrent = h.mediaId === data.mediaId;
-                  return (
-                    <button
-                      key={h.mediaId}
-                      type="button"
-                      className={`variant-switcher__chip${isCurrent ? " variant-switcher__chip--active" : ""}`}
-                      onClick={() => {
-                        switchNodeHistoryVersion(rfId, hIdx);
-                        setActiveIdx(0);
-                      }}
-                      title={h.prompt ? `第 ${hIdx + 1} 版：${h.prompt.slice(0, 60)}` : `第 ${hIdx + 1} 版`}
-                    >
-                      v{hIdx + 1}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        </div>
 
-        {/* Right panel — metadata */}
-        <div className="result-viewer__right">
-          <div className="result-viewer__status-pill">已生成</div>
+              {sidebarTab === "params" ? (
+                <div className="flow-showcase__sidebar-params">
+                  <GenerationComposer
+                    key={rfId}
+                    rfId={rfId}
+                    initialPrompt={initialParamPrompt}
+                    variant="sidebar"
+                  />
+                </div>
+              ) : (
+                <div className="result-viewer__details-scroll">
+                  <span className="result-viewer__section-label">生成提示词</span>
+                  <p className="result-viewer__prompt">{data.prompt ?? "（未填写提示词）"}</p>
+                  <button
+                    className="result-viewer__edit-prompt"
+                    onClick={() => setSidebarTab("params")}
+                    disabled={llmBusy}
+                    title={llmBusy ? "正在合成提示词，请稍候" : "切换至侧边栏参数设置页修改"}
+                  >
+                    在侧边栏修改参数与提示词 →
+                  </button>
 
-          <h2 id="result-viewer-title" className="result-viewer__node-title">
-            {nodeTitle}
-          </h2>
-          <span className="result-viewer__node-id">#{data.shortId}</span>
-
-          <hr className="result-viewer__divider" />
-
-          <span className="result-viewer__section-label">生成提示词</span>
-          <p className="result-viewer__prompt">{data.prompt ?? "（未填写提示词）"}</p>
-          <button
-            className="result-viewer__edit-prompt"
-            onClick={handleEditPrompt}
-            disabled={llmBusy}
-            title={llmBusy ? "正在合成提示词，请稍候" : undefined}
-          >
-            修改参数与提示词 →
-          </button>
-
-          {refSourceNodes.length > 0 && (
-            <>
-              <hr className="result-viewer__divider" />
-              <span className="result-viewer__section-label">
-                上游参考素材 ({refSourceNodes.length})
-              </span>
-              <div className="ref-source-row">
-                {refSourceNodes.map((r) => {
-                  const refTitle = displayNodeTitle(r.node.data.title, r.node.data.type);
-                  return (
-                    <div
-                      key={r.node.id}
-                      className="ref-source-chip"
-                      title={
-                        r.variantIdx !== null
-                          ? `${refTitle} — 变体 ${r.variantIdx + 1}`
-                          : refTitle
-                      }
-                    >
-                      {r.node.data.type === "video" ? (
-                        <video
-                          className="ref-source-chip__img"
-                          src={mediaUrl(r.mediaId)}
-                          muted
-                          playsInline
-                          preload="metadata"
-                        />
-                      ) : (
-                        <img
-                          className="ref-source-chip__img"
-                          src={mediaUrl(r.mediaId)}
-                          alt={refTitle}
-                        />
-                      )}
-                      {r.variantIdx !== null && (
-                        <span className="ref-source-chip__variant">
-                          v{r.variantIdx + 1}
-                        </span>
-                      )}
-                      <span className="ref-source-chip__id">
-                        #{r.node.data.shortId}
+                  {refSourceNodes.length > 0 && (
+                    <>
+                      <hr className="result-viewer__divider" />
+                      <span className="result-viewer__section-label">
+                        上游参考素材 ({refSourceNodes.length})
                       </span>
-                    </div>
-                  );
-                })}
-              </div>
-            </>
-          )}
+                      <div className="ref-source-row">
+                        {refSourceNodes.map((r) => {
+                          const refTitle = displayNodeTitle(r.node.data.title, r.node.data.type);
+                          return (
+                            <div
+                              key={r.node.id}
+                              className="ref-source-chip"
+                              title={
+                                r.variantIdx !== null
+                                  ? `${refTitle} — 变体 ${r.variantIdx + 1}`
+                                  : refTitle
+                              }
+                            >
+                              {r.node.data.type === "video" ? (
+                                <video
+                                  className="ref-source-chip__img"
+                                  src={mediaUrl(r.mediaId)}
+                                  muted
+                                  playsInline
+                                  preload="metadata"
+                                />
+                              ) : (
+                                <img
+                                  className="ref-source-chip__img"
+                                  src={mediaUrl(r.mediaId)}
+                                  alt={refTitle}
+                                />
+                              )}
+                              {r.variantIdx !== null && (
+                                <span className="ref-source-chip__variant">
+                                  v{r.variantIdx + 1}
+                                </span>
+                              )}
+                              <span className="ref-source-chip__id">
+                                #{r.node.data.shortId}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </>
+                  )}
 
-          <hr className="result-viewer__divider" />
+                  <hr className="result-viewer__divider" />
 
-          <span className="result-viewer__section-label">创作信息</span>
-          <dl className="result-viewer__metadata-grid">
-            <dt>模型</dt>
-            <dd>
-              {metadataModel.isBadge ? (
-                <span className="model-badge">{metadataModel.label}</span>
-              ) : (
-                metadataModel.label
-              )}
-            </dd>
-            {data?.type === "character" && countryLabel(data.charCountry) && (
-              <>
-                <dt>地区</dt>
-                <dd>
-                  <span className="model-badge">{countryLabel(data.charCountry)}</span>
-                </dd>
-              </>
-            )}
-            {data?.type === "character" && vibeLabel(data.charVibe) && (
-              <>
-                <dt>风格</dt>
-                <dd>
-                  <span className="model-badge">{vibeLabel(data.charVibe)}</span>
-                </dd>
-              </>
-            )}
-            <dt>比例</dt>
-            <dd>{formatAspectRatio(data?.aspectRatio)}</dd>
-            {(() => {
-              const rawRes =
-                data?.imageResolution ?? data?.videoResolution ?? data?.resolution;
-              if (!rawRes) return null;
-              return (
-                <>
-                  <dt>清晰度</dt>
-                  <dd>
-                    <span className="model-badge">{String(rawRes).toUpperCase()}</span>
-                  </dd>
-                </>
-              );
-            })()}
-            {typeof data?.seed === "number" && (
-              <>
-                <dt>种子</dt>
-                <dd>{data.seed}</dd>
-              </>
-            )}
-            {data?.type === "video" && (data.mediaProvider === "flow" || data.mediaProvider === "google_video") && (
-              <><dt>引擎</dt><dd>{data.mediaProvider === "flow" ? "Flow 账号" : "Google API（历史结果）"}</dd></>
-            )}
-            {data?.type === "video" && typeof data.durationSeconds === "number" && (
-              <><dt>时长</dt><dd>{data.durationSeconds} 秒</dd></>
-            )}
-            <dt>时间</dt>
-            <dd>{formatRelativeTime(data?.renderedAt)}</dd>
-          </dl>
+                  <span className="result-viewer__section-label">创作信息</span>
+                  <dl className="result-viewer__metadata-grid">
+                    <dt>模型</dt>
+                    <dd>
+                      {metadataModel.isBadge ? (
+                        <span className="model-badge">{metadataModel.label}</span>
+                      ) : (
+                        metadataModel.label
+                      )}
+                    </dd>
+                    {data?.type === "character" && countryLabel(data.charCountry) && (
+                      <>
+                        <dt>地区</dt>
+                        <dd>
+                          <span className="model-badge">{countryLabel(data.charCountry)}</span>
+                        </dd>
+                      </>
+                    )}
+                    {data?.type === "character" && vibeLabel(data.charVibe) && (
+                      <>
+                        <dt>风格</dt>
+                        <dd>
+                          <span className="model-badge">{vibeLabel(data.charVibe)}</span>
+                        </dd>
+                      </>
+                    )}
+                    {data?.type === "character" && (() => {
+                      const vLabel = resolveCharacterVoiceLabel(data.voicePreset, data.voiceCustom);
+                      if (!vLabel) return null;
+                      const vDesc = resolveCharacterVoiceDirective(data.voicePreset, data.voiceCustom);
+                      return (
+                        <>
+                          <dt>固定音色</dt>
+                          <dd>
+                            <span className="model-badge" title={vDesc}>
+                              🎙️ {vLabel}
+                            </span>
+                          </dd>
+                        </>
+                      );
+                    })()}
+                    <dt>比例</dt>
+                    <dd>{formatAspectRatio(data?.aspectRatio)}</dd>
+                    {(() => {
+                      const rawRes =
+                        data?.imageResolution ?? data?.videoResolution ?? data?.resolution;
+                      if (!rawRes) return null;
+                      return (
+                        <>
+                          <dt>清晰度</dt>
+                          <dd>
+                            <span className="model-badge">{String(rawRes).toUpperCase()}</span>
+                          </dd>
+                        </>
+                      );
+                    })()}
+                    {typeof data?.seed === "number" && (
+                      <>
+                        <dt>种子</dt>
+                        <dd>{data.seed}</dd>
+                      </>
+                    )}
+                    <dt>时间</dt>
+                    <dd>{formatRelativeTime(data?.renderedAt)}</dd>
+                  </dl>
 
-          <div className="result-viewer__actions">
-            {llmBusy && (
-              <div className="result-viewer__busy-banner" role="status">
-                <span className="node-header__llm-spinner" aria-hidden="true" />
-                {data?.autoPromptStatus === "pending"
-                  ? "正在构思提示词，请稍候…"
-                  : "正在解析画面内容，请稍候…"}
-              </div>
-            )}
-            {upscaleError && (
-              <div className="result-viewer__upscale-error" role="alert">
-                {upscaleError}
-              </div>
-            )}
-            {currentMediaId &&
-              (isVideo ? (
-                (() => {
-                  const durSec =
-                    typeof data?.durationSeconds === "number" && data.durationSeconds > 0
-                      ? data.durationSeconds
-                      : 8;
-                  const cost1080 = estimateVideoUpscaleCreditCost("1080p", durSec);
-                  const cost4k = estimateVideoUpscaleCreditCost("4k", durSec);
-                  return (
-                    <div className="result-viewer__upscale-row">
-                      <button
-                        type="button"
-                        className="result-viewer__btn result-viewer__btn--upscale"
-                        onClick={() => void handleUpscale("1080p")}
-                        disabled={upscalingRes !== null}
-                        title={
-                          cost1080 > 0
-                            ? `将当前 ${durSec} 秒视频超分重塑为 1080p（需 Plus/Pro/Ultra · 消耗 ${cost1080} 积分）`
-                            : "将当前视频超分重塑为 1080p 高清版（需 Plus / Pro / Ultra · 1–10秒 0 积分）"
-                        }
-                      >
-                        {upscalingRes === "1080p"
-                          ? "1080p 处理中…"
-                          : cost1080 > 0
-                            ? `✨ 1080p 高清 (+${cost1080}积分)`
-                            : "✨ 1080p 高清 (0积分)"}
-                      </button>
-                      <button
-                        type="button"
-                        className="result-viewer__btn result-viewer__btn--upscale"
-                        onClick={() => void handleUpscale("4K")}
-                        disabled={upscalingRes !== null}
-                        title={`将当前 ${durSec} 秒视频超分重塑为 4K 超清版（仅 Ultra · 消耗 ${cost4k} 积分）`}
-                      >
-                        {upscalingRes === "4K"
-                          ? "4K 处理中…"
-                          : `✨ 4K 超清 (+${cost4k}积分)`}
-                      </button>
-                    </div>
-                  );
-                })()
-              ) : (
-                ["image", "character", "visual_asset", "Storyboard"].includes(data.type) && (
-                  <>
-                    <div className="result-viewer__upscale-row">
-                      <button
-                        type="button"
-                        className="result-viewer__btn result-viewer__btn--upscale"
-                        onClick={() => void handleUpscale("2K")}
-                        disabled={upscalingRes !== null}
-                        title="调用官方 SPrCad 将当前图片高清重塑为 2K（Free 即可使用）"
-                      >
-                        {upscalingRes === "2K" ? "2K 处理中…" : "✨ 2K 高清重塑"}
-                      </button>
-                      <button
-                        type="button"
-                        className="result-viewer__btn result-viewer__btn--upscale"
-                        onClick={() => void handleUpscale("4K")}
-                        disabled={upscalingRes !== null}
-                        title="调用官方 SPrCad 将当前图片超清重塑为 4K（需 Ultra）"
-                      >
-                        {upscalingRes === "4K" ? "4K 处理中…" : "✨ 4K 超清重塑"}
-                      </button>
-                    </div>
-                    {data.type !== "Storyboard" && (
-                      <div className="result-viewer__upscale-row">
-                        <button
-                          type="button"
-                          className="result-viewer__btn"
-                          onClick={() => {
-                            closeResultViewer();
-                            void derivePrevScene(rfId);
-                          }}
-                          title="基于当前画面倒推 5 秒前镜头"
-                        >
-                          ⏮ 前一幕
-                        </button>
-                        <button
-                          type="button"
-                          className="result-viewer__btn"
-                          onClick={() => {
-                            closeResultViewer();
-                            void deriveNextScene(rfId);
-                          }}
-                          title="基于当前画面推演 3 秒后下一幕"
-                        >
-                          ⏭ 下一幕
-                        </button>
-                        <button
-                          type="button"
-                          className="result-viewer__btn"
-                          onClick={() => {
-                            closeResultViewer();
-                            window.dispatchEvent(
-                              new CustomEvent("flowboard:open-layer-editor", {
-                                detail: { rfId, tab: "inpaint" },
-                              }),
-                            );
-                          }}
-                          title="打开图层精修画板（局部涂抹重绘 / 消除笔 / 比例扩图）"
-                        >
-                          ❖ 局部精修
-                        </button>
+                  <div className="result-viewer__actions">
+                    {llmBusy && (
+                      <div className="result-viewer__busy-banner" role="status">
+                        <span className="node-header__llm-spinner" aria-hidden="true" />
+                        {data?.autoPromptStatus === "pending"
+                          ? "正在构思提示词，请稍候…"
+                          : "正在解析画面内容，请稍候…"}
                       </div>
                     )}
-                  </>
-                )
-              ))}
-            <button
-              className="result-viewer__btn result-viewer__btn--primary"
-              onClick={handleRegenerate}
-              disabled={llmBusy}
-              title={llmBusy ? "后台正在处理该节点" : undefined}
-            >
-              重新生成
-            </button>
-            <button
-              className="result-viewer__btn"
-              onClick={handleNewVariant}
-              disabled={llmBusy}
-              title="在画布上克隆具有相同上游参考连接的新节点"
-            >
-              克隆新变体节点 +
-            </button>
-            <button
-              className={
-                "result-viewer__btn result-viewer__btn--save"
-                + (savedFlash ? " result-viewer__btn--saved" : "")
-              }
-              onClick={handleSaveToLibrary}
-              disabled={!currentMediaId || saving}
-              title={
-                !currentMediaId
-                  ? "请等待媒体加载完成"
-                  : "将当前画面收藏至跨画布资产库"
-              }
-            >
-              {savedFlash ? "✓ 已收藏至资产库" : saving ? "…" : "★ 收藏至资产库"}
-            </button>
-            {projectId ? (
-              <a
-                className="result-viewer__btn result-viewer__btn--link"
-                href="https://flow.google.com/"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                在 Google Flow 中查看 ↗
-              </a>
-            ) : (
-              <button className="result-viewer__btn" disabled>
-                在 Google Flow 中查看 ↗
-              </button>
-            )}
-          </div>
+                    {upscaleError && (
+                      <div className="result-viewer__upscale-error" role="alert">
+                        {upscaleError}
+                      </div>
+                    )}
+                    {currentMediaId &&
+                      ["image", "character", "visual_asset", "Storyboard"].includes(data.type) && (
+                        <>
+                          <div className="result-viewer__upscale-row">
+                            <button
+                              type="button"
+                              className="result-viewer__btn result-viewer__btn--upscale"
+                              onClick={() => void handleUpscale("2K")}
+                              disabled={upscalingRes !== null}
+                              title="调用官方 SPrCad 将当前图片高清重塑为 2K（Free 即可使用）"
+                            >
+                              {upscalingRes === "2K" ? "2K 处理中…" : "✨ 2K 高清重塑"}
+                            </button>
+                            <button
+                              type="button"
+                              className="result-viewer__btn result-viewer__btn--upscale"
+                              onClick={() => void handleUpscale("4K")}
+                              disabled={upscalingRes !== null}
+                              title="调用官方 SPrCad 将当前图片超清重塑为 4K（需 Ultra）"
+                            >
+                              {upscalingRes === "4K" ? "4K 处理中…" : "✨ 4K 超清重塑"}
+                            </button>
+                          </div>
+                          {data.type !== "Storyboard" && (
+                            <div className="result-viewer__upscale-row">
+                              <button
+                                type="button"
+                                className="result-viewer__btn"
+                                onClick={() => {
+                                  closeResultViewer();
+                                  void derivePrevScene(rfId);
+                                }}
+                                title="基于当前画面倒推 5 秒前镜头"
+                              >
+                                ⏮ 前一幕
+                              </button>
+                              <button
+                                type="button"
+                                className="result-viewer__btn"
+                                onClick={() => {
+                                  closeResultViewer();
+                                  void deriveNextScene(rfId);
+                                }}
+                                title="基于当前画面推演 3 秒后下一幕"
+                              >
+                                ⏭ 下一幕
+                              </button>
+                              <button
+                                type="button"
+                                className="result-viewer__btn"
+                                onClick={() => {
+                                  closeResultViewer();
+                                  window.dispatchEvent(
+                                    new CustomEvent("flowboard:open-layer-editor", {
+                                      detail: { rfId, tab: "inpaint" },
+                                    }),
+                                  );
+                                }}
+                                title="打开图层精修画板（局部涂抹重绘 / 消除笔 / 比例扩图）"
+                              >
+                                ❖ 局部精修
+                              </button>
+                            </div>
+                          )}
+                        </>
+                      )}
+                    <button
+                      className="result-viewer__btn result-viewer__btn--primary"
+                      onClick={handleRegenerate}
+                      disabled={llmBusy}
+                      title={llmBusy ? "后台正在处理该节点" : undefined}
+                    >
+                      重新生成
+                    </button>
+                    <button
+                      className="result-viewer__btn"
+                      onClick={handleNewVariant}
+                      disabled={llmBusy}
+                      title="在画布上克隆具有相同上游参考连接的新节点"
+                    >
+                      克隆新变体节点 +
+                    </button>
+                    <button
+                      className={
+                        "result-viewer__btn result-viewer__btn--save"
+                        + (savedFlash ? " result-viewer__btn--saved" : "")
+                      }
+                      onClick={handleSaveToLibrary}
+                      disabled={!currentMediaId || saving}
+                      title={
+                        !currentMediaId
+                          ? "请等待媒体加载完成"
+                          : "将当前画面收藏至跨画布资产库"
+                      }
+                    >
+                      {savedFlash ? "✓ 已收藏至资产库" : saving ? "…" : "★ 收藏至资产库"}
+                    </button>
+                    {projectId ? (
+                      <a
+                        className="result-viewer__btn result-viewer__btn--link"
+                        href="https://flow.google.com/"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        在 Google Flow 中查看 ↗
+                      </a>
+                    ) : (
+                      <button className="result-viewer__btn" disabled>
+                        在 Google Flow 中查看 ↗
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+            </aside>
+          )}
         </div>
-
-        {/* Footer hint */}
-        <div className="result-viewer__footer-hint">
-          ESC 关闭 · ←/→ 切换变体
-        </div>
-
-        {/* Close button */}
-        <button
-          className="result-viewer__close"
-          onClick={closeResultViewer}
-          aria-label="关闭预览窗口"
-        >
-          ✕
-        </button>
       </div>
     </div>
   );

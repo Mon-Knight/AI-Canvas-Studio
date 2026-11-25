@@ -3,13 +3,14 @@ import { estimateVideoUpscaleCreditCost } from "../constants/models";
 import { displayNodeTitle } from "../constants/nodeLabels";
 import { mediaUrl, type MediaStatus } from "../api/client";
 import { useBoardStore, type FlowNode, type FlowboardNodeData } from "../store/board";
-import { useGenerationStore, type UpstreamRefEntry } from "../store/generation";
+import { useGenerationStore, type UpstreamRefEntry, type ViewerTab } from "../store/generation";
 import { switchNodeHistoryVersion } from "../lib/quickDerive";
 import {
   exportVideoUrlAsGif270p,
   extractVideoFilmstripFrames,
   formatVideoTimecode,
 } from "../lib/videoGifExport";
+import { GenerationComposer } from "./GenerationDialog";
 import "./FlowVideoShowcase.css";
 
 export interface FlowVideoShowcaseProps {
@@ -17,6 +18,7 @@ export interface FlowVideoShowcaseProps {
   node: FlowNode;
   data: FlowboardNodeData;
   nodeTitle: string;
+  initialSidebarTab?: ViewerTab;
   mediaIds: (string | null)[];
   slotErrors: (string | null)[];
   activeIdx: number;
@@ -51,6 +53,7 @@ export function FlowVideoShowcase({
   node,
   data,
   nodeTitle,
+  initialSidebarTab = "history",
   mediaIds,
   slotErrors,
   activeIdx,
@@ -74,8 +77,6 @@ export function FlowVideoShowcase({
   upscaleError,
   onUpscale,
   onClose,
-  onEditPrompt,
-  onRegenerate,
   onNewVariant,
   onSaveToLibrary,
 }: FlowVideoShowcaseProps) {
@@ -86,7 +87,7 @@ export function FlowVideoShowcase({
   const moreMenuRef = useRef<HTMLDivElement>(null);
 
   const [playing, setPlaying] = useState(false);
-  const [muted, setMuted] = useState(false);
+  const [muted, setMuted] = useState(Boolean(data.silentVideo));
   const [looping, setLooping] = useState(true);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(
@@ -95,7 +96,8 @@ export function FlowVideoShowcase({
       : 8,
   );
   const [zoomLevel, setZoomLevel] = useState(1);
-  const [hideHistory, setHideHistory] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarTab, setSidebarTab] = useState<ViewerTab>(initialSidebarTab);
   const [promptExpanded, setPromptExpanded] = useState(false);
   const [copiedPrompt, setCopiedPrompt] = useState(false);
   const [downloadMenuOpen, setDownloadMenuOpen] = useState(false);
@@ -105,6 +107,14 @@ export function FlowVideoShowcase({
   const [filmstripFrames, setFilmstripFrames] = useState<string[]>([]);
   const [scrubbing, setScrubbing] = useState(false);
   const [extending, setExtending] = useState(false);
+
+  const isGenerating = data.status === "queued" || data.status === "running";
+
+  useEffect(() => {
+    setSidebarTab(initialSidebarTab);
+    setSidebarOpen(true);
+    setMuted(Boolean(data.silentVideo));
+  }, [rfId, initialSidebarTab, data.silentVideo]);
 
   const srcUrl = currentMediaId
     ? `${mediaUrl(currentMediaId)}${cacheKey ? `?t=${cacheKey}` : ""}`
@@ -127,6 +137,11 @@ export function FlowVideoShowcase({
   const cost4k = estimateVideoUpscaleCreditCost("4k", durSecForCost);
 
   const historyList = Array.isArray(data.history) ? data.history : [];
+
+  function openParamsSidebar() {
+    setSidebarTab("params");
+    setSidebarOpen(true);
+  }
 
   // Close popovers when clicking outside
   useEffect(() => {
@@ -164,11 +179,20 @@ export function FlowVideoShowcase({
     };
   }, [currentMediaId, cacheKey]);
 
-  // Space bar play/pause inside showcase
+  // Space bar play/pause inside showcase (skip inputs/textarea/select/button)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      const tag = (document.activeElement?.tagName ?? "").toLowerCase();
-      if (tag === "input" || tag === "textarea" || tag === "button") return;
+      const active = document.activeElement;
+      const tag = (active?.tagName ?? "").toLowerCase();
+      if (
+        tag === "input" ||
+        tag === "textarea" ||
+        tag === "select" ||
+        tag === "button" ||
+        (active instanceof HTMLElement && active.isContentEditable)
+      ) {
+        return;
+      }
       if (e.key === " ") {
         e.preventDefault();
         togglePlay();
@@ -331,6 +355,14 @@ export function FlowVideoShowcase({
               {nodeTitle}
             </h2>
             <span className="flow-showcase__short-id">#{data.shortId}</span>
+            {data.silentVideo && (
+              <span
+                className="jm-node-meta-pill jm-node-meta-pill--silent"
+                title="此视频节点已开启「生成静音视频」（无对话、无配乐、无环境音）"
+              >
+                🔇 静音生成
+              </span>
+            )}
           </div>
         </div>
 
@@ -494,11 +526,11 @@ export function FlowVideoShowcase({
 
           <button
             type="button"
-            className={`flow-showcase__pill-btn${!hideHistory ? " flow-showcase__pill-btn--active" : ""}`}
-            onClick={() => setHideHistory((v) => !v)}
-            title={hideHistory ? "展开右侧历史与提示词面板" : "隐藏右侧历史记录，全屏沉浸预览"}
+            className={`flow-showcase__pill-btn${sidebarOpen ? " flow-showcase__pill-btn--active" : ""}`}
+            onClick={() => setSidebarOpen((v) => !v)}
+            title={sidebarOpen ? "收回右侧参数与历史侧边栏，全宽沉浸播放视频" : "展开右侧参数设置与历史侧边栏"}
           >
-            {hideHistory ? "显示历史记录" : "隐藏历史记录"}
+            {sidebarOpen ? "收起侧边栏" : "展开参数栏"}
           </button>
 
           <div className="flow-showcase__menu-wrap" ref={moreMenuRef}>
@@ -525,22 +557,10 @@ export function FlowVideoShowcase({
                   disabled={llmBusy}
                   onClick={() => {
                     setMoreMenuOpen(false);
-                    onEditPrompt();
+                    openParamsSidebar();
                   }}
                 >
-                  修改参数与提示词
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="flow-showcase__dropdown-item"
-                  disabled={llmBusy}
-                  onClick={() => {
-                    setMoreMenuOpen(false);
-                    onRegenerate();
-                  }}
-                >
-                  重新生成当前视频
+                  打开参数设置侧边栏
                 </button>
                 <button
                   type="button"
@@ -579,15 +599,19 @@ export function FlowVideoShowcase({
         </div>
       </header>
 
-      {/* Main Workspace: Stage + Collapsible Right History/Prompt Sidebar */}
+      {/* Main Workspace: Stage + Collapsible Right Parameters & History Sidebar */}
       <div className="flow-showcase__body">
         <div className="flow-showcase__stage-col">
           <div className="flow-showcase__stage" ref={stageRef}>
-            {(upscalingRes || gifProgress !== null) && (
+            {(upscalingRes || gifProgress !== null || (isGenerating && Boolean(currentMediaId))) && (
               <div className="flow-showcase__floating-toast" role="status">
                 {upscalingRes
                   ? `✨ 正在调用 Flow 重塑 ${upscalingRes} 高清版本…`
-                  : `🎞️ 正在导出 270p GIF 动画（${gifProgress}%）…`}
+                  : gifProgress !== null
+                    ? `🎞️ 正在导出 270p GIF 动画（${gifProgress}%）…`
+                    : data.status === "queued"
+                      ? "⏳ 新视频已加入生成队列，完成后将自动在此刷新预览…"
+                      : "✨ 正在渲染新视频成片，完成后将自动在此刷新预览…"}
               </div>
             )}
             {(upscaleError || gifError) && (
@@ -642,6 +666,16 @@ export function FlowVideoShowcase({
                   </div>
                 )}
               </div>
+            ) : isGenerating ? (
+              <div className="flow-showcase__blocked" role="status">
+                <span className="flow-showcase__pulse-dot" aria-hidden="true" />
+                <div className="flow-showcase__blocked-title">
+                  {data.status === "queued" ? "视频已加入 Flow 队列，等待开始…" : "正在生成视频，完成后将自动在此播放…"}
+                </div>
+                <p className="flow-showcase__blocked-hint">
+                  你可以收起右侧参数栏等待预览，或先返回画布继续编排其他分镜节点。
+                </p>
+              </div>
             ) : currentSlotError ? (
               <div className="flow-showcase__blocked" role="alert">
                 <div className="flow-showcase__blocked-icon">⚠</div>
@@ -650,11 +684,26 @@ export function FlowVideoShowcase({
                 </div>
                 <div className="flow-showcase__blocked-code">{currentSlotError}</div>
                 <p className="flow-showcase__blocked-hint">
-                  可使用「修改参数 → AI 润色」自动优化安全词后重新生成。
+                  可在右侧「参数设置 → AI 润色」自动优化安全词后重新生成。
                 </p>
               </div>
             ) : (
-              <div className="flow-showcase__blocked">暂无可播放的视频成片</div>
+              <div className="flow-showcase__blocked">
+                <div className="flow-showcase__empty-badge" aria-hidden="true">▶</div>
+                <div className="flow-showcase__blocked-title">视频展示区（待生成）</div>
+                <p className="flow-showcase__blocked-hint">
+                  在右侧「参数设置」侧边栏配置提示词、参考模式、运镜与模型参数，生成完成后视频将直接在此展示并支持逐帧预览。
+                </p>
+                {!sidebarOpen && (
+                  <button
+                    type="button"
+                    className="flow-showcase__done-btn"
+                    onClick={openParamsSidebar}
+                  >
+                    展开参数设置侧边栏
+                  </button>
+                )}
+              </div>
             )}
           </div>
 
@@ -760,133 +809,178 @@ export function FlowVideoShowcase({
           </div>
         </div>
 
-        {/* Right Collapsible History & Inspector Panel */}
-        {!hideHistory && (
-          <aside className="flow-showcase__sidebar" aria-label="生成历史与提示词详情">
-            <div className="flow-showcase__side-card">
-              <div className="flow-showcase__side-head">
-                <span className="flow-showcase__side-label">当前视频信息</span>
-                <span className="flow-showcase__res-badge">
-                  {currentResRaw.toUpperCase()} · {Math.round(effectiveDuration)}s
-                </span>
-              </div>
-
-              {refSourceNodes.length > 0 && (
-                <div className="flow-showcase__refs">
-                  <span className="flow-showcase__sub-label">
-                    上游参考 ({refSourceNodes.length})
-                  </span>
-                  <div className="flow-showcase__ref-row">
-                    {refSourceNodes.map((r) => {
-                      const refTitle = displayNodeTitle(r.node.data.title, r.node.data.type);
-                      return (
-                        <div key={r.edgeId} className="flow-showcase__ref-thumb" title={refTitle}>
-                          {r.node.data.type === "video" ? (
-                            <video src={mediaUrl(r.mediaId)} muted playsInline preload="metadata" />
-                          ) : (
-                            <img src={mediaUrl(r.mediaId)} alt={refTitle} />
-                          )}
-                          <span>#{r.node.data.shortId}</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              <div className="flow-showcase__prompt-section">
-                <div className="flow-showcase__side-head">
-                  <span className="flow-showcase__sub-label">提示词</span>
-                  <button
-                    type="button"
-                    className="flow-showcase__link-btn"
-                    onClick={() => void handleCopyPrompt()}
-                  >
-                    {copiedPrompt ? "✓ 已复制" : "复制"}
-                  </button>
-                </div>
-                <p
-                  className={`flow-showcase__prompt-text${promptExpanded ? " flow-showcase__prompt-text--expanded" : ""}`}
-                >
-                  {data.prompt || "（未填写提示词）"}
-                </p>
-                {(data.prompt?.length ?? 0) > 100 && (
-                  <button
-                    type="button"
-                    className="flow-showcase__link-btn"
-                    onClick={() => setPromptExpanded((v) => !v)}
-                  >
-                    {promptExpanded ? "收起提示词" : "展开完整提示词"}
-                  </button>
-                )}
-              </div>
-
-              <dl className="flow-showcase__meta">
-                <dt>模型</dt>
-                <dd>{metadataModel.label}</dd>
-                <dt>画幅</dt>
-                <dd>{aspectLabel}</dd>
-                <dt>清晰度</dt>
-                <dd>{currentResRaw.toUpperCase()}</dd>
-                <dt>生成时间</dt>
-                <dd>{relativeTimeLabel}</dd>
-              </dl>
-
-              <div className="flow-showcase__side-actions">
+        {/* Right Collapsible Parameters & History Sidebar */}
+        {sidebarOpen && (
+          <aside className="flow-showcase__sidebar" aria-label="视频参数设置与历史详情侧边栏">
+            <div className="flow-showcase__sidebar-head">
+              <div className="flow-showcase__tabs" role="tablist" aria-label="侧边栏视图切换">
                 <button
                   type="button"
-                  className="flow-showcase__side-btn"
-                  onClick={onEditPrompt}
-                  disabled={llmBusy}
+                  role="tab"
+                  aria-selected={sidebarTab === "params"}
+                  className={`flow-showcase__tab${sidebarTab === "params" ? " flow-showcase__tab--active" : ""}`}
+                  onClick={() => setSidebarTab("params")}
                 >
-                  修改参数
+                  参数设置
                 </button>
                 <button
                   type="button"
-                  className="flow-showcase__side-btn flow-showcase__side-btn--primary"
-                  onClick={onRegenerate}
-                  disabled={llmBusy}
+                  role="tab"
+                  aria-selected={sidebarTab === "history"}
+                  className={`flow-showcase__tab${sidebarTab === "history" ? " flow-showcase__tab--active" : ""}`}
+                  onClick={() => setSidebarTab("history")}
                 >
-                  重新生成
+                  历史与详情
                 </button>
               </div>
+              <button
+                type="button"
+                className="flow-showcase__collapse-btn"
+                onClick={() => setSidebarOpen(false)}
+                title="收起侧边栏，不影响视频大屏展示"
+                aria-label="收起侧边栏"
+              >
+                ›
+              </button>
             </div>
 
-            {historyList.length >= 2 && (
-              <div className="flow-showcase__side-card">
-                <div className="flow-showcase__side-head">
-                  <span className="flow-showcase__side-label">
-                    历史生成版本 ({historyList.length})
-                  </span>
-                </div>
-                <div className="flow-showcase__history-list">
-                  {historyList.map((entry, hIdx) => {
-                    const isCurrent = entry.mediaId === data.mediaId;
-                    return (
+            {sidebarTab === "params" ? (
+              <div className="flow-showcase__sidebar-params">
+                <GenerationComposer
+                  key={rfId}
+                  rfId={rfId}
+                  initialPrompt={data.prompt ?? ""}
+                  variant="sidebar"
+                />
+              </div>
+            ) : (
+              <div className="flow-showcase__sidebar-scroll">
+                <div className="flow-showcase__side-card">
+                  <div className="flow-showcase__side-head">
+                    <span className="flow-showcase__side-label">当前视频信息</span>
+                    <span className="flow-showcase__res-badge">
+                      {currentResRaw.toUpperCase()} · {Math.round(effectiveDuration)}s
+                    </span>
+                  </div>
+
+                  {refSourceNodes.length > 0 && (
+                    <div className="flow-showcase__refs">
+                      <span className="flow-showcase__sub-label">
+                        上游参考 ({refSourceNodes.length})
+                      </span>
+                      <div className="flow-showcase__ref-row">
+                        {refSourceNodes.map((r) => {
+                          const refTitle = displayNodeTitle(r.node.data.title, r.node.data.type);
+                          return (
+                            <div key={r.edgeId} className="flow-showcase__ref-thumb" title={refTitle}>
+                              {r.node.data.type === "video" ? (
+                                <video src={mediaUrl(r.mediaId)} muted playsInline preload="metadata" />
+                              ) : (
+                                <img src={mediaUrl(r.mediaId)} alt={refTitle} />
+                              )}
+                              <span>#{r.node.data.shortId}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="flow-showcase__prompt-section">
+                    <div className="flow-showcase__side-head">
+                      <span className="flow-showcase__sub-label">提示词</span>
                       <button
-                        key={`${hIdx}:${entry.mediaId}`}
                         type="button"
-                        className={`flow-showcase__history-item${isCurrent ? " flow-showcase__history-item--active" : ""}`}
-                        onClick={() => {
-                          switchNodeHistoryVersion(rfId, hIdx);
-                          setActiveIdx(0);
-                        }}
+                        className="flow-showcase__link-btn"
+                        onClick={() => void handleCopyPrompt()}
                       >
-                        <video
-                          className="flow-showcase__history-thumb"
-                          src={mediaUrl(entry.mediaId)}
-                          muted
-                          playsInline
-                          preload="metadata"
-                        />
-                        <div className="flow-showcase__history-info">
-                          <strong>第 {hIdx + 1} 版{isCurrent ? " · 当前" : ""}</strong>
-                          <span>{(entry.prompt ?? "").slice(0, 46) || "视频版本"}</span>
-                        </div>
+                        {copiedPrompt ? "✓ 已复制" : "复制"}
                       </button>
-                    );
-                  })}
+                    </div>
+                    <p
+                      className={`flow-showcase__prompt-text${promptExpanded ? " flow-showcase__prompt-text--expanded" : ""}`}
+                    >
+                      {data.prompt || "（未填写提示词）"}
+                    </p>
+                    {(data.prompt?.length ?? 0) > 100 && (
+                      <button
+                        type="button"
+                        className="flow-showcase__link-btn"
+                        onClick={() => setPromptExpanded((v) => !v)}
+                      >
+                        {promptExpanded ? "收起提示词" : "展开完整提示词"}
+                      </button>
+                    )}
+                  </div>
+
+                  <dl className="flow-showcase__meta">
+                    <dt>模型</dt>
+                    <dd>{metadataModel.label}</dd>
+                    <dt>画幅</dt>
+                    <dd>{aspectLabel}</dd>
+                    <dt>清晰度</dt>
+                    <dd>{currentResRaw.toUpperCase()}</dd>
+                    <dt>生成时间</dt>
+                    <dd>{relativeTimeLabel}</dd>
+                  </dl>
+
+                  <div className="flow-showcase__side-actions">
+                    <button
+                      type="button"
+                      className="flow-showcase__side-btn"
+                      onClick={openParamsSidebar}
+                      disabled={llmBusy}
+                    >
+                      参数设置
+                    </button>
+                    <button
+                      type="button"
+                      className="flow-showcase__side-btn flow-showcase__side-btn--primary"
+                      onClick={openParamsSidebar}
+                      disabled={llmBusy}
+                    >
+                      调整并重新生成
+                    </button>
+                  </div>
                 </div>
+
+                {historyList.length >= 2 && (
+                  <div className="flow-showcase__side-card">
+                    <div className="flow-showcase__side-head">
+                      <span className="flow-showcase__side-label">
+                        历史生成版本 ({historyList.length})
+                      </span>
+                    </div>
+                    <div className="flow-showcase__history-list">
+                      {historyList.map((entry, hIdx) => {
+                        const isCurrent = entry.mediaId === data.mediaId;
+                        return (
+                          <button
+                            key={`${hIdx}:${entry.mediaId}`}
+                            type="button"
+                            className={`flow-showcase__history-item${isCurrent ? " flow-showcase__history-item--active" : ""}`}
+                            onClick={() => {
+                              switchNodeHistoryVersion(rfId, hIdx);
+                              setActiveIdx(0);
+                            }}
+                          >
+                            <video
+                              className="flow-showcase__history-thumb"
+                              src={mediaUrl(entry.mediaId)}
+                              muted
+                              playsInline
+                              preload="metadata"
+                            />
+                            <div className="flow-showcase__history-info">
+                              <strong>第 {hIdx + 1} 版{isCurrent ? " · 当前" : ""}</strong>
+                              <span>{(entry.prompt ?? "").slice(0, 46) || "视频版本"}</span>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </aside>

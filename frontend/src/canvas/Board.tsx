@@ -4,10 +4,14 @@ import {
   Background,
   BackgroundVariant,
   ReactFlow,
+  SelectionMode,
   applyEdgeChanges,
   applyNodeChanges,
+  useInternalNode,
   useReactFlow,
   useStore,
+  useStoreApi,
+  useViewport,
   type Connection,
   type EdgeChange,
   type NodeChange,
@@ -18,9 +22,18 @@ import {
 import { useBoardStore, type FlowNode, type NodeType } from "../store/board";
 import { useReferencesStore } from "../store/references";
 import { SequencePlayerModal } from "../components/SequencePlayerModal";
+import { GenerationComposer } from "../components/GenerationDialog";
 import { NodeCard } from "./NodeCard";
+import { SelectionActionBar } from "./SelectionActionBar";
+import { SnapGuidesOverlay } from "./SnapGuidesOverlay";
 import { VariantEdge } from "./VariantEdge";
 import { ViewportCapsule } from "./ViewportCapsule";
+import {
+  computeSmartSnapGuides,
+  resolveSnapRect,
+  type SnapGuideLine,
+  type SnapNodeRect,
+} from "../lib/smartSnapGuides";
 import { useGenerationStore } from "../store/generation";
 import { patchNode, uploadImage } from "../api/client";
 import { requestAutoBrief } from "../api/autoBrief";
@@ -38,6 +51,7 @@ import {
   IconVisualAsset,
   JimengPrismLogo,
 } from "../components/JimengIcons";
+import "./ContextualPromptBar.css";
 
 const nodeTypes = {
   character: NodeCard,
@@ -222,6 +236,90 @@ function QuickCreatePopover({
 const INITIAL_FIT_OPTIONS = { maxZoom: 1 };
 const ACCEPT_IMAGE_MIME = "image/png,image/jpeg,image/webp,image/gif";
 
+function AnchoredNodeDropdownInner({ rfId, prompt }: { rfId: string; prompt: string }) {
+  const closeGenerationDialog = useGenerationStore((s) => s.closeGenerationDialog);
+  const exists = useBoardStore((s) => s.nodes.some((n) => n.id === rfId));
+  const internal = useInternalNode(rfId);
+  const { x, y, zoom } = useViewport();
+  const width = useStore((state) => state.width);
+  const height = useStore((state) => state.height);
+
+  if (!exists || width < 120 || height < 120) return null;
+
+  const gutter = width >= 720 ? 72 : 14;
+  const panelWidth = Math.min(648, Math.max(300, width - gutter * 2));
+  const measuredWidth = internal?.measured.width;
+  const measuredHeight = internal?.measured.height;
+
+  if (!internal || !measuredWidth || !measuredHeight) {
+    return (
+      <div
+        className="jm-context-anchor"
+        style={{
+          left: Math.max(gutter, (width - panelWidth) / 2),
+          width: panelWidth,
+          bottom: 56,
+          maxHeight: Math.min(520, Math.max(220, height - 116)),
+        }}
+      >
+        <GenerationComposer
+          key={rfId}
+          rfId={rfId}
+          initialPrompt={prompt}
+          onClose={closeGenerationDialog}
+          variant="dropdown"
+        />
+      </div>
+    );
+  }
+
+  const origin = internal.internals.positionAbsolute;
+  const left = x + origin.x * zoom;
+  const top = y + origin.y * zoom;
+  const right = left + measuredWidth * zoom;
+  const bottom = top + measuredHeight * zoom;
+  const offScreen = right < 0 || left > width || bottom < 0 || top > height;
+
+  const center = (left + right) / 2;
+  const panelLeft = offScreen
+    ? Math.max(gutter, (width - panelWidth) / 2)
+    : Math.max(gutter, Math.min(center - panelWidth / 2, width - gutter - panelWidth));
+  const below = height - bottom - 22;
+  const above = top - 68;
+  const preferAbove = !offScreen && below < 270 && above > below;
+  const fit = preferAbove ? above : below;
+  const fallback = offScreen || fit < 230;
+
+  return (
+    <div
+      className="jm-context-anchor"
+      style={{
+        left: panelLeft,
+        width: panelWidth,
+        top: fallback ? undefined : preferAbove ? top - 16 : bottom + 14,
+        bottom: fallback ? 56 : undefined,
+        transform: !fallback && preferAbove ? "translateY(-100%)" : undefined,
+        maxHeight: fallback ? Math.min(520, Math.max(220, height - 116)) : Math.min(560, fit),
+      }}
+    >
+      <GenerationComposer
+        key={rfId}
+        rfId={rfId}
+        initialPrompt={prompt}
+        onClose={closeGenerationDialog}
+        variant="dropdown"
+      />
+    </div>
+  );
+}
+
+function AnchoredNodeDropdown() {
+  const rfId = useGenerationStore((s) => s.openDialog.rfId);
+  const prompt = useGenerationStore((s) => s.openDialog.prompt);
+  if (rfId === null) return null;
+  return <AnchoredNodeDropdownInner key={rfId} rfId={rfId} prompt={prompt} />;
+}
+
 export function Board() {
   const nodes = useBoardStore((s) => s.nodes);
   const edges = useBoardStore((s) => s.edges);
@@ -234,16 +332,38 @@ export function Board() {
   const deleteEdgeByRfId = useBoardStore((s) => s.deleteEdgeByRfId);
   const importHuabuFile = useBoardStore((s) => s.importHuabuFile);
   const applyStarterRecipe = useBoardStore((s) => s.applyStarterRecipe);
-  const groupNodes = useBoardStore((s) => s.groupNodes);
-  const ungroupNodes = useBoardStore((s) => s.ungroupNodes);
-  const exportCurrentBoardHuabu = useBoardStore((s) => s.exportCurrentBoardHuabu);
+  const batchUpdateNodePositions = useBoardStore((s) => s.batchUpdateNodePositions);
   const setPanelOpen = useReferencesStore((s) => s.setPanelOpen);
   const { screenToFlowPosition, fitView, getZoom } = useReactFlow();
+  const rfStoreApi = useStoreApi();
   const wrapperRef = useRef<HTMLDivElement>(null);
   const huabuInputRef = useRef<HTMLInputElement>(null);
   const dragDepthRef = useRef(0);
   const [dragHintVisible, setDragHintVisible] = useState(false);
   const [starterBusyId, setStarterBusyId] = useState<string | null>(null);
+  const [interactionMode, setInteractionMode] = useState<"select" | "hand">("select");
+  const [spacePanning, setSpacePanning] = useState(false);
+  const [snapEnabled, setSnapEnabled] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("flowboard.smartSnap") !== "0";
+    } catch {
+      return true;
+    }
+  });
+  const [snapGuides, setSnapGuides] = useState<SnapGuideLine[]>([]);
+  const altHeldRef = useRef(false);
+  const toggleSnapEnabled = useCallback(() => {
+    setSnapEnabled((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("flowboard.smartSnap", next ? "1" : "0");
+      } catch {
+        // non-fatal
+      }
+      if (!next) setSnapGuides([]);
+      return next;
+    });
+  }, []);
 
   const [quickMenu, setQuickMenu] = useState<QuickMenuState | null>(null);
   const quickMenuOpenedAtRef = useRef(0);
@@ -252,9 +372,23 @@ export function Board() {
     // 连线松手触发 onConnectEnd 后同一手势可能派发合成 click，留 80ms 保护窗口
     if (performance.now() - quickMenuOpenedAtRef.current < 80) return;
     setQuickMenu(null);
+    useGenerationStore.getState().closeGenerationDialog();
+  }, []);
+  const handleNodeClick = useCallback((_event: React.MouseEvent, node: FlowNode) => {
+    setQuickMenu(null);
+    const openId = useGenerationStore.getState().openDialog.rfId;
+    if (openId !== null && openId !== node.id) {
+      useGenerationStore.getState().closeGenerationDialog();
+    }
+  }, []);
+  const onSelectionStart = useCallback(() => {
+    setQuickMenu(null);
+    useGenerationStore.getState().closeGenerationDialog();
   }, []);
   const [edgesHidden, setEdgesHidden] = useState(false);
   const [sequenceOpen, setSequenceOpen] = useState(false);
+  const sequenceOpenRef = useRef(false);
+  sequenceOpenRef.current = sequenceOpen;
   const [focusVideo, setFocusVideo] = useState<string | null>(null);
 
   useEffect(() => {
@@ -427,9 +561,100 @@ export function Board() {
           void deleteNodeByRfId(c.id);
         }
       }
-      setNodes(applyNodeChanges(changes, useBoardStore.getState().nodes) as FlowNode[]);
+
+      const currentNodes = useBoardStore.getState().nodes;
+      let effectiveChanges = changes;
+      const draggingPosChanges = changes.filter(
+        (c): c is Extract<NodeChange, { type: "position" }> =>
+          c.type === "position" && c.dragging === true && c.position !== undefined,
+      );
+      const endedDragging = changes.some(
+        (c) => c.type === "position" && c.dragging === false,
+      );
+
+      if (draggingPosChanges.length > 0 && snapEnabled && !altHeldRef.current) {
+        const nodeLookup = rfStoreApi.getState().nodeLookup;
+        const draggingIds = new Set(draggingPosChanges.map((c) => c.id));
+        const nodeById = new Map<string, FlowNode>();
+        for (const n of currentNodes) nodeById.set(n.id, n);
+
+        const targets: SnapNodeRect[] = [];
+        for (const n of currentNodes) {
+          if (draggingIds.has(n.id)) continue;
+          const internal = nodeLookup.get(n.id);
+          targets.push(resolveSnapRect(n, internal?.measured));
+        }
+
+        const zoom = Math.max(0.25, getZoom());
+        const threshold = Math.max(4, Math.min(11, 7 / zoom));
+
+        if (draggingPosChanges.length === 1) {
+          const ch = draggingPosChanges[0];
+          const draggedNode = nodeById.get(ch.id);
+          if (draggedNode && ch.position) {
+            const internal = nodeLookup.get(ch.id);
+            const dragRect = resolveSnapRect(draggedNode, internal?.measured, ch.position);
+            const snap = computeSmartSnapGuides(dragRect, targets, threshold);
+            if (snap.didSnapX || snap.didSnapY) {
+              effectiveChanges = changes.map((c) =>
+                c === ch
+                  ? { ...ch, position: { x: snap.snappedX, y: snap.snappedY } }
+                  : c,
+              );
+            }
+            setSnapGuides(snap.guides);
+          }
+        } else {
+          // Multi-node drag: snap the combined visual bounding box of all dragged modules
+          const draggedRects: SnapNodeRect[] = [];
+          for (const ch of draggingPosChanges) {
+            const dn = nodeById.get(ch.id);
+            if (!dn || !ch.position) continue;
+            draggedRects.push(resolveSnapRect(dn, nodeLookup.get(ch.id)?.measured, ch.position));
+          }
+          if (draggedRects.length > 0) {
+            const minX = Math.min(...draggedRects.map((r) => r.x));
+            const maxR = Math.max(...draggedRects.map((r) => r.x + r.width));
+            const minTop = Math.min(...draggedRects.map((r) => r.y + r.surfaceTopOffset));
+            const maxB = Math.max(...draggedRects.map((r) => r.y + r.height - (r.surfaceBottomInset ?? 0)));
+            const groupRect: SnapNodeRect = {
+              id: "__selection__",
+              x: minX,
+              y: minTop,
+              width: maxR - minX,
+              height: Math.max(24, maxB - minTop),
+              surfaceTopOffset: 0,
+              surfaceBottomInset: 0,
+            };
+            const snap = computeSmartSnapGuides(groupRect, targets, threshold);
+            const dx = snap.snappedX - groupRect.x;
+            const dy = snap.snappedY - groupRect.y;
+            if (dx !== 0 || dy !== 0) {
+              const dragSet = new Set(draggingPosChanges);
+              effectiveChanges = changes.map((c) => {
+                if (
+                  c.type === "position" &&
+                  dragSet.has(c) &&
+                  c.position
+                ) {
+                  return {
+                    ...c,
+                    position: { x: c.position.x + dx, y: c.position.y + dy },
+                  };
+                }
+                return c;
+              });
+            }
+            setSnapGuides(snap.guides);
+          }
+        }
+      } else if (endedDragging || (draggingPosChanges.length > 0 && (!snapEnabled || altHeldRef.current))) {
+        setSnapGuides((prev) => (prev.length > 0 ? [] : prev));
+      }
+
+      setNodes(applyNodeChanges(effectiveChanges, currentNodes) as FlowNode[]);
     },
-    [setNodes, deleteNodeByRfId],
+    [setNodes, deleteNodeByRfId, snapEnabled, rfStoreApi, getZoom],
   );
 
   const onEdgesChange = useCallback(
@@ -445,10 +670,28 @@ export function Board() {
   );
 
   const onNodeDragStop: OnNodeDrag<FlowNode> = useCallback(
-    (_event, node) => {
+    (_event, node, draggedNodes) => {
+      setSnapGuides([]);
+      if (Array.isArray(draggedNodes) && draggedNodes.length > 1) {
+        void batchUpdateNodePositions(
+          draggedNodes.map((n) => ({ rfId: n.id, x: n.position.x, y: n.position.y })),
+        );
+        return;
+      }
       void persistNodePosition(node.id, node.position);
     },
-    [persistNodePosition],
+    [persistNodePosition, batchUpdateNodePositions],
+  );
+
+  const onSelectionDragStop = useCallback(
+    (_event: React.MouseEvent, draggedNodes: FlowNode[]) => {
+      setSnapGuides([]);
+      if (draggedNodes.length === 0) return;
+      void batchUpdateNodePositions(
+        draggedNodes.map((n) => ({ rfId: n.id, x: n.position.x, y: n.position.y })),
+      );
+    },
+    [batchUpdateNodePositions],
   );
 
   const onConnect = useCallback(
@@ -545,19 +788,39 @@ export function Board() {
     [],
   );
 
-  // 快捷键：选中节点按 g 打开详细参数，按 l 切换资产库，多选 Ctrl/Cmd+G 编组分镜
+  // 快捷键：V 框选模式、H 抓手平移、按住空格临时拖动画布、G 打开详细参数、L 切换资产库、Ctrl/Cmd+G 编组分镜
   useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
+    const isEditableFocused = () => {
       const active = document.activeElement;
       const tag = (active?.tagName ?? "").toLowerCase();
-      if (
+      return (
         tag === "input" ||
         tag === "textarea" ||
         tag === "select" ||
         (active instanceof HTMLElement && active.isContentEditable)
-      ) {
+      );
+    };
+    const isModalActive = () =>
+      useGenerationStore.getState().openViewer.rfId !== null ||
+      useReferencesStore.getState().panelOpen ||
+      sequenceOpenRef.current;
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Alt") {
+        altHeldRef.current = true;
+        setSnapGuides((prev) => (prev.length > 0 ? [] : prev));
         return;
       }
+      if (isEditableFocused()) return;
+
+      if (e.code === "Space" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const activeTag = (document.activeElement?.tagName ?? "").toLowerCase();
+        if (activeTag === "button" || activeTag === "a" || isModalActive()) return;
+        e.preventDefault();
+        if (!e.repeat) setSpacePanning(true);
+        return;
+      }
+
       if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "g") {
         const picked = useBoardStore.getState().nodes.filter((n) => n.selected);
         if (picked.length >= 2) {
@@ -568,6 +831,16 @@ export function Board() {
       }
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const key = e.key.toLowerCase();
+      if (key === "v" && !isModalActive()) {
+        e.preventDefault();
+        setInteractionMode("select");
+        return;
+      }
+      if (key === "h" && !isModalActive()) {
+        e.preventDefault();
+        setInteractionMode("hand");
+        return;
+      }
       if (key === "l") {
         e.preventDefault();
         const refs = useReferencesStore.getState();
@@ -577,7 +850,7 @@ export function Board() {
       }
       if (key !== "g") return;
 
-      const selectedNodes = useBoardStore
+      const pickedGenerable = useBoardStore
         .getState()
         .nodes.filter(
           (n) =>
@@ -586,23 +859,47 @@ export function Board() {
               n.data.type,
             ),
         );
-      if (selectedNodes.length === 0) return;
+      if (pickedGenerable.length === 0) return;
       e.preventDefault();
-      const target = selectedNodes[0];
+      const target = pickedGenerable[0];
       const initialPrompt =
         (target.data.type === "Storyboard" ? target.data.aiBrief : target.data.prompt) ?? "";
       useGenerationStore.getState().openGenerationDialog(target.id, initialPrompt);
     };
+
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code === "Space") setSpacePanning(false);
+      if (e.key === "Alt") altHeldRef.current = false;
+    };
+    const onBlur = () => {
+      setSpacePanning(false);
+      altHeldRef.current = false;
+      setSnapGuides([]);
+    };
+
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onBlur);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onBlur);
+    };
   }, []);
 
   const selectedNodes = nodes.filter((node) => node.selected);
+  const effectivePanMode = interactionMode === "hand" || spacePanning;
+  const wrapperClassName = [
+    edgesHidden ? "jm-edges-hidden" : "",
+    effectivePanMode ? "jm-canvas-mode--hand" : "jm-canvas-mode--select",
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   return (
     <div
       ref={wrapperRef}
-      className={edgesHidden ? "jm-edges-hidden" : undefined}
+      className={wrapperClassName}
       style={{ flex: 1, minHeight: 0, width: "100%", height: "100%", position: "relative" }}
       onDragEnter={onCanvasDragEnter}
       onDragLeave={onCanvasDragLeave}
@@ -700,15 +997,21 @@ export function Board() {
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onNodeDragStop={onNodeDragStop}
+        onSelectionDragStop={onSelectionDragStop}
+        onSelectionStart={onSelectionStart}
         onConnect={onConnect}
         onConnectStart={onConnectStart}
         onConnectEnd={onConnectEnd}
         onNodesDelete={onNodesDelete}
         onEdgesDelete={onEdgesDelete}
         onPaneClick={handlePaneClick}
-        onNodeClick={closeQuickMenu}
+        onPaneContextMenu={(e) => e.preventDefault()}
+        onNodeClick={handleNodeClick}
         onEdgeClick={closeQuickMenu}
         onNodeDoubleClick={onNodeDoubleClick}
+        selectionOnDrag={!effectivePanMode}
+        selectionMode={SelectionMode.Partial}
+        panOnDrag={effectivePanMode ? true : [1, 2]}
         zoomOnDoubleClick={false}
         deleteKeyCode={["Backspace", "Delete"]}
         defaultEdgeOptions={defaultEdgeOptions}
@@ -727,7 +1030,14 @@ export function Board() {
           edgesHidden={edgesHidden}
           onToggleEdges={() => setEdgesHidden((v) => !v)}
           onOpenSequence={() => setSequenceOpen(true)}
+          interactionMode={effectivePanMode ? "hand" : "select"}
+          onChangeInteractionMode={setInteractionMode}
+          snapEnabled={snapEnabled}
+          onToggleSnap={toggleSnapEnabled}
         />
+        <SnapGuidesOverlay guides={snapGuides} />
+        <SelectionActionBar selectedNodes={selectedNodes} />
+        <AnchoredNodeDropdown />
         <QuickCreatePopover
           menu={quickMenu}
           onPick={(t, pos) => void handlePickAdd(t, pos)}
@@ -752,43 +1062,6 @@ export function Board() {
           onClose={closeQuickMenu}
         />
       </ReactFlow>
-      {selectedNodes.length >= 2 && (
-        <div className="jm-multi-select-bar" role="toolbar" aria-label="多选节点批量操作">
-          <span className="jm-multi-select-bar__count">
-            已选 {selectedNodes.length} 个节点
-          </span>
-          <button
-            type="button"
-            className="jm-multi-select-bar__btn"
-            onClick={() => void groupNodes(selectedNodes.map((n) => n.id))}
-            title="将当前多选节点编入同一分镜组（快捷键 Ctrl/⌘ + G）"
-          >
-            📦 编组分镜 (⌘G)
-          </button>
-          {selectedNodes.some((n) => Boolean(n.data.groupId)) && (
-            <button
-              type="button"
-              className="jm-multi-select-bar__btn"
-              onClick={() => void ungroupNodes(selectedNodes.map((n) => n.id))}
-            >
-              ✕ 解除编组
-            </button>
-          )}
-          <button
-            type="button"
-            className="jm-multi-select-bar__btn jm-multi-select-bar__btn--cyan"
-            onClick={() => {
-              const dbIds = selectedNodes
-                .map((n) => parseInt(n.id, 10))
-                .filter((id) => !isNaN(id));
-              if (dbIds.length > 0) void exportCurrentBoardHuabu(true, dbIds);
-            }}
-            title="仅将当前选中的节点及内部连线导出为独立 .huabu 子工作流包"
-          >
-            📤 导出选中 .huabu
-          </button>
-        </div>
-      )}
       <SequencePlayerModal open={sequenceOpen} onClose={() => setSequenceOpen(false)} />
     </div>
   );

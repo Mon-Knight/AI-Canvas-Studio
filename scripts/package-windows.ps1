@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Build standalone Windows distribution for AI Canvas Studio:
     - Portable zero-install archive: release/AI-Canvas-Studio-v<Version>-win64-portable.zip
@@ -6,7 +6,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Version = "1.1.5",
+    [string]$Version = "1.1.6",
     [string]$PythonExe = "",
     [switch]$SkipNpmCi
 )

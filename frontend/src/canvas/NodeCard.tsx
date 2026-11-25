@@ -14,6 +14,10 @@ import {
 } from "../lib/storyboardPrompt";
 import { splitStoryboardToShotNodes } from "../lib/storyboardSplit";
 import { switchNodeHistoryVersion } from "../lib/quickDerive";
+import {
+  resolveCharacterVoiceDirective,
+  resolveCharacterVoiceLabel,
+} from "../constants/characterVoice";
 
 import {
   IconImage, IconNote, IconStoryboard, IconSubject, IconText, IconVideo, IconVisualAsset,
@@ -713,7 +717,7 @@ function VideoBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }) {
   const count = Math.max(tileCountFor(data), ids.length);
   const processing = data.status === "queued" || data.status === "running";
   const partial = data.status === "done" && Boolean(data.error);
-  const open = (idx: number) => useGenerationStore.getState().openResultViewer(rfId, idx);
+  const open = (idx: number) => useGenerationStore.getState().openResultViewer(rfId, idx, "history");
   return (
     <div className="node-body node-body--video">
       {processing && <div className="jm-video-stage" role="status">
@@ -729,7 +733,7 @@ function VideoBody({ rfId, data }: { rfId: string; data: FlowboardNodeData }) {
             <div key={i} className="video-tile jm-video-empty">
               {partial && (data.slotErrors?.[i] || ids[i] === null) ?
                 <button type="button" className="nodrag" onClick={(e) => { e.stopPropagation(); open(i); }}>此片段未生成 · 查看原因</button>
-                : processing ? "等待视频" : data.status === "error" ? "暂无可播放的视频" : "双击节点，配置视频参数与提示词"}
+                : processing ? "等待视频" : data.status === "error" ? "暂无可播放的视频" : "双击弹出快捷参数框 · 点击设置进入视频展示页"}
             </div>;
         })}
       </div>
@@ -1239,18 +1243,22 @@ export function NodeCard(props: NodeProps<FlowNode>) {
     );
   });
 
-  function handleGenerate(e: React.MouseEvent) {
+  function handleOpenSettings(e: React.MouseEvent) {
     e.stopPropagation();
-    if (llmBusy || isProcessing) return;
-    const initialPrompt =
-      (data.type === "Storyboard" ? data.aiBrief : data.prompt) ?? "";
-    useGenerationStore.getState().openGenerationDialog(props.id, initialPrompt);
+    if (data.type === "prompt") {
+      if (llmBusy) return;
+      useGenerationStore.getState().openGenerationDialog(props.id, data.prompt ?? "");
+      return;
+    }
+    // 点击媒体节点的「设置」按钮：直接进入展示页（视频进 Flow 视频展示页，图片等进结果展示页），
+    // 并默认展开可收回的「参数设置」侧边栏。
+    useGenerationStore.getState().openResultViewer(props.id, 0, "params");
   }
 
   function handlePreview(e: React.MouseEvent) {
     e.stopPropagation();
     if (!downloadable) return;
-    useGenerationStore.getState().openResultViewer(props.id, 0);
+    useGenerationStore.getState().openResultViewer(props.id, 0, "history");
   }
 
   function handleDownload(e: React.MouseEvent) {
@@ -1329,6 +1337,27 @@ export function NodeCard(props: NodeProps<FlowNode>) {
       <div className="node-header">
         <NodeIcon className="node-icon" size={15} />
         <span className="node-title" title={`${title} · #${data.shortId}`}>{title}</span>
+        {data.type === "character" && (() => {
+          const vLabel = resolveCharacterVoiceLabel(data.voicePreset, data.voiceCustom);
+          if (!vLabel) return null;
+          const vDesc = resolveCharacterVoiceDirective(data.voicePreset, data.voiceCustom);
+          return (
+            <span
+              className="jm-node-meta-pill jm-node-meta-pill--voice"
+              title={`已绑定固定音色：${vDesc}`}
+            >
+              🎙️ {vLabel}
+            </span>
+          );
+        })()}
+        {data.type === "video" && data.silentVideo && (
+          <span
+            className="jm-node-meta-pill jm-node-meta-pill--silent"
+            title="已开启「生成静音视频」（全程无对话、无配乐、无环境音效）"
+          >
+            🔇 静音
+          </span>
+        )}
         {(llmBusy || status !== "idle") && (
           <span
             className="jm-node-status"
@@ -1390,10 +1419,22 @@ export function NodeCard(props: NodeProps<FlowNode>) {
               <button
                 type="button"
                 className="node-header__btn"
-                onClick={handleGenerate}
-                aria-label="打开详细参数"
-                title="打开详细参数与提示词（也可双击节点）"
-                disabled={llmBusy || isProcessing}
+                onClick={handleOpenSettings}
+                aria-label={
+                  data.type === "video"
+                    ? "进入视频展示页与侧边参数设置"
+                    : data.type === "prompt"
+                      ? "编辑提示词"
+                      : "进入展示页与侧边参数设置"
+                }
+                title={
+                  data.type === "video"
+                    ? "设置：进入视频展示页与完整参数侧边栏（双击节点可弹出快捷参数下拉框）"
+                    : data.type === "prompt"
+                      ? "编辑提示词"
+                      : "设置：进入展示页与完整参数侧边栏（双击节点可弹出快捷参数下拉框）"
+                }
+                disabled={data.type === "prompt" && llmBusy}
               >
                 <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
                   <path d="M4 6h4m4 0h4M4 14h8" />
